@@ -1,0 +1,10 @@
+# Don't deploy these to Vercel
+taskrunner/
+automation/
+dist/
+build/
+public/downloads/*.exe
+public/downloads/*.dmg
+*.whl
+.env
+playwright-*.whl

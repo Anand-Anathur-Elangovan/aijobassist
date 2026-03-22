@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Python build artifacts
+dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Large binary files — host on GitHub Releases instead
+public/downloads/*.exe
+public/downloads/*.dmg
+public/downloads/*.zip
+
+# Environment variables — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Windows reserved device file (created accidentally)
+nul
+
+# Playwright browser binaries
+playwright-*.whl
+
+# Editor
+.vscode/settings.json
