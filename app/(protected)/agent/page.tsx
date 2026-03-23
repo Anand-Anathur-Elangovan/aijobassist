@@ -87,10 +87,41 @@ export default function AgentPage() {
       title: "Download the Agent",
       icon: "📥",
       content: (
-        <div className="space-y-3">
+        <div className="space-y-4">
           <p className="text-slate-300 text-sm">
-            Download the VantaHire desktop agent for your operating system. It runs in the background and automates job applications.
+            Download the VantaHire desktop agent. It opens a real browser on your computer and automates job applications on LinkedIn and Naukri.
           </p>
+
+          {/* Prerequisites */}
+          <div className="bg-amber-400/5 border border-amber-400/25 rounded-lg p-4 space-y-3">
+            <p className="text-amber-400 text-xs font-bold uppercase tracking-wider">⚠️ Prerequisites — Do this first</p>
+            <div className="space-y-2 text-sm">
+              <div className="flex items-start gap-2">
+                <span className="text-slate-500 mt-0.5 shrink-0">1.</span>
+                <p className="text-slate-300"><strong className="text-white">Windows 10 / 11 (64-bit)</strong> required. macOS coming soon.</p>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-slate-500 mt-0.5 shrink-0">2.</span>
+                <div>
+                  <p className="text-slate-300">After downloading, open <strong className="text-white">Command Prompt</strong> (search &#34;cmd&#34; in Start) and run this <strong className="text-white">one-time</strong> command to install the browser engine:</p>
+                  <div className="mt-2 flex items-center gap-2 bg-slate-950 border border-slate-700 rounded px-3 py-2">
+                    <code className="text-emerald-400 text-xs font-mono flex-1">playwright install chromium</code>
+                    <button
+                      onClick={() => { navigator.clipboard.writeText("playwright install chromium"); }}
+                      className="text-xs text-slate-500 hover:text-slate-300 shrink-0"
+                    >copy</button>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1">This downloads ~130 MB of browser files. Only needed once per machine.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-slate-500 mt-0.5 shrink-0">3.</span>
+                <p className="text-slate-300">Have your <strong className="text-white">LinkedIn</strong> and/or <strong className="text-white">Naukri</strong> login credentials ready — the agent will ask for them on first run.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Download buttons */}
           <div className="flex gap-3">
             <a
               href="https://github.com/Anand-Anathur-Elangovan/aijobassist/releases/download/v1.0.0/VantaHire.exe"
@@ -111,7 +142,7 @@ export default function AgentPage() {
             </a>
           </div>
           <p className="text-xs text-slate-500">
-            v1.0.0 · ~50 MB · No installation needed — just run the file
+            v1.0.0 · ~74 MB · No installation needed — just run the .exe after the one-time Playwright setup above
           </p>
         </div>
       ),
@@ -186,7 +217,7 @@ export default function AgentPage() {
       content: (
         <div className="space-y-3">
           <p className="text-slate-300 text-sm">
-            Run the VantaHire agent and paste your API key when prompted.
+            Run the VantaHire agent and paste your API key when prompted. Make sure you have run <code className="text-emerald-400 text-xs bg-slate-900 px-1.5 py-0.5 rounded">playwright install chromium</code> first (Step 1).
           </p>
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-2">
             <div className="flex items-center gap-2 text-xs text-slate-500 font-mono">
@@ -352,6 +383,18 @@ export default function AgentPage() {
             {
               q: "Does the agent use my quota?",
               a: "Yes — each task counts against your daily plan limits. Super admin accounts have unlimited access.",
+            },
+            {
+              q: "Why do I need to run 'playwright install chromium'?",
+              a: "The agent automates a real Chrome browser to interact with LinkedIn and Naukri. Playwright is the tool that controls it — and it requires you to download the browser engine (Chromium, ~130 MB) once per machine. This is a one-time step and won't affect your existing Chrome browser.",
+            },
+            {
+              q: "What is Semi-Auto Mode?",
+              a: "In Semi-Auto Mode, the agent fills in all job application fields but pauses before each final submit — so you can review and click Apply yourself. In full Auto mode, it submits without pausing.",
+            },
+            {
+              q: "What's the difference between 'Auto Apply' and 'Tailor & Apply'?",
+              a: "Auto Apply submits your existing resume as-is to matching jobs. Tailor & Apply uses AI to rewrite your resume specifically for each job description before applying — it takes longer but gives much better ATS scores.",
             },
           ].map((faq) => (
             <details key={faq.q} className="card group">
