@@ -77,16 +77,19 @@ export async function uploadResume(file: File, userId: string) {
 
 /**
  * Upsert resume metadata into the `resumes` table.
+ * parsed_text is stored as plain text for AI features (smart match, tailoring, etc.)
  */
 export async function saveResumeMeta(
   userId: string,
   fileUrl: string,
-  fileName: string
+  fileName: string,
+  parsedText?: string
 ) {
   return supabase.from("resumes").upsert({
     user_id: userId,
     title: fileName,
     content: { file_url: fileUrl, file_name: fileName },
+    ...(parsedText ? { parsed_text: parsedText } : {}),
   });
 }
 

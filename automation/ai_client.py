@@ -99,12 +99,37 @@ def _inject_mock_keywords(resume_text: str, jd_text: str, summary: str, top_miss
 # Claude Sonnet helper — auto-activated when ANTHROPIC_API_KEY is set
 # ──────────────────────────────────────────────────────────────────────────
 
+# ── Circuit breaker ────────────────────────────────────────────────────────
+# Set to True on permanent API errors (quota exceeded, invalid key, etc.)
+# so all further Claude calls in this process skip immediately.
+_API_DISABLED: bool = False
+
+# Error substrings that indicate a permanent failure (no point retrying)
+_PERMANENT_ERROR_PATTERNS = [
+    "credit balance is too low",
+    "insufficient_quota",
+    "invalid_api_key",
+    "permission_denied",
+    "your api key is invalid",
+    "account has been deactivated",
+    "rate limit",  # treat hard rate limits as circuit-break too
+]
+
+def _is_permanent_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return any(p in msg for p in _PERMANENT_ERROR_PATTERNS)
+
+
 def _has_api_key() -> bool:
-    return bool(_get_api_key())
+    return bool(_get_api_key()) and not _API_DISABLED
 
 
 def _call_claude(prompt: str, max_tokens: int = 4096) -> dict:
     """Call Claude Sonnet and parse the JSON response."""
+    global _API_DISABLED
+    if _API_DISABLED:
+        raise RuntimeError("Claude disabled for this run (permanent API error)")
+
     try:
         import anthropic
     except ImportError:
@@ -114,17 +139,23 @@ def _call_claude(prompt: str, max_tokens: int = 4096) -> dict:
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set")
 
-    client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = msg.content[0].text.strip()
-    # Strip markdown fences if present
-    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"\s*```$", "", raw)
-    return json.loads(raw)
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        # Strip markdown fences if present
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw)
+        return json.loads(raw)
+    except Exception as e:
+        if _is_permanent_error(e):
+            _API_DISABLED = True
+            print(f"  [AI] ⚡ Permanent API error — disabling Claude for this run: {e}")
+        raise
 
 
 def call_claude(prompt: str, max_tokens: int = 1024) -> str:
@@ -133,6 +164,10 @@ def call_claude(prompt: str, max_tokens: int = 1024) -> str:
     Used by gmail_client.py and other modules that need free-form text.
     Falls back to prompt-echo on error.
     """
+    global _API_DISABLED
+    if _API_DISABLED:
+        return ""
+
     try:
         import anthropic
         api_key = _get_api_key()
@@ -146,7 +181,11 @@ def call_claude(prompt: str, max_tokens: int = 1024) -> str:
         )
         return msg.content[0].text.strip()
     except Exception as e:
-        print(f"  [AI] call_claude failed: {e}")
+        if _is_permanent_error(e):
+            _API_DISABLED = True
+            print(f"  [AI] ⚡ Permanent API error — disabling Claude for this run: {e}")
+        else:
+            print(f"  [AI] call_claude failed: {e}")
         return ""
 
 
@@ -482,3 +521,214 @@ Best regards"""
         ),
         "email_subject":  f"Application for {role_str} — {comp}",
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 6. analyze_and_fill_form — Claude-powered external ATS form filler
+# ══════════════════════════════════════════════════════════════════════════
+def analyze_and_fill_form(form_html: str, user_profile: dict) -> list[dict]:
+    """
+    Given raw HTML of a company career / ATS page and the user's profile,
+    use Claude to figure out which CSS selectors to fill and with what values.
+
+    Returns a list of actions in order:
+      [
+        {"action": "fill",   "selector": "input[name='email']", "value": "a@b.com"},
+        {"action": "fill",   "selector": "textarea[name='cover']", "value": "Dear..."},
+        {"action": "select", "selector": "select[name='exp']",  "value": "1-3 years"},
+        {"action": "click",  "selector": "button[type='submit']"},
+      ]
+
+    Falls back to an empty list (caller will use dumb fill) if Claude is unavailable.
+    """
+    if not _has_api_key():
+        return []
+
+    name  = user_profile.get("full_name", "")
+    email = user_profile.get("email", "")
+    phone = user_profile.get("phone", "")
+    years = user_profile.get("years_experience", 2)
+    cover = user_profile.get("cover_note", "I am very interested in this role.")
+
+    # Trim HTML — keep only form/input/label/button/select/textarea tags, max ~4000 chars
+    # Remove script/style blocks first to save tokens
+    form_html_clean = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", form_html, flags=re.DOTALL | re.IGNORECASE)
+    form_html_clean = re.sub(r"<!--.*?-->", "", form_html_clean, flags=re.DOTALL)
+    # Keep only lines with form-relevant tags
+    relevant_lines = [
+        l for l in form_html_clean.splitlines()
+        if re.search(r"<(input|select|textarea|label|button|form)\b", l, re.IGNORECASE)
+    ]
+    trimmed_html = "\n".join(relevant_lines)[:4000]
+
+    prompt = f"""You are filling out a job application form on a company career page.
+User profile:
+- Name: {name}
+- Email: {email}
+- Phone: {phone}
+- Years of experience: {years}
+- Cover note: {cover}
+
+Analyse the HTML below and return a JSON array of actions to fill the form.
+Each action object must have:
+  "action": "fill" | "select" | "click"
+  "selector": a valid CSS selector for that element (prefer id > name > placeholder attrs)
+  "value": the string to enter (omit for "click" actions)
+
+Rules:
+- Only include fields that are visible and would accept user input
+- Skip file upload inputs (we handle those separately)
+- The last action should be clicking the submit button if one exists
+- Return ONLY the JSON array, no prose, no markdown fences
+
+HTML:
+{trimmed_html}"""
+
+    try:
+        result = _call_claude(prompt, max_tokens=1500)
+        if isinstance(result, list):
+            return result
+        return []
+    except Exception as e:
+        print(f"  [AI] analyze_and_fill_form failed: {e}")
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 7. claude_answer_question — pick the best answer for a form question
+# ══════════════════════════════════════════════════════════════════════════
+def claude_answer_question(
+    question_text: str,
+    options: list[str],
+    resume_summary: str = "",
+    context: str = "",
+) -> str:
+    """
+    Given a single application question and its available options (or empty list for
+    free-text), use Claude to choose or compose the best answer.
+
+    Returns a string — either one of the provided `options` (exact match) or a
+    composed free-text answer.  Falls back to the first option (or empty string)
+    if Claude is unavailable.
+    """
+    if not _has_api_key():
+        return options[0] if options else ""
+
+    opts_block = ""
+    if options:
+        opts_block = "\nAvailable options (you MUST pick one verbatim):\n" + "\n".join(f"- {o}" for o in options)
+
+    prompt = f"""You are helping a job applicant answer an application screening question truthfully and professionally.
+
+Applicant background:
+{resume_summary or "(not provided)"}
+
+{f"Application context: {context}" if context else ""}
+
+Question: {question_text}
+{opts_block}
+
+{"Return ONLY the exact option text — no other words." if options else "Write a concise, honest 1-2 sentence answer. Return ONLY the answer text."}"""
+
+    try:
+        raw = call_claude(prompt, max_tokens=200)
+        if options:
+            # Find the closest matching option
+            raw_lower = raw.strip().lower()
+            for opt in options:
+                if opt.strip().lower() in raw_lower or raw_lower in opt.strip().lower():
+                    return opt
+            # Exact prefix match fallback
+            for opt in options:
+                if raw_lower.startswith(opt.strip().lower()[:20]):
+                    return opt
+            return options[0]  # last resort
+        return raw.strip()
+    except Exception as e:
+        print(f"  [AI] claude_answer_question failed: {e}")
+        return options[0] if options else ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 8. interview_prep — generate interview questions + answers from JD
+# ══════════════════════════════════════════════════════════════════════════
+def interview_prep(jd_text: str, resume_text: str = "") -> dict:
+    """
+    Given a JD (and optional resume for personalisation), generate likely interview
+    questions with suggested answers grouped by category.
+
+    Returns:
+    {
+      "questions": [
+        { "category": "Technical|Behavioral|Situational|Role-specific",
+          "question": "...",
+          "answer":   "..." },
+        ...
+      ],
+      "key_topics": ["..."],
+      "preparation_tips": ["..."]
+    }
+    """
+    if _has_api_key():
+        resume_section = f"\nCandidate Resume:\n{resume_text[:2000]}" if resume_text else ""
+        prompt = f"""You are an expert interview coach preparing a candidate for a job interview.
+
+Job Description:
+{jd_text[:4000]}
+{resume_section}
+
+Generate 10 highly likely interview questions for this role with strong suggested answers.
+Cover: Technical skills, Behavioral (STAR format), Situational, and Role-specific questions.
+
+Return ONLY valid JSON, no prose:
+{{
+  "questions": [
+    {{
+      "category": "<Technical|Behavioral|Situational|Role-specific>",
+      "question": "<interview question>",
+      "answer":   "<suggested answer 3-6 sentences, use STAR format for behavioral>"
+    }}
+  ],
+  "key_topics": ["<topic to prepare>"],
+  "preparation_tips": ["<actionable tip>"]
+}}"""
+        try:
+            return _call_claude(prompt, max_tokens=5000)
+        except Exception:
+            pass  # fall through to mock
+
+    # Mock fallback
+    jd_skills = _extract_skills(jd_text)[:5]
+    skill_list = ", ".join(jd_skills) or "core skills"
+    return {
+        "questions": [
+            {
+                "category": "Technical",
+                "question": f"Can you walk me through your experience with {jd_skills[0] if jd_skills else 'our tech stack'}?",
+                "answer": f"I have hands-on experience with {skill_list}. In my previous role, I applied these skills to build production systems, focusing on performance and maintainability.",
+            },
+            {
+                "category": "Behavioral",
+                "question": "Tell me about a challenging project you delivered under pressure.",
+                "answer": "Situation: We had a critical production incident. Task: I needed to identify the root cause and restore service. Action: I led the debugging session, identified a memory leak, and deployed a fix within 2 hours. Result: Zero data loss and a post-mortem that prevented recurrence.",
+            },
+            {
+                "category": "Situational",
+                "question": "How would you handle disagreement with a technical decision made by your team lead?",
+                "answer": "I would first make sure I fully understand their reasoning, then present my concerns with data and concrete examples. If we still disagree, I'd defer to their decision while documenting my concerns for future reference.",
+            },
+            {
+                "category": "Role-specific",
+                "question": "What do you know about our company and why do you want to join us?",
+                "answer": "I researched your product and am impressed by your approach to solving this problem. I want to contribute my skills to this mission and grow with a team that values engineering excellence.",
+            },
+        ],
+        "key_topics": jd_skills[:5],
+        "preparation_tips": [
+            "Research the company's recent news and product direction",
+            "Prepare 3 STAR (Situation-Task-Action-Result) stories from your experience",
+            f"Brush up on {jd_skills[0] if jd_skills else 'core technical skills'} fundamentals",
+            "Prepare 3 thoughtful questions to ask the interviewer",
+        ],
+    }
+

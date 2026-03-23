@@ -5,7 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import { uploadResume, saveResumeMeta, getResumes } from "@/lib/supabase";
 import { useEffect } from "react";
 
-type ResumeRow = { id: string; title: string; content: { file_url: string; file_name: string }; updated_at: string; created_at: string };
+type ResumeRow = { id: string; title: string; content: { file_url: string; file_name: string }; updated_at: string; created_at: string; parsed_text?: string | null };
 
 type UploadState = "idle" | "uploading" | "success" | "error";
 
@@ -18,6 +18,7 @@ export default function UploadResumePage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [resumes, setResumes] = useState<ResumeRow[]>([]);
   const [loadingResumes, setLoadingResumes] = useState(true);
+  const [reparsingId, setReparsingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchResumes = useCallback(async () => {
@@ -31,12 +32,35 @@ export default function UploadResumePage() {
     fetchResumes();
   }, [fetchResumes]);
 
+  const handleReparse = async (r: ResumeRow) => {
+    if (!user || reparsingId) return;
+    setReparsingId(r.id);
+    try {
+      const res = await fetch("/api/ai/parse-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_url: r.content.file_url, user_id: user.id, resume_id: r.id }),
+      });
+      if (res.ok) {
+        await fetchResumes();
+      }
+    } catch {
+      // non-fatal
+    } finally {
+      setReparsingId(null);
+    }
+  };
+
   const handleFile = (file: File) => {
-    // Validate type
-    const allowedTypes = ["application/pdf", "application/msword",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
+    // Validate type — PDF, Word (.doc/.docx), and plain text (.txt)
+    const allowedTypes = [
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain",
+    ];
     if (!allowedTypes.includes(file.type)) {
-      setErrorMsg("Only PDF and Word documents are accepted.");
+      setErrorMsg("Only PDF, Word (.doc/.docx), and plain text (.txt) files are accepted.");
       return;
     }
     // Validate size (5 MB)
@@ -70,7 +94,23 @@ export default function UploadResumePage() {
       return;
     }
 
-    const { error: metaError } = await saveResumeMeta(user.id, url, selectedFile.name);
+    // Extract resume text server-side (PDF / DOCX → plain text for AI features)
+    let parsedText: string | undefined;
+    try {
+      const parseRes = await fetch("/api/ai/parse-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_url: url, user_id: user.id }),
+      });
+      if (parseRes.ok) {
+        const data = await parseRes.json();
+        parsedText = data.parsed_text as string;
+      }
+    } catch {
+      // Non-fatal — AI features will gracefully degrade if text extraction fails
+    }
+
+    const { error: metaError } = await saveResumeMeta(user.id, url, selectedFile.name, parsedText);
     if (metaError) {
       setErrorMsg(metaError.message);
       setUploadState("error");
@@ -100,7 +140,7 @@ export default function UploadResumePage() {
           Upload your <span className="gradient-text">resume</span>
         </h1>
         <p className="text-slate-400 font-body">
-          PDF or Word documents up to 5 MB. Stored securely in Supabase Storage.
+          PDF, Word (.doc / .docx), or plain text (.txt) — up to 5 MB. Stored securely in Supabase Storage.
         </p>
       </div>
 
@@ -211,12 +251,27 @@ export default function UploadResumePage() {
               <div key={r.id} className="card py-3 flex items-center justify-between group">
                 <div className="flex items-center gap-3 min-w-0">
                   <span className="text-amber-400 text-lg flex-shrink-0">📄</span>
-                  <span className="font-body text-sm text-white truncate">{r.title}</span>
+                  <div className="min-w-0">
+                    <span className="font-body text-sm text-white truncate block">{r.title}</span>
+                    {r.parsed_text
+                      ? <span className="font-mono text-[10px] text-emerald-500">✓ AI context ready</span>
+                      : <span className="font-mono text-[10px] text-slate-500">No AI context</span>
+                    }
+                  </div>
                 </div>
-                <div className="flex items-center gap-4 ml-4 flex-shrink-0">
+                <div className="flex items-center gap-3 ml-4 flex-shrink-0">
                   <span className="font-mono text-xs text-slate-500">
                     {new Date(r.created_at).toLocaleDateString()}
                   </span>
+                  {!r.parsed_text && (
+                    <button
+                      onClick={() => handleReparse(r)}
+                      disabled={reparsingId === r.id}
+                      className="font-body text-xs text-violet-400 hover:text-violet-300 border border-violet-400/30 rounded px-2 py-0.5 transition-colors disabled:opacity-50"
+                    >
+                      {reparsingId === r.id ? "Parsing…" : "Re-parse AI"}
+                    </button>
+                  )}
                   <a
                     href={r.content?.file_url}
                     target="_blank"

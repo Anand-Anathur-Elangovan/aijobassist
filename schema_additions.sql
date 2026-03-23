@@ -5,6 +5,41 @@
 
 
 -- ============================================================
+-- JOB HISTORY
+-- Tracks every job URL the bot has already seen (applied OR
+-- skipped) so future runs skip them automatically.
+-- Rows older than 30 days are logically expired.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS job_history (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  platform    TEXT NOT NULL,              -- 'linkedin' | 'naukri'
+  job_url     TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'skipped',  -- 'applied' | 'skipped'
+  skip_reason TEXT NOT NULL DEFAULT 'skipped',
+    -- 'applied'        → always skip for 30 days
+    -- 'skipped'        → generic failure (form error etc.), skip for 30 days
+    -- 'smart_match'    → below score threshold; re-try if resume fingerprint changes
+    -- 'mode_skip'      → skipped only because of apply_types mode mismatch;
+    --                    NOT re-skipped when mode changes
+  metadata    JSONB NOT NULL DEFAULT '{}',
+    -- for smart_match: { "resume_fingerprint": "<hash>" }
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, platform, job_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_history_user_platform
+  ON job_history(user_id, platform);
+CREATE INDEX IF NOT EXISTS idx_job_history_created_at
+  ON job_history(created_at);
+
+-- RLS: users only see their own rows
+ALTER TABLE job_history ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_only" ON job_history;
+CREATE POLICY "owner_only" ON job_history FOR ALL USING (auth.uid() = user_id);
+
+
+-- ============================================================
 -- RESUME VERSIONS
 -- Stores AI-tailored versions of a resume (one per job applied)
 -- e.g. "Amazon_SDE_v1", "Zoho_Backend_v2"

@@ -8,6 +8,7 @@ import { supabase } from "@/lib/supabase";
 type StageCount = { stage: string; count: number };
 type CompanyCount = { company: string; count: number };
 type DailyCount = { date: string; count: number };
+type PlatformCount = { platform: string; count: number };
 
 type Stats = {
   total:           number;
@@ -17,6 +18,7 @@ type Stats = {
   pending:         number;
   successRate:     number;
   avgResponseDays: number;
+  avgMatchScore:   number | null;
 };
 
 // ── Bar component ─────────────────────────────────────────────────────────
@@ -65,6 +67,7 @@ export default function AnalyticsPage() {
   const [stageCounts, setStageCounts] = useState<StageCount[]>([]);
   const [topCompanies, setTopCompanies] = useState<CompanyCount[]>([]);
   const [dailyCounts, setDailyCounts] = useState<DailyCount[]>([]);
+  const [platformCounts, setPlatformCounts] = useState<PlatformCount[]>([]);
   const [loading,    setLoading ] = useState(true);
 
   const load = useCallback(async () => {
@@ -72,7 +75,7 @@ export default function AnalyticsPage() {
 
     const { data: apps } = await supabase
       .from("applications")
-      .select("id, stage, applied_at, jobs(company)")
+      .select("id, stage, applied_at, ats_score, jobs(company, url)")
       .eq("user_id", user.id);
 
     if (!apps) { setLoading(false); return; }
@@ -98,6 +101,21 @@ export default function AnalyticsPage() {
         .map(([company, count]) => ({ company, count })),
     );
 
+    // Platform breakdown — inferred from job URL
+    const platMap: Record<string, number> = {};
+    apps.forEach((a) => {
+      const url = (a.jobs as any)?.url ?? "";
+      const platform = url.includes("linkedin.com")
+        ? "LinkedIn"
+        : url.includes("naukri.com")
+        ? "Naukri"
+        : "Other";
+      platMap[platform] = (platMap[platform] || 0) + 1;
+    });
+    setPlatformCounts(
+      Object.entries(platMap).map(([platform, count]) => ({ platform, count }))
+    );
+
     // Daily counts — last 7 days
     const days: DailyCount[] = [];
     for (let i = 6; i >= 0; i--) {
@@ -116,7 +134,11 @@ export default function AnalyticsPage() {
     const rejected   = apps.filter((a) => a.stage === "REJECTED").length;
     const pending    = apps.filter((a) => ["APPLIED", "SCREENING"].includes(a.stage)).length;
     const successRate = total > 0 ? Math.round((interviews / total) * 100) : 0;
-    setStats({ total, interviews, offers, rejected, pending, successRate, avgResponseDays: 5 });
+    const scoresWithValues = apps.filter((a) => a.ats_score != null).map((a) => a.ats_score as number);
+    const avgMatchScore = scoresWithValues.length > 0
+      ? Math.round(scoresWithValues.reduce((s, v) => s + v, 0) / scoresWithValues.length)
+      : null;
+    setStats({ total, interviews, offers, rejected, pending, successRate, avgResponseDays: 5, avgMatchScore });
     setLoading(false);
   }, [user]);
 
@@ -130,6 +152,9 @@ export default function AnalyticsPage() {
         { label: "Rejected",         value: stats.rejected.toString(),    color: "text-red-400",       sub: "keep going" },
         { label: "Pending",          value: stats.pending.toString(),     color: "text-yellow-400",    sub: "waiting for response" },
         { label: "Interview Rate",   value: `${stats.successRate}%`,      color: "text-amber-400",     sub: "applications → interview" },
+        ...(stats.avgMatchScore !== null
+          ? [{ label: "Avg Match Score", value: `${stats.avgMatchScore}%`, color: "text-violet-400", sub: "AI smart match" }]
+          : []),
       ]
     : [];
 
@@ -220,6 +245,25 @@ export default function AnalyticsPage() {
               ))}
             </div>
           </div>
+
+          {/* Platform breakdown */}
+          {platformCounts.length > 0 && (
+            <div className="card">
+              <p className="font-mono text-xs text-slate-400 uppercase tracking-wider mb-3">By Platform</p>
+              <div className="flex gap-4 flex-wrap">
+                {platformCounts.map((p) => (
+                  <div key={p.platform} className="flex items-center gap-2">
+                    <span className={`w-2.5 h-2.5 rounded-full ${
+                      p.platform === "LinkedIn" ? "bg-blue-400" :
+                      p.platform === "Naukri"   ? "bg-amber-400" : "bg-slate-500"
+                    }`} />
+                    <span className="font-body text-sm text-slate-300">{p.platform}</span>
+                    <span className="font-mono text-xs text-slate-500">{p.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Tips based on data */}
           <div className="card bg-amber-400/5 border-amber-400/20">

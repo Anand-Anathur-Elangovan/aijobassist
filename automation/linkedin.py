@@ -25,6 +25,38 @@ MAX_APPLY          = 5
 
 
 # ──────────────────────────────────────────────────────────────
+# Retry helpers
+# ──────────────────────────────────────────────────────────────
+def _safe_goto(page: Page, url: str, max_retries: int = 3) -> bool:
+    """Navigate to url with exponential backoff. Returns True on success."""
+    for attempt in range(max_retries):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            return True
+        except Exception as e:
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            print(f"  [LINKEDIN] Navigation failed (attempt {attempt+1}/{max_retries}): {e} — retrying in {wait}s")
+            time.sleep(wait)
+    return False
+
+
+def _retry_click(page: Page, selector: str, max_retries: int = 3) -> bool:
+    """Click selector with exponential backoff. Returns True on success."""
+    for attempt in range(max_retries):
+        try:
+            btn = page.locator(selector).first
+            if btn.is_visible(timeout=3000):
+                btn.click()
+                return True
+        except Exception as e:
+            wait = 2 ** attempt
+            if attempt < max_retries - 1:
+                print(f"  [LINKEDIN] Click retry {attempt+1}/{max_retries}: {e}")
+                time.sleep(wait)
+    return False
+
+
+# ──────────────────────────────────────────────────────────────
 # Live-logging helper — no-ops gracefully if task_id absent
 # ──────────────────────────────────────────────────────────────
 def _log(task_input: dict, msg: str, level: str = "info") -> None:
@@ -143,8 +175,24 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
         task_input = {}
 
     keywords  = task_input.get("keywords", "Software Engineer")
-    location  = task_input.get("location", "Remote")
+    location  = task_input.get("location", "")
     max_apply = int(task_input.get("max_apply", MAX_APPLY))
+
+    # ── Enrich keywords with top skills from the resume ────────
+    resume_text_raw = task_input.get("resume_text", "").strip()
+    if resume_text_raw and keywords:
+        try:
+            from automation.ai_client import analyze_resume
+            resume_info = analyze_resume(resume_text_raw)
+            top_skills  = resume_info.get("skills", [])[:3]
+            # Append skills only if not already present in keywords
+            kw_lower = keywords.lower()
+            additions = [s for s in top_skills if s.lower() not in kw_lower]
+            if additions:
+                keywords = f"{keywords} {' '.join(additions)}"
+                print(f"  [LINKEDIN] Keywords enriched from resume: {keywords}")
+        except Exception:
+            pass
 
     # ── Download resume once for the whole run ─────────────────
     # tailor_resume_for_job needs a local file path (or raw text)
@@ -193,25 +241,56 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 return {"applied_count": 0, "skipped_count": 0, "message": "Login failed or cancelled"}
 
             # ── STEP 2: Search jobs ────────────────────────────
+            # Build keyword list (up to 3 sequential keywords)
+            _li_kw_list = [
+                k.strip() for k in [
+                    task_input.get("keywords", ""),
+                    task_input.get("keywords2", ""),
+                    task_input.get("keywords3", ""),
+                ] if k.strip()
+            ]
+            if not _li_kw_list:
+                _li_kw_list = ["Software Engineer"]
+
+            # Compute resume fingerprint for smart_match invalidation
+            import hashlib as _li_hashlib
+            _li_resume_fp = ""
+            _li_resume_text_raw = task_input.get("resume_text", "")
+            if _li_resume_text_raw:
+                _li_resume_fp = _li_hashlib.md5(_li_resume_text_raw[:500].encode()).hexdigest()[:16]
+            elif task_input.get("resume_url", ""):
+                _li_resume_fp = _li_hashlib.md5(task_input["resume_url"].encode()).hexdigest()[:16]
+
             favorite_companies = task_input.get("favorite_companies", [])
             # List of (job_url, company_hint) tuples
             all_jobs: list[tuple[str, str]] = []
 
+            # Build location list — split comma-separated string; empty = anywhere
+            _li_loc_list = [
+                l.strip() for l in task_input.get("location", "").split(",") if l.strip()
+            ] or [""]
+
             if favorite_companies:
                 _log(task_input, f"🏢 Targeting {len(favorite_companies)} favourite companies: {', '.join(favorite_companies)}")
                 for company in favorite_companies:
-                    _log(task_input, f"🔍 Searching '{keywords}' at {company}…")
-                    company_jobs = _search_jobs(page, f"{keywords} {company}", location)
-                    _log(task_input, f"  Found {len(company_jobs)} jobs at {company}", "success")
-                    for url in company_jobs:
-                        all_jobs.append((url, company))
-                    if len(all_jobs) >= max_apply:
+                    for _kw in _li_kw_list:
+                        for _li_loc in _li_loc_list:
+                            _loc_tag = f" in '{_li_loc}'" if _li_loc else ""
+                            _log(task_input, f"🔍 Searching '{_kw}' at {company}{_loc_tag}…")
+                            company_jobs = _search_jobs(page, f"{_kw} {company}", _li_loc, task_input)
+                            _log(task_input, f"  Found {len(company_jobs)} jobs at {company}{_loc_tag}", "success")
+                            for url in company_jobs:
+                                all_jobs.append((url, company))
+                    if len(all_jobs) >= max_apply * 5:
                         break
             else:
-                _log(task_input, f"Searching for '{keywords}' in '{location}'…")
-                general_jobs = _search_jobs(page, keywords, location)
-                _log(task_input, f"Found {len(general_jobs)} Easy Apply jobs", "success")
-                all_jobs = [(url, "") for url in general_jobs]
+                for _kw in _li_kw_list:
+                    for _li_loc in _li_loc_list:
+                        _loc_tag = f" in '{_li_loc}'" if _li_loc else " (anywhere)"
+                        _log(task_input, f"Searching for '{_kw}'{_loc_tag}…")
+                        general_jobs = _search_jobs(page, _kw, _li_loc, task_input)
+                        _log(task_input, f"Found {len(general_jobs)} Easy Apply jobs for '{_kw}'{_loc_tag}", "success")
+                        all_jobs.extend([(url, "") for url in general_jobs])
 
             # Deduplicate URLs while preserving company order
             seen_urls: set[str] = set()
@@ -221,13 +300,36 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     seen_urls.add(url)
                     unique_jobs.append((url, company_hint))
 
+            # ── Filter URLs already seen in previous runs (applied OR skipped) ──
+            _li_user_id = task_input.get("user_id", "")
+            _li_apply_types = task_input.get("apply_types", "both")
+            _li_seen_urls: set = set()
+            if _li_user_id:
+                try:
+                    import sys as _sys_li
+                    _sys_li.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+                    from api_client import fetch_seen_jobs as _li_fetch_seen
+                    _li_seen_urls = _li_fetch_seen(
+                        _li_user_id, "linkedin",
+                        apply_types=_li_apply_types,
+                        resume_fingerprint=_li_resume_fp,
+                    )
+                    _li_already_seen = sum(1 for url, _ in unique_jobs if url in _li_seen_urls)
+                    if _li_already_seen:
+                        _log(task_input, f"Skipping {_li_already_seen} previously-seen job(s) (30-day history)", "warn")
+                except Exception as _li_se:
+                    _log(task_input, f"Job history unavailable ({_li_se})", "warn")
+            unique_jobs = [(url, hint) for url, hint in unique_jobs if url not in _li_seen_urls]
+
             _set_progress(task_input, 5)
 
             # ── STEP 3: Apply ──────────────────────────────────
             applied  = 0
             skipped  = 0
-            total    = min(len(unique_jobs), max_apply)
-            for idx, (job_url, company_hint) in enumerate(unique_jobs[:max_apply]):
+            total    = len(unique_jobs)
+            for idx, (job_url, company_hint) in enumerate(unique_jobs):
+                if applied >= max_apply:
+                    break
                 # ── Check pause / stop / live custom prompt ────
                 ctrl = _check_control(task_input)
                 if ctrl.get("stop_requested"):
@@ -245,19 +347,34 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     task_input["company"] = company_hint
 
                 # Progress: 5 % base + up to 90 % for applications
-                progress = 5 + int((idx / total) * 90) if total else 5
+                progress = 5 + int((applied / max_apply) * 90) if max_apply else 5
                 company_tag = f" [{company_hint}]" if company_hint else ""
                 _set_progress(task_input, progress, job_url)
-                _log(task_input, f"[{idx+1}/{total}]{company_tag} Opening {job_url}")
+                _log(task_input, f"[{applied+1}/{max_apply}]{company_tag} Opening {job_url}")
 
                 success = _apply_to_job(page, job_url, task_input)
+                # Record to job history DB (won't revisit for 30 days)
+                if _li_user_id:
+                    try:
+                        from api_client import record_seen_job as _li_record_seen
+                        _li_skip_meta: dict = {}
+                        if _li_resume_fp:
+                            _li_skip_meta["resume_fingerprint"] = _li_resume_fp
+                        _li_record_seen(
+                            _li_user_id, "linkedin", job_url,
+                            status="applied" if success else "skipped",
+                            skip_reason="applied" if success else "skipped",
+                            metadata=_li_skip_meta,
+                        )
+                    except Exception:
+                        pass
                 if success:
                     applied += 1
-                    _log(task_input, f"✅ Applied ({applied}/{total})", "success")
+                    _log(task_input, f"✅ Applied ({applied}/{max_apply})", "success")
                     _record_application(task_input, job_url, company_hint)
                 else:
                     skipped += 1
-                    _log(task_input, f"⏭  Skipped ({skipped} total)", "warn")
+                    _log(task_input, f"⏭  Skipped ({skipped} total) — trying next job", "warn")
 
             _set_progress(task_input, 100)
             _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success")
@@ -545,13 +662,24 @@ def _fill_additional_questions(page: Page, task_input: dict):
                         inp.fill(sal)
 
                 else:
-                    # Unknown numeric field — use a safe default respecting min constraint
+                    # Unknown field — try Claude first, then safe numeric default
                     input_type = inp.get_attribute("type") or "text"
                     if input_type == "number" or min_val is not None:
                         fill_val = (min_val or 0) + 1
                         inp.fill(str(int(fill_val)))
                         print(f"  [LINKEDIN] Filled unknown numeric '{label_text[:60]}' = {fill_val}")
-                    # Leave unknown text fields empty
+                    elif input_type == "text" and label_text:
+                        # Use Claude to compose a free-text answer
+                        try:
+                            from automation.ai_client import claude_answer_question
+                            resume_summary = task_input.get("resume_text", "")[:500]
+                            answer = claude_answer_question(label_text, [], resume_summary)
+                            if answer:
+                                inp.fill(answer)
+                                print(f"  [LINKEDIN] Claude filled text '{label_text[:60]}' = {answer[:60]}")
+                        except Exception:
+                            pass
+                    # Leave truly unknown fields empty
 
             except Exception:
                 pass
@@ -559,10 +687,24 @@ def _fill_additional_questions(page: Page, task_input: dict):
         pass
 
     # ── Textarea fields ────────────────────────────────────────
-    cover_note = task_input.get(
-        "cover_note",
-        "I am very interested in this role and believe my skills and experience align well with the requirements."
-    )
+    # Use AI-generated cover note if resume text + JD text are available
+    cover_note = task_input.get("cover_note", "")
+    if not cover_note:
+        resume_text_for_cover = task_input.get("resume_text", "")
+        jd_text_for_cover     = task_input.get("_current_jd_text", "")
+        company               = task_input.get("company", "")
+        role                  = task_input.get("keywords", "")
+        if resume_text_for_cover and jd_text_for_cover:
+            try:
+                from automation.ai_client import generate_cover_letter
+                cl_result  = generate_cover_letter(resume_text_for_cover, jd_text_for_cover, company, role)
+                cover_note = cl_result.get("intro_message") or cl_result.get("cover_letter", "")
+                if cover_note:
+                    print("  [LINKEDIN] AI cover note generated")
+            except Exception:
+                pass
+    if not cover_note:
+        cover_note = "I am very interested in this role and believe my skills and experience align well with the requirements."
     try:
         textareas = page.locator("textarea:visible").all()
         for ta in textareas:
@@ -833,11 +975,35 @@ def _fill_additional_questions(page: Page, task_input: dict):
 
                 # Fallback: first valid non-None option
                 else:
-                    for i, v in enumerate(opt_vals):
-                        if v.lower() not in _SKIP_VALS:
-                            sel.select_option(v)
-                            print(f"  [LINKEDIN] Dropdown fallback '{question_text[:50]}' → '{opt_texts[i]}'")
-                            break
+                    # Try Claude for ambiguous questions before falling back to first-option
+                    if question_text and len(opts) > 1:
+                        non_blank = [o for o in opt_texts if o.lower() not in _SKIP_VALS]
+                        if non_blank:
+                            try:
+                                from automation.ai_client import claude_answer_question
+                                resume_summary = task_input.get("resume_text", "")[:500]
+                                answer = claude_answer_question(question_text, non_blank, resume_summary)
+                                matched = False
+                                for i, t in enumerate(opt_texts):
+                                    if t == answer.lower() and opt_vals[i].lower() not in _SKIP_VALS:
+                                        sel.select_option(opt_vals[i])
+                                        print(f"  [LINKEDIN] Claude dropdown '{question_text[:50]}' → '{t}'")
+                                        matched = True
+                                        break
+                                if not matched:
+                                    raise ValueError("no match")
+                            except Exception:
+                                for i, v in enumerate(opt_vals):
+                                    if v.lower() not in _SKIP_VALS:
+                                        sel.select_option(v)
+                                        print(f"  [LINKEDIN] Dropdown fallback '{question_text[:50]}' → '{opt_texts[i]}'")
+                                        break
+                    else:
+                        for i, v in enumerate(opt_vals):
+                            if v.lower() not in _SKIP_VALS:
+                                sel.select_option(v)
+                                print(f"  [LINKEDIN] Dropdown fallback '{question_text[:50]}' → '{opt_texts[i]}'")
+                                break
 
             except Exception:
                 pass
@@ -882,12 +1048,14 @@ def _record_application(task_input: dict, job_url: str, company_hint: str = "") 
         company = company_hint or task_input.get("company", "Unknown Company")
         role    = task_input.get("keywords", "Position")
         followup_days = int(task_input.get("followup_days", 3))
+        ats_score = task_input.get("_last_match_score")
         record_application(
             user_id=user_id,
             company=company,
             role=role,
             job_url=job_url,
             followup_days=followup_days,
+            ats_score=int(ats_score) if ats_score is not None else None,
         )
     except Exception as e:
         print(f"  [LINKEDIN] Could not record application: {e}")
@@ -917,44 +1085,109 @@ def _dismiss_post_apply_modal(page: Page):
             pass
 
 
-def _search_jobs(page: Page, keywords: str, location: str) -> list[str]:
+def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = None) -> list[str]:
     """
-    Navigate to the jobs search URL directly with keywords, location,
-    and Easy Apply filter, then return a list of job detail URLs.
+    Navigate to the jobs search URL with keywords, location, Easy Apply filter,
+    and any user-specified filters, then return a deduplicated list of job detail URLs.
+    Paginates through multiple pages until enough jobs are gathered.
     """
     import urllib.parse
+    task_input = task_input or {}
     print(f"  [LINKEDIN] Searching: '{keywords}' in '{location}'")
 
-    # Navigate directly to search URL — no need to interact with search boxes
-    params = urllib.parse.urlencode({
+    # ── Build filter params ─────────────────────────────────────────────
+    params: dict[str, str] = {
         "keywords": keywords,
         "location": location,
-        "f_AL": "true",   # Easy Apply filter
-        "sortBy": "DD",   # Most recent
-    })
-    search_url = f"https://www.linkedin.com/jobs/search/?{params}"
-    print(f"  [LINKEDIN] URL: {search_url}")
-    page.goto(search_url, wait_until="domcontentloaded")
-    time.sleep(NAV_WAIT + 2)
+        "f_AL":     "true",   # Easy Apply only
+        "sortBy":   "DD",     # Most recent
+    }
 
-    # Collect job card links — try multiple selectors LinkedIn uses
-    job_links = []
-    try:
-        # Selector 1: standard job card links
-        cards = page.locator("a.job-card-container__link, a.job-card-list__title, a[href*='/jobs/view/']").all()
-        for card in cards:
-            href = card.get_attribute("href") or ""
-            if "/jobs/view/" in href:
-                # Make absolute and strip query params
-                if href.startswith("/"):
-                    href = "https://www.linkedin.com" + href
-                full = href.split("?")[0]
-                if full not in job_links:
-                    job_links.append(full)
-    except Exception as e:
-        print(f"  [LINKEDIN] Could not collect job links: {e}")
+    # Date posted: f_TPR  (r86400 = last 24h, r604800 = last week, r2592000 = last month)
+    _DATE_MAP = {
+        "past24h":   "r86400",
+        "pastWeek":  "r604800",
+        "pastMonth": "r2592000",
+    }
+    date_posted = task_input.get("linkedin_date_posted", "any")
+    if date_posted in _DATE_MAP:
+        params["f_TPR"] = _DATE_MAP[date_posted]
 
-    print(f"  [LINKEDIN] Found {len(job_links)} job links")
+    # Remote filter: f_WT=2  (1=onsite, 2=remote, 3=hybrid)
+    if task_input.get("linkedin_remote"):
+        params["f_WT"] = "2"
+
+    # Experience level: f_E  (1=Internship, 2=Entry, 3=Associate, 4=Mid-Senior, 5=Director, 6=Executive)
+    _EXP_MAP = {
+        "internship": "1",
+        "entry":      "2",
+        "associate":  "3",
+        "mid":        "4",
+        "director":   "5",
+        "executive":  "6",
+    }
+    exp_level = task_input.get("linkedin_exp_level", "all")
+    if exp_level in _EXP_MAP:
+        params["f_E"] = _EXP_MAP[exp_level]
+
+    # Job type: f_JT  (F=Full-time, P=Part-time, C=Contract, T=Temporary, I=Internship, V=Volunteer)
+    _JOBTYPE_MAP = {
+        "fullTime":   "F",
+        "partTime":   "P",
+        "contract":   "C",
+        "temporary":  "T",
+        "internship": "I",
+        "volunteer":  "V",
+    }
+    job_type = task_input.get("linkedin_job_type", "all")
+    if job_type in _JOBTYPE_MAP:
+        params["f_JT"] = _JOBTYPE_MAP[job_type]
+
+    base_url = "https://www.linkedin.com/jobs/search/?" + urllib.parse.urlencode(params)
+
+    # ── Pagination ─────────────────────────────────────────────────────
+    max_apply   = int(task_input.get("max_apply", MAX_APPLY))
+    target_pool = max_apply * 3   # fetch 3× so skips don't exhaust the list
+    max_pages   = 10
+    seen: set   = set()
+    job_links: list[str] = []
+
+    for page_num in range(max_pages):
+        start = page_num * 25
+        search_url = f"{base_url}&start={start}"
+        print(f"  [LINKEDIN] Page {page_num + 1} URL: {search_url}")
+        page.goto(search_url, wait_until="domcontentloaded")
+        time.sleep(NAV_WAIT + 2)
+
+        before = len(job_links)
+        try:
+            cards = page.locator(
+                "a.job-card-container__link, a.job-card-list__title, a[href*='/jobs/view/']"
+            ).all()
+            for card in cards:
+                href = card.get_attribute("href") or ""
+                if "/jobs/view/" in href:
+                    if href.startswith("/"):
+                        href = "https://www.linkedin.com" + href
+                    url = href.split("?")[0]
+                    if url not in seen:
+                        seen.add(url)
+                        job_links.append(url)
+        except Exception as e:
+            print(f"  [LINKEDIN] Could not collect job links on page {page_num + 1}: {e}")
+
+        added = len(job_links) - before
+        print(f"  [LINKEDIN] Page {page_num + 1}: +{added} new links (total {len(job_links)})")
+
+        if added == 0:
+            print(f"  [LINKEDIN] No new jobs on page {page_num + 1} — stopping pagination")
+            break
+
+        if len(job_links) >= target_pool:
+            print(f"  [LINKEDIN] Pool of {len(job_links)} sufficient — stopping pagination")
+            break
+
+    print(f"  [LINKEDIN] Found {len(job_links)} job links (across {page_num + 1} page(s))")
     return job_links
 
 
@@ -966,7 +1199,9 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
     """
     task_input = task_input or {}
     print(f"  [LINKEDIN] Opening: {job_url}")
-    page.goto(job_url, wait_until="domcontentloaded")
+    if not _safe_goto(page, job_url):
+        print(f"  [LINKEDIN] Could not load job page after retries — skipping")
+        return False
     time.sleep(NAV_WAIT)
 
     try:
@@ -982,89 +1217,110 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         except Exception:
             pass
 
+        # ── Extract JD text (needed for smart match and/or tailoring) ─
+        smart_match     = task_input.get("smart_match", False)
+        match_threshold = int(task_input.get("match_threshold", 70))
+        needs_jd        = smart_match or task_input.get("tailor_resume", False)
+        jd_text         = ""
+
+        if needs_jd:
+            time.sleep(2)
+            # Expand "Show more" so full JD is in DOM
+            for expand_sel in [
+                "button.jobs-description__footer-button",
+                "button[aria-label*='Show more']",
+                "button.show-more-less-html__button--more",
+                "button:has-text('Show more')",
+            ]:
+                try:
+                    btn = page.locator(expand_sel).first
+                    if btn.count() > 0:
+                        btn.click(timeout=2000)
+                        time.sleep(1)
+                        break
+                except Exception:
+                    pass
+
+            for jd_sel in [
+                "div.jobs-description-content__text",
+                "div.jobs-description-content__text--stretch",
+                "div[class*='jobs-description-content']",
+                "div.jobs-unified-description__content",
+                "div[class*='jobs-unified-description']",
+                "div.show-more-less-html__markup",
+                "div.jobs-description__content",
+                "div[class*='jobs-description']",
+                "article.jobs-description",
+                "div#job-details",
+                "div.description__text",
+                "section.jobs-view-more-text",
+                "div[data-testid='job-description']",
+                "div.description",
+            ]:
+                try:
+                    el = page.locator(jd_sel).first
+                    if el.count() > 0:
+                        try:
+                            el.scroll_into_view_if_needed(timeout=2000)
+                        except Exception:
+                            pass
+                        candidate = _clean_jd_text(el.text_content() or "")
+                        if len(candidate) > 100:
+                            jd_text = candidate
+                            break
+                except Exception:
+                    continue
+
+            if not jd_text:
+                for fallback_sel in ["main", "div[role='main']", "div.scaffold-layout__detail"]:
+                    try:
+                        el = page.locator(fallback_sel).first
+                        if el.count() > 0:
+                            candidate = _clean_jd_text(el.text_content() or "")
+                            if len(candidate) > 200:
+                                jd_text = candidate[:8000]
+                                break
+                    except Exception:
+                        continue
+
+        # ── Smart match gate ──────────────────────────────────────
+        if smart_match and jd_text:
+            resume_text = task_input.get("resume_text", "")
+            if resume_text:
+                try:
+                    from automation.ai_client import match_score
+                    result = match_score(resume_text, jd_text)
+                    score  = result.get("score", 0)
+                    missing = result.get("missing_skills", [])
+                    _log(task_input,
+                         f"🎯 Match score: {score}% (threshold: {match_threshold}%) "
+                         f"| Missing: {', '.join(missing[:4]) or 'none'}",
+                         "info")
+                    if score < match_threshold:
+                        _log(task_input,
+                             f"⏭  Skipped (score {score}% < {match_threshold}%) — {job_url}",
+                             "warn")
+                        return False
+                    _log(task_input, f"✅ Match score {score}% passed — proceeding to apply", "success")
+                    task_input = dict(task_input)
+                    task_input["_last_match_score"] = score
+                except Exception as _me:
+                    _log(task_input, f"⚠️  Match scoring failed ({_me}) — applying anyway", "warn")
+            else:
+                _log(task_input, "⚠️  Smart match skipped — no resume text available", "warn")
+
+        # Store jd_text in task_input so _fill_additional_questions can use it for AI cover note
+        if jd_text:
+            task_input = dict(task_input)
+            task_input["_current_jd_text"] = jd_text
+
         # ── Tailor resume to this JD if requested ─────────────────
         if task_input.get("tailor_resume"):
             resume_path = task_input.get("resume_path", "")
             if not resume_path or not os.path.isfile(resume_path):
                 _log(task_input, "⚠️  No resume file available — applying without tailoring. Upload a resume to enable tailoring.", "warn")
-            else:
-                try:
-                    # Extract JD text from the job page
-                    jd_text = ""
-                    time.sleep(3)  # let the page settle before scraping JD
-
-                    # Click "Show more" if present so full JD text is in the DOM
-                    for expand_sel in [
-                        "button.jobs-description__footer-button",
-                        "button[aria-label*='Show more']",
-                        "button.show-more-less-html__button--more",
-                        "button:has-text('Show more')",
-                    ]:
-                        try:
-                            btn = page.locator(expand_sel).first
-                            if btn.count() > 0:
-                                btn.click(timeout=2000)
-                                time.sleep(1)
-                                break
-                        except Exception:
-                            pass
-
-                    # NOTE: is_visible() requires the element to be in the viewport.
-                    # Job descriptions are usually below the fold, so we check count() > 0
-                    # (DOM presence) and use text_content() instead.
-                    for jd_sel in [
-                        # Newer LinkedIn selectors (2024-2025)
-                        "div.jobs-description-content__text",
-                        "div.jobs-description-content__text--stretch",
-                        "div[class*='jobs-description-content']",
-                        "div.jobs-unified-description__content",
-                        "div[class*='jobs-unified-description']",
-                        # Classic selectors
-                        "div.show-more-less-html__markup",
-                        "div.jobs-description__content",
-                        "div[class*='jobs-description']",
-                        "article.jobs-description",
-                        "div#job-details",
-                        "div.description__text",
-                        "section.jobs-view-more-text",
-                        "div[data-testid='job-description']",
-                        "div.description",
-                    ]:
-                        try:
-                            el = page.locator(jd_sel).first
-                            if el.count() > 0:
-                                # scroll element into view so text is fully rendered
-                                try:
-                                    el.scroll_into_view_if_needed(timeout=2000)
-                                except Exception:
-                                    pass
-                                candidate = _clean_jd_text(el.text_content() or "")
-                                if len(candidate) > 100:
-                                    jd_text = candidate
-                                    _log(task_input, f"📄 JD extracted via '{jd_sel}' ({len(jd_text)} chars)")
-                                    break
-                        except Exception:
-                            continue
-
-                    # Last-resort fallback: grab main content, then strip LinkedIn UI noise
-                    if not jd_text:
-                        for fallback_sel in [
-                            "main",
-                            "div[role='main']",
-                            "div.scaffold-layout__detail",
-                        ]:
-                            try:
-                                el = page.locator(fallback_sel).first
-                                if el.count() > 0:
-                                    candidate = _clean_jd_text(el.text_content() or "")
-                                    if len(candidate) > 200:
-                                        jd_text = candidate[:8000]
-                                        _log(task_input, f"📄 JD from fallback '{fallback_sel}' ({len(jd_text)} chars)")
-                                        break
-                            except Exception:
-                                continue
-
-                    if jd_text.strip():
+            elif jd_text.strip():
+                    try:
                         from automation.resume_tailor import tailor_resume_for_job
                         company       = task_input.get("company", "")
                         role          = task_input.get("role", task_input.get("keywords", ""))
@@ -1084,14 +1340,13 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                             "success",
                         )
                         if result.tailored_pdf_path and os.path.isfile(result.tailored_pdf_path):
-                            # Use the tailored PDF for this application only
                             task_input = dict(task_input)
-                            task_input["resume_path"] = result.tailored_pdf_path
+                            task_input["resume_path"]   = result.tailored_pdf_path
                             task_input["_tailored_pdf"] = result.tailored_pdf_path
-                    else:
-                        _log(task_input, "⚠️  Could not extract JD text from page — applying with original resume", "warn")
-                except Exception as _te:
-                    _log(task_input, f"⚠️  Tailoring failed ({_te}) — applying with original resume", "warn")
+                    except Exception as _te:
+                        _log(task_input, f"⚠️  Tailoring failed ({_te}) — applying with original resume", "warn")
+            else:
+                _log(task_input, "⚠️  Could not extract JD text — applying with original resume", "warn")
 
         # ── Find Easy Apply link/button ───────────────────────────
         easy_apply_btn = None

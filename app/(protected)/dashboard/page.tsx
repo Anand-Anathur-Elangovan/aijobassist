@@ -38,7 +38,11 @@ export default function DashboardPage() {
   const [yearsExp, setYearsExp] = useState("2");
   const [skillRating, setSkillRating] = useState("8");
   const [keywords, setKeywords] = useState("Software Engineer");
-  const [location, setLocation] = useState("Remote");
+  const [keywords2, setKeywords2] = useState("");
+  const [keywords3, setKeywords3] = useState("");
+  const [locationList, setLocationList] = useState<string[]>([]);
+  const [locationInput, setLocationInput] = useState("");
+  const [remoteEnabled, setRemoteEnabled] = useState(false);
   const [maxApply, setMaxApply] = useState("5");
   const [noticePeriod, setNoticePeriod] = useState("30");
   const [salaryExpectation, setSalaryExpectation] = useState("");
@@ -50,6 +54,19 @@ export default function DashboardPage() {
   const [tailorPrompt, setTailorPrompt] = useState("");
   const [favCompanies, setFavCompanies] = useState<string[]>([]);
   const [favCompanyInput, setFavCompanyInput] = useState("");
+  // Naukri-specific apply type preference
+  const [naukriApplyTypes, setNaukriApplyTypes] = useState<"both" | "direct_only" | "company_site_only">("both");
+  // LinkedIn search filters
+  const [linkedinDatePosted, setLinkedinDatePosted] = useState<"any" | "past24h" | "pastWeek" | "pastMonth">("any");
+  const [linkedinExpLevel, setLinkedinExpLevel] = useState<"all" | "internship" | "entry" | "associate" | "mid" | "director" | "executive">("all");
+  const [linkedinJobType, setLinkedinJobType] = useState<"all" | "fullTime" | "partTime" | "contract" | "temporary" | "internship">("all");
+  // Naukri search filters
+  const [naukriDatePosted, setNaukriDatePosted] = useState<"any" | "1" | "3" | "7" | "15" | "30">("any");
+  const [naukriWorkMode, setNaukriWorkMode] = useState<"any" | "remote" | "hybrid" | "office">("any");
+  const [naukriJobType, setNaukriJobType] = useState<"all" | "fullTime" | "partTime" | "contract" | "temporary">("all");
+  // Smart Match — AI resume vs JD scoring gate
+  const [smartMatch, setSmartMatch] = useState(false);
+  const [matchThreshold, setMatchThreshold] = useState(70);
   // Platform login credentials (optional — stored client-side only, passed to bot)
   const [linkedinEmail, setLinkedinEmail] = useState("");
   const [linkedinPassword, setLinkedinPassword] = useState("");
@@ -80,6 +97,9 @@ export default function DashboardPage() {
   const [liveTask, setLiveTask] = useState<TaskRow | null>(null);
   const [livePrompt, setLivePrompt] = useState("");
   const [livePromptSaving, setLivePromptSaving] = useState(false);
+  // Job history reset
+  const [resetHistoryLoading, setResetHistoryLoading] = useState(false);
+  const [resetSmartMatchLoading, setResetSmartMatchLoading] = useState(false);
 
   const fetchTasks = async () => {
     const { data } = await supabase.from("tasks").select("*").order("created_at", { ascending: false });
@@ -149,6 +169,51 @@ export default function DashboardPage() {
     return () => { supabase.removeChannel(channel); };
   }, [user]);
 
+  const resetJobHistory = async (targetPlatform?: "linkedin" | "naukri") => {
+    setResetHistoryLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) { alert("Not logged in"); return; }
+      const url = `/api/job-history/reset${targetPlatform ? `?platform=${targetPlatform}` : ""}`;
+      const res = await fetch(url, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const json = await res.json();
+      if (res.ok) {
+        alert(json.message || "History reset successfully.");
+      } else {
+        alert("Reset failed: " + (json.error || res.statusText));
+      }
+    } catch (e) {
+      alert("Reset failed: " + String(e));
+    } finally {
+      setResetHistoryLoading(false);
+    }
+  };
+
+  const resetSmartMatchHistory = async () => {
+    setResetSmartMatchLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) { alert("Not logged in"); return; }
+      const res = await fetch("/api/job-history/reset?type=smart_match", {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const json = await res.json();
+      if (res.ok) {
+        alert(json.message || "Smart Match history cleared — those jobs will be re-evaluated on next run.");
+      } else {
+        alert("Reset failed: " + (json.error || res.statusText));
+      }
+    } catch (e) {
+      alert("Reset failed: " + String(e));
+    } finally {
+      setResetSmartMatchLoading(false);
+    }
+  };
+
   const createTask = async () => {
     const { data: userData } = await supabase.auth.getUser();
     const u = userData.user;
@@ -168,7 +233,9 @@ export default function DashboardPage() {
         years_experience: Number(yearsExp),
         skill_rating: Number(skillRating),
         keywords,
-        location,
+        ...(keywords2.trim() && { keywords2: keywords2.trim() }),
+        ...(keywords3.trim() && { keywords3: keywords3.trim() }),
+        location: [...(remoteEnabled ? ["Remote"] : []), ...locationList].join(",") || "",
         max_apply: Number(maxApply),
         notice_period: Number(noticePeriod),
         salary_expectation: salaryExpectation ? Number(salaryExpectation) : undefined,
@@ -182,6 +249,19 @@ export default function DashboardPage() {
           tailor_custom_prompt: tailorPrompt,
         }),
         ...(favCompanies.length > 0 && { favorite_companies: favCompanies }),
+        ...(platform === "naukri" && {
+          apply_types: naukriApplyTypes,
+          ...(naukriDatePosted !== "any" && { freshness_days: Number(naukriDatePosted) }),
+          ...(naukriWorkMode !== "any" ? { work_mode: naukriWorkMode } : remoteEnabled ? { work_mode: "remote" } : {}),
+          ...(naukriJobType !== "all" && { naukri_job_type: naukriJobType }),
+        }),
+        ...(platform === "linkedin" && {
+          linkedin_date_posted: linkedinDatePosted,
+          linkedin_remote: remoteEnabled,
+          ...(linkedinExpLevel !== "all" && { linkedin_exp_level: linkedinExpLevel }),
+          ...(linkedinJobType !== "all" && { linkedin_job_type: linkedinJobType }),
+        }),
+        ...(smartMatch && { smart_match: true, match_threshold: matchThreshold }),
       },
     }]);
 
@@ -342,10 +422,10 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between mb-4">
             <div>
               <p className="font-mono text-xs text-slate-500 uppercase tracking-widest mb-1">Current Plan</p>
-              <p className="font-display font-bold text-xl text-white">{plan.display_name}
+              <p className="font-display font-bold text-xl text-white">{plan.name}
                 {subscription?.status === "trial" && (
                   <span className="ml-2 text-xs font-mono text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded-full">
-                    Trial&nbsp;·&nbsp;{Math.max(0, Math.ceil((new Date(subscription.end_date).getTime() - Date.now()) / 86400000))}d left
+                    Trial&nbsp;·&nbsp;{Math.max(0, Math.ceil((new Date(subscription.trial_ends_at ?? subscription.current_period_end ?? Date.now()).getTime() - Date.now()) / 86400000))}d left
                   </span>
                 )}
               </p>
@@ -358,7 +438,7 @@ export default function DashboardPage() {
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
               {usage.map((u) => {
                 const rem = getRemaining(u.action_type);
-                const pct = u.daily_limit > 0 ? Math.min(100, (u.current_count / u.daily_limit) * 100) : 0;
+                const pct = u.limit > 0 ? Math.min(100, (u.used / u.limit) * 100) : 0;
                 const labels: Record<string, string> = {
                   auto_apply: "Auto Apply", semi_auto_apply: "Semi Auto",
                   ai_tailor: "AI Tailor", gmail_send: "Gmail", cover_letter: "Cover Letter", jd_analysis: "JD Analysis",
@@ -366,7 +446,7 @@ export default function DashboardPage() {
                 return (
                   <div key={u.action_type} className="bg-slate-800/50 rounded-lg p-3">
                     <p className="text-xs text-slate-400 mb-1">{labels[u.action_type] ?? u.action_type}</p>
-                    <p className="font-mono text-sm text-white">{rem}/{u.daily_limit}</p>
+                    <p className="font-mono text-sm text-white">{rem}/{u.limit}</p>
                     <div className="w-full bg-slate-700 rounded-full h-1.5 mt-1">
                       <div className={`h-1.5 rounded-full ${pct >= 90 ? "bg-red-500" : pct >= 60 ? "bg-amber-400" : "bg-emerald-500"}`} style={{ width: `${pct}%` }} />
                     </div>
@@ -628,6 +708,268 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {/* Naukri — Apply Type */}
+          {platform === "naukri" && (
+            <div className="space-y-2 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
+              <p className="font-mono text-xs text-slate-400 uppercase tracking-widest">
+                🟠 Naukri — Apply Type
+              </p>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {(
+                  [
+                    { value: "both", label: "🔀 Both" },
+                    { value: "direct_only", label: "⚡ Direct Apply Only" },
+                    { value: "company_site_only", label: "🌐 Company Site Only" },
+                  ] as const
+                ).map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setNaukriApplyTypes(value)}
+                    className={`px-3 py-1.5 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                      naukriApplyTypes === value
+                        ? "bg-orange-500 text-white"
+                        : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="font-mono text-xs text-slate-600 mt-1">
+                {naukriApplyTypes === "both"
+                  ? "Apply using Naukri's Easy Apply AND company site forms."
+                  : naukriApplyTypes === "direct_only"
+                  ? "Only apply via Easy Apply (Naukri's built-in form). Skip jobs that redirect to company site."
+                  : "Only apply on the company's own site. Skip Naukri Easy Apply jobs."}
+              </p>
+            </div>
+          )}
+
+          {/* Naukri — Search Filters */}
+          {platform === "naukri" && (
+            <div className="space-y-3 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
+              <p className="font-mono text-xs text-slate-400 uppercase tracking-widest">
+                🟠 Naukri — Search Filters
+              </p>
+
+              {/* Date posted */}
+              <div>
+                <label className="block font-mono text-xs text-slate-500 mb-1">Date Posted</label>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { value: "any", label: "Any time" },
+                    { value: "1",   label: "Today" },
+                    { value: "3",   label: "Last 3 days" },
+                    { value: "7",   label: "Last week" },
+                    { value: "15",  label: "Last 2 weeks" },
+                    { value: "30",  label: "Last month" },
+                  ] as const).map(({ value, label }) => (
+                    <button key={value} type="button" onClick={() => setNaukriDatePosted(value)}
+                      className={`px-3 py-1 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                        naukriDatePosted === value ? "bg-orange-500 text-white" : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                      }`}>{label}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Job type */}
+              <div>
+                <label className="block font-mono text-xs text-slate-500 mb-1">Job Type</label>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { value: "all",       label: "All" },
+                    { value: "fullTime",  label: "Permanent" },
+                    { value: "contract",  label: "Contract" },
+                    { value: "temporary", label: "Temporary" },
+                  ] as const).map(({ value, label }) => (
+                    <button key={value} type="button" onClick={() => setNaukriJobType(value)}
+                      className={`px-3 py-1 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                        naukriJobType === value ? "bg-orange-500 text-white" : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                      }`}>{label}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Work mode */}
+              <div>
+                <label className="block font-mono text-xs text-slate-500 mb-1">Work Mode</label>
+                <div className="flex flex-wrap gap-2">
+                  {([
+                    { value: "any",    label: "Any" },
+                    { value: "remote", label: "🌐 Remote / WFH" },
+                    { value: "hybrid", label: "🔀 Hybrid" },
+                    { value: "office", label: "🏢 Office" },
+                  ] as const).map(({ value, label }) => (
+                    <button key={value} type="button" onClick={() => setNaukriWorkMode(value)}
+                      className={`px-3 py-1 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                        naukriWorkMode === value ? "bg-orange-500 text-white" : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                      }`}>{label}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* LinkedIn — Search Filters */}
+          {platform === "linkedin" && (
+            <div className="space-y-3 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
+              <p className="font-mono text-xs text-slate-400 uppercase tracking-widest">
+                🔵 LinkedIn — Search Filters
+              </p>
+
+              {/* Date posted */}
+              <div>
+                <label className="block font-mono text-xs text-slate-500 mb-1">Date Posted</label>
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      { value: "any", label: "Any time" },
+                      { value: "past24h", label: "Past 24h" },
+                      { value: "pastWeek", label: "Past week" },
+                      { value: "pastMonth", label: "Past month" },
+                    ] as const
+                  ).map(({ value, label }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setLinkedinDatePosted(value)}
+                      className={`px-3 py-1 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                        linkedinDatePosted === value
+                          ? "bg-blue-500 text-white"
+                          : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Job type */}
+              <div>
+                <label className="block font-mono text-xs text-slate-500 mb-1">Job Type</label>
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      { value: "all", label: "All" },
+                      { value: "fullTime", label: "Full-time" },
+                      { value: "partTime", label: "Part-time" },
+                      { value: "contract", label: "Contract" },
+                      { value: "internship", label: "Internship" },
+                    ] as const
+                  ).map(({ value, label }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setLinkedinJobType(value)}
+                      className={`px-3 py-1 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                        linkedinJobType === value
+                          ? "bg-blue-500 text-white"
+                          : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Experience level */}
+              <div>
+                <label className="block font-mono text-xs text-slate-500 mb-1">Experience Level</label>
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      { value: "all", label: "All" },
+                      { value: "internship", label: "Internship" },
+                      { value: "entry", label: "Entry" },
+                      { value: "associate", label: "Associate" },
+                      { value: "mid", label: "Mid-Senior" },
+                      { value: "director", label: "Director" },
+                    ] as const
+                  ).map(({ value, label }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setLinkedinExpLevel(value)}
+                      className={`px-3 py-1 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                        linkedinExpLevel === value
+                          ? "bg-blue-500 text-white"
+                          : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Remote toggle — synced with the Location widget above */}
+              <div className="flex items-center gap-3">
+                <input
+                  id="linkedin-remote-toggle"
+                  type="checkbox"
+                  checked={remoteEnabled}
+                  onChange={(e) => setRemoteEnabled(e.target.checked)}
+                  className="accent-blue-500 w-4 h-4 cursor-pointer"
+                />
+                <label htmlFor="linkedin-remote-toggle" className="cursor-pointer font-mono text-xs text-slate-300">
+                  Remote jobs only <span className="text-slate-600">(also updates the 📍 Location widget)</span>
+                </label>
+              </div>
+            </div>
+          )}
+
+          {/* Smart Match — AI resume vs JD scoring gate */}
+          <div className="space-y-3 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
+            <div className="flex items-start gap-3">
+              <input
+                id="smart-match-toggle"
+                type="checkbox"
+                checked={smartMatch}
+                onChange={(e) => setSmartMatch(e.target.checked)}
+                className="mt-0.5 accent-violet-400 w-4 h-4 cursor-pointer"
+              />
+              <label htmlFor="smart-match-toggle" className="cursor-pointer">
+                <p className="font-body font-semibold text-white text-sm">
+                  🧠 Smart Match{" "}
+                  {smartMatch && (
+                    <span className="ml-1 text-xs bg-violet-400/15 text-violet-400 px-2 py-0.5 rounded">ON</span>
+                  )}
+                </p>
+                <p className="font-body text-xs text-slate-400 mt-0.5">
+                  Claude AI reads your resume and the job description before every application. Jobs scoring below the
+                  threshold are skipped automatically — saving quota and improving your hit rate.
+                </p>
+              </label>
+            </div>
+
+            {smartMatch && (
+              <div className="pl-7 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="font-mono text-xs text-slate-400">
+                    Min match score to apply
+                  </label>
+                  <span className="font-mono text-sm font-bold text-violet-400">{matchThreshold}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={30}
+                  max={95}
+                  step={5}
+                  value={matchThreshold}
+                  onChange={(e) => setMatchThreshold(Number(e.target.value))}
+                  className="w-full accent-violet-500"
+                />
+                <div className="flex justify-between font-mono text-xs text-slate-600">
+                  <span>30% — Apply to almost all</span>
+                  <span>95% — Very selective</span>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Mode toggle */}
           <div className="flex items-start gap-3 p-3 rounded-lg border border-slate-700 bg-slate-800/50">
             <input
@@ -648,9 +990,50 @@ export default function DashboardPage() {
               </p>
             </label>
           </div>
+
+          {/* Job History Reset */}
+          <div className="space-y-2 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
+            <p className="font-mono text-xs text-slate-400 uppercase tracking-widest">
+              🗂️ Job History
+            </p>
+            <p className="font-body text-xs text-slate-500">
+              The bot tracks every job URL it has already applied to or skipped (last 30 days) and skips them automatically on future runs.
+              Reset to let the bot re-try those jobs.
+            </p>
+            <div className="flex flex-wrap gap-2 mt-1">
+              <button
+                type="button"
+                disabled={resetHistoryLoading}
+                onClick={() => resetJobHistory(platform)}
+                className="disabled:opacity-50 px-3 py-1.5 rounded-lg font-mono text-xs font-semibold bg-rose-600/20 text-rose-400 border border-rose-600/40 hover:bg-rose-600/30 transition-colors"
+              >
+                {resetHistoryLoading ? "Resetting…" : `🔄 Reset ${platform === "naukri" ? "Naukri" : "LinkedIn"} History`}
+              </button>
+              <button
+                type="button"
+                disabled={resetHistoryLoading}
+                onClick={() => resetJobHistory()}
+                className="disabled:opacity-50 px-3 py-1.5 rounded-lg font-mono text-xs font-semibold bg-rose-600/10 text-rose-500 border border-rose-700/40 hover:bg-rose-600/20 transition-colors"
+              >
+                {resetHistoryLoading ? "Resetting…" : "🔄 Reset All Platforms"}
+              </button>
+              <button
+                type="button"
+                disabled={resetSmartMatchLoading}
+                onClick={resetSmartMatchHistory}
+                className="disabled:opacity-50 px-3 py-1.5 rounded-lg font-mono text-xs font-semibold bg-violet-600/20 text-violet-400 border border-violet-600/40 hover:bg-violet-600/30 transition-colors"
+              >
+                {resetSmartMatchLoading ? "Clearing…" : "🧠 Clear Smart Match Skips"}
+              </button>
+            </div>
+            <p className="font-body text-xs text-slate-600">
+              🧠 Smart Match Skips are tied to your current resume — uploading a new resume clears them automatically.
+              Use the button above to force a re-evaluation without changing your resume.
+            </p>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block font-mono text-xs text-slate-400 mb-1">Job Keywords <span className="text-red-400">*</span></label>
+              <label className="block font-mono text-xs text-slate-400 mb-1">Keyword 1 <span className="text-red-400">*</span></label>
               <input
                 type="text"
                 placeholder="e.g. Software Engineer"
@@ -660,14 +1043,93 @@ export default function DashboardPage() {
               />
             </div>
             <div>
-              <label className="block font-mono text-xs text-slate-400 mb-1">Location</label>
+              <label className="block font-mono text-xs text-slate-400 mb-1">Keyword 2 <span className="text-slate-500">(optional — runs after Keyword 1)</span></label>
               <input
                 type="text"
-                placeholder="e.g. Remote, Bangalore"
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
+                placeholder="e.g. Backend Developer"
+                value={keywords2}
+                onChange={(e) => setKeywords2(e.target.value)}
                 className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
               />
+            </div>
+            <div>
+              <label className="block font-mono text-xs text-slate-400 mb-1">Keyword 3 <span className="text-slate-500">(optional — runs after Keyword 2)</span></label>
+              <input
+                type="text"
+                placeholder="e.g. Full Stack Engineer"
+                value={keywords3}
+                onChange={(e) => setKeywords3(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            {/* Location widget — full width ─────────────────── */}
+            <div className="sm:col-span-2 space-y-2">
+              <label className="block font-mono text-xs text-slate-400">📍 Location <span className="text-slate-500 font-normal">(optional — up to 5, bot searches each)</span></label>
+              {/* Remote checkbox */}
+              <div className="flex items-center gap-2">
+                <input
+                  id="remote-loc-toggle"
+                  type="checkbox"
+                  checked={remoteEnabled}
+                  onChange={(e) => setRemoteEnabled(e.target.checked)}
+                  className="accent-emerald-400 w-4 h-4 cursor-pointer"
+                />
+                <label htmlFor="remote-loc-toggle" className="cursor-pointer font-mono text-sm text-slate-300">
+                  🌐 Remote
+                </label>
+              </div>
+              {/* Tag input */}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder={locationList.length >= 5 ? "Max 5 locations" : "e.g. Bangalore (press Enter to add)"}
+                  value={locationInput}
+                  onChange={(e) => setLocationInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      const loc = locationInput.trim();
+                      if (loc && !locationList.includes(loc) && locationList.length < 5) {
+                        setLocationList([...locationList, loc]);
+                        setLocationInput("");
+                      }
+                    }
+                  }}
+                  disabled={locationList.length >= 5}
+                  className="flex-1 bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const loc = locationInput.trim();
+                    if (loc && !locationList.includes(loc) && locationList.length < 5) {
+                      setLocationList([...locationList, loc]);
+                      setLocationInput("");
+                    }
+                  }}
+                  disabled={locationList.length >= 5 || !locationInput.trim()}
+                  className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white text-sm font-bold px-3 py-2 rounded-lg transition-colors"
+                >
+                  + Add
+                </button>
+              </div>
+              {locationList.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {locationList.map((loc) => (
+                    <span key={loc} className="flex items-center gap-1 bg-blue-500/20 border border-blue-400/40 text-blue-300 text-xs font-mono px-2 py-1 rounded-full">
+                      📍 {loc}
+                      <button
+                        type="button"
+                        onClick={() => setLocationList(locationList.filter((l) => l !== loc))}
+                        className="ml-1 text-blue-400 hover:text-red-400 font-bold leading-none"
+                      >✕</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {!remoteEnabled && locationList.length === 0 && (
+                <p className="font-mono text-xs text-slate-600">No location set — bot will search everywhere</p>
+              )}
             </div>
             <div>
               <label className="block font-mono text-xs text-slate-400 mb-1">Phone Country</label>
@@ -714,9 +1176,12 @@ export default function DashboardPage() {
               />
             </div>
             <div>
-              <label className="block font-mono text-xs text-slate-400 mb-1">Max Applications</label>
+              <label className="block font-mono text-xs text-slate-400 mb-1">
+                Max Applications
+                <span className="ml-1 text-slate-500 font-normal">(max 100 per run — run again to continue)</span>
+              </label>
               <input
-                type="number" min="1" max="50" placeholder="e.g. 5"
+                type="number" min="1" max="100" placeholder="e.g. 5"
                 value={maxApply}
                 onChange={(e) => setMaxApply(e.target.value)}
                 className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"

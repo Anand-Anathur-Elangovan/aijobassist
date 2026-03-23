@@ -12,14 +12,15 @@ const SUPER_ADMINS = [
 ];
 
 const NAV_LINKS = [
-  { href: "/dashboard",     label: "Dashboard" },
-  { href: "/agent",         label: "Agent" },
-  { href: "/job-search",    label: "Job Search" },
-  { href: "/resume-studio", label: "Studio" },
-  { href: "/applications",  label: "Applications" },
-  { href: "/analytics",     label: "Analytics" },
-  { href: "/upload-resume", label: "Resume" },
-  { href: "/billing",       label: "Billing" },
+  { href: "/dashboard",      label: "Dashboard" },
+  { href: "/agent",          label: "Agent" },
+  { href: "/job-search",     label: "Job Search" },
+  { href: "/resume-studio",  label: "Studio" },
+  { href: "/interview-prep", label: "Interview" },
+  { href: "/applications",   label: "Applications" },
+  { href: "/analytics",      label: "Analytics" },
+  { href: "/upload-resume",  label: "Resume" },
+  { href: "/billing",        label: "Billing" },
 ];
 
 export default function NavBar() {
