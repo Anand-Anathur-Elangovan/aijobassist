@@ -115,10 +115,16 @@ def _handle_tailor_resume(task_input: dict) -> dict:
 
 def _handle_auto_apply(task_input: dict) -> dict:
     """Fetch resume from Supabase then launch LinkedIn browser automation."""
-    from api_client import fetch_latest_resume
+    from api_client import fetch_latest_resume, fetch_user_tier
 
     platform = task_input.get("platform", "linkedin")
     user_id  = task_input.get("user_id", "")
+
+    # ── AI company-site apply quota (free=2, paid=unlimited) ───
+    if user_id and "_ai_company_site_limit" not in task_input:
+        tier = fetch_user_tier(user_id)
+        task_input["_ai_company_site_limit"] = 2 if tier == "free" else 999
+    task_input.setdefault("_ai_company_site_used", 0)
 
     # Attach resume URL and parsed text if not already set
     if user_id and not task_input.get("resume_url"):

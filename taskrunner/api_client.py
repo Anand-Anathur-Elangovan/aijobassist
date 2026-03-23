@@ -279,3 +279,124 @@ def save_notification(user_id: str, notif_type: str, title: str, message: str,
         },
     )
 
+
+def fetch_user_tier(user_id: str) -> str:
+    """
+    Return the user's subscription tier: 'free' | 'starter' | 'pro' | 'enterprise'.
+    Falls back to 'free' on any error so callers can apply conservative limits.
+    """
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/subscriptions"
+            f"?user_id=eq.{user_id}&status=eq.active&order=created_at.desc&limit=1",
+            headers=HEADERS,
+        )
+        if resp.ok:
+            rows = resp.json()
+            if rows:
+                return (rows[0].get("plan_id") or "free").lower().split("_")[0]
+    except Exception:
+        pass
+    return "free"
+
+
+# ── Job history helpers (skip-tracking across runs) ───────────
+
+def fetch_seen_jobs(user_id: str, platform: str,
+                    apply_types: str = "both",
+                    resume_fingerprint: str = "") -> set:
+    """
+    Return job URLs that should be skipped for this run, respecting three rules:
+
+    1. 'applied'     → always skip (you already applied to this job).
+    2. 'mode_skip'   → only skip if the current apply_types mode would still skip it.
+                       If the user switches from direct_only → both, those jobs become
+                       eligible again.
+    3. 'smart_match' → skip only if the resume hasn't changed.
+                       New resume fingerprint = fresh start for smart_match jobs.
+    4. 'skipped'     → generic failure; re-skip for 30 days.
+    """
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/job_history"
+        f"?user_id=eq.{user_id}&platform=eq.{platform}"
+        f"&created_at=gte.{cutoff}"
+        f"&select=job_url,skip_reason,metadata",
+        headers=HEADERS,
+    )
+    if not resp.ok:
+        return set()
+
+    seen: set = set()
+    for row in resp.json():
+        url    = row.get("job_url", "")
+        reason = row.get("skip_reason", "skipped")
+        meta   = row.get("metadata") or {}
+
+        if reason == "applied":
+            seen.add(url)
+
+        elif reason == "mode_skip":
+            # Skip only if the same mode restriction would apply now
+            stored_mode = meta.get("apply_types", "")
+            if apply_types == stored_mode or apply_types == "both" and stored_mode in ("direct_only", "company_site_only"):
+                # 'both' should retry jobs that were mode-skipped
+                pass  # don't add — allow retry
+            elif apply_types == stored_mode:
+                seen.add(url)
+            # else: mode changed — let the bot try again
+
+        elif reason == "smart_match":
+            stored_fp = meta.get("resume_fingerprint", "")
+            # If we don't know the current fingerprint, skip conservatively
+            if not resume_fingerprint or (stored_fp and stored_fp == resume_fingerprint):
+                seen.add(url)
+            # else: resume changed → retry
+
+        else:
+            # 'skipped' and any future generic reasons
+            seen.add(url)
+
+    return seen
+
+
+def record_seen_job(user_id: str, platform: str, job_url: str,
+                    status: str = "skipped",
+                    skip_reason: str = "skipped",
+                    metadata: dict = None) -> None:
+    """
+    Upsert a job URL into job_history.
+    skip_reason: 'applied' | 'skipped' | 'smart_match' | 'mode_skip'
+    metadata: extra context e.g. {'resume_fingerprint': '...'} or {'apply_types': 'direct_only'}
+    """
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/job_history",
+        headers={**HEADERS, "Prefer": "resolution=merge-duplicates"},
+        json={
+            "user_id": user_id,
+            "platform": platform,
+            "job_url": job_url,
+            "status": status,
+            "skip_reason": skip_reason,
+            "metadata": metadata or {},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def reset_seen_jobs(user_id: str, platform: str = None,
+                    skip_reason: str = None) -> None:
+    """
+    Delete job history rows for this user.
+    - platform=None  → all platforms
+    - skip_reason=None → all reasons
+    - skip_reason='smart_match' → only smart_match skips (e.g. on new resume upload)
+    """
+    url = f"{SUPABASE_URL}/rest/v1/job_history?user_id=eq.{user_id}"
+    if platform:
+        url += f"&platform=eq.{platform}"
+    if skip_reason:
+        url += f"&skip_reason=eq.{skip_reason}"
+    requests.delete(url, headers=HEADERS)
+
