@@ -93,7 +93,7 @@ export default function AgentPage() {
           </p>
           <div className="flex gap-3">
             <a
-              href="https://github.com/Anand-Anathur-Elangovan/aijobassist/releases/download/v1.0.0/VantaHire.exe"
+              href="https://github.com/Anand-Anathur-Elangovan/aijobassist/releases/latest/download/VantaHire.exe"
               download
               className="flex items-center gap-2 px-4 py-2.5 bg-amber-400 text-slate-950 font-semibold rounded-lg hover:bg-amber-300 transition-all text-sm"
             >
