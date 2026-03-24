@@ -349,16 +349,23 @@ Best regards`;
 // ═════════════════════════════════════════════════════════════════════════
 
 export interface StudentInput {
-  student_name:   string;
-  state:          string;
-  board:          string;  // 'CBSE' | 'ICSE' | 'State Board'
-  marks_10th?:    number;
-  marks_12th?:    number;
-  stream_12th?:   string;  // 'PCM' | 'PCB' | 'Commerce' | 'Arts'
-  entrance_exams: string[];
-  community:      string;  // 'OC' | 'BC' | 'MBC' | 'SC' | 'ST'
-  quota:          string[];
-  interests:      string[];
+  student_name:      string;
+  state:             string;
+  board:             string;  // 'CBSE' | 'ICSE' | 'State Board'
+  marks_10th?:       number;
+  marks_12th?:       number;
+  stream_12th?:      string;  // 'PCM' | 'PCB' | 'Commerce' | 'Arts'
+  cutoff_marks?: {
+    math?:       number;
+    physics?:    number;
+    chemistry?:  number;
+    neet?:       number;
+  };
+  entrance_exams:    string[];
+  community:         string;  // 'OC' | 'BC' | 'MBC' | 'SC' | 'ST'
+  quota:             string[];
+  interests:         string[];
+  favorite_colleges?: string[];
 }
 
 export interface CareerCourseResult {
@@ -401,13 +408,32 @@ export interface CareerStrategy {
   tips:             string[];
 }
 
+export interface FavoriteCollegeHistoricalCutoff {
+  year:     string;
+  cutoff:   string;
+  category: string;
+}
+
+export interface FavoriteCollegeAnalysis {
+  college_name:          string;
+  feasibility:           "Reachable" | "Stretch" | "Very Tough" | "Out of Range";
+  your_estimated_cutoff: string;
+  required_cutoff:       string;
+  gap_summary:           string;
+  historical_cutoffs:    FavoriteCollegeHistoricalCutoff[];
+  alternative_routes:    string[];
+  similar_colleges:      string[];
+  accessible_branches:   string[];
+}
+
 export interface CareerPredictionResult {
-  courses:      CareerCourseResult[];
-  colleges:     CareerCollegeResult[];
-  exam_roadmap: CareerExamRoadmap[];
-  strategy:     CareerStrategy;
-  message?:     string;
-  is_fallback?: boolean;
+  courses:                    CareerCourseResult[];
+  colleges:                   CareerCollegeResult[];
+  exam_roadmap:               CareerExamRoadmap[];
+  strategy:                   CareerStrategy;
+  favorite_college_analysis?: FavoriteCollegeAnalysis[];
+  message?:                   string;
+  is_fallback?:               boolean;
 }
 
 // ── Fallback mock data (returned when AI fails or no API key) ─────────────
@@ -592,11 +618,52 @@ function careerFallback(input: StudentInput): CareerPredictionResult {
     ],
   };
 
+  const favorite_college_analysis: FavoriteCollegeAnalysis[] = (input.favorite_colleges ?? []).map((college) => {
+    const estCutoff = Math.round((pct || 75) * 1.9);
+    const estReq    = 192;
+    const gap       = estCutoff - estReq;
+    return {
+      college_name:          college,
+      feasibility:           (gap >= 0 ? "Reachable" : gap >= -15 ? "Stretch" : gap >= -30 ? "Very Tough" : "Out of Range") as "Reachable" | "Stretch" | "Very Tough" | "Out of Range",
+      your_estimated_cutoff: `${estCutoff} / 200`,
+      required_cutoff:       "~185–196 / 200 (OC general)",
+      gap_summary:           gap >= 0
+        ? `You are ~${gap} marks above typical cutoff estimates — feasible with strong preparation.`
+        : `You need approximately ${Math.abs(gap)} more marks to meet the typical cutoff for CSE/IT branches.`,
+      historical_cutoffs: [
+        { year: "2024", cutoff: "193.5", category: "OC" },
+        { year: "2023", cutoff: "191.0", category: "OC" },
+        { year: "2022", cutoff: "189.75", category: "OC" },
+      ],
+      alternative_routes: [
+        "Management Quota: 15% seats — direct admission without cutoff, higher fees apply",
+        "NRI Quota: Available with NRI/OCI sponsorship, limited seats",
+        input.community !== "OC"
+          ? `${input.community} category reservation: cutoff 10–25 marks lower than OC merit list`
+          : "Apply under any special quota you qualify for (sports, govt employee, etc.)",
+        "Lateral Entry after 3-yr Diploma: Direct 2nd-year B.Tech admission — no TNEA cutoff",
+        "Participate in every TNEA counselling round including special rounds & stray vacancy rounds",
+      ],
+      similar_colleges: [
+        "PSG College of Technology, Coimbatore",
+        "CIT Coimbatore",
+        "Kongu Engineering College, Erode",
+        "Sri Krishna College of Technology, Coimbatore",
+      ],
+      accessible_branches: [
+        "B.E Mechanical Engineering (cutoff ~160–175)",
+        "B.E Civil Engineering (cutoff ~155–170)",
+        "B.E Electrical & Electronics Engineering (cutoff ~170–182)",
+      ],
+    };
+  });
+
   return {
     courses,
     colleges,
     exam_roadmap,
     strategy,
+    ...(favorite_college_analysis.length > 0 && { favorite_college_analysis }),
     message: "Showing sample predictions. Connect your AI key for personalised analysis.",
     is_fallback: true,
   };
@@ -607,56 +674,37 @@ export async function predictCareer(input: StudentInput): Promise<CareerPredicti
     return careerFallback(input);
   }
 
+  const hasFavColleges = (input.favorite_colleges ?? []).length > 0;
+  const cm = input.cutoff_marks ?? {};
+  const hasCutoffMarks = !!(cm.math || cm.physics || cm.chemistry);
+  const hasNeet = !!cm.neet;
   const prompt = `You are an expert Indian education counsellor with deep knowledge of all Indian state boards, central boards (CBSE/ICSE), college entrance exams (JEE, NEET, VITEEE, BITSAT, KCET, TNEA, MHT-CET, etc.), college cutoffs, placement statistics, and reservation policies (OC/BC/MBC/SC/ST, sports quota, management quota).
 
-A student has provided the following profile:
+Student profile:
 - Name: ${input.student_name}
 - State: ${input.state}
 - Board: ${input.board}
 - 10th Marks: ${input.marks_10th ? input.marks_10th + "%" : "Not provided"}
 - 12th Marks: ${input.marks_12th ? input.marks_12th + "%" : "Not provided"}
-- 12th Stream: ${input.stream_12th || "Not specified"}
-- Entrance Exams appearing: ${input.entrance_exams.join(", ") || "None specified"}
+- 12th Stream: ${input.stream_12th || "Not specified"}${hasCutoffMarks ? `\n- Subject Marks (raw): Maths=${cm.math ?? "—"}, Physics=${cm.physics ?? "—"}, Chemistry=${cm.chemistry ?? "—"}` : ""}${hasNeet ? `\n- NEET Score: ${cm.neet}/720` : ""}
+- Entrance Exams: ${input.entrance_exams.join(", ") || "None"}
 - Community: ${input.community}
 - Special Quota: ${input.quota.join(", ") || "None"}
-- Interests / Preferred fields: ${input.interests.join(", ") || "Open to all"}
+- Interests: ${input.interests.join(", ") || "Open to all"}${hasFavColleges ? `\n- Favorite colleges to analyze: ${(input.favorite_colleges!).join(", ")}` : ""}
 
-Return ONLY valid JSON (no markdown, no explanation):
-{
+Return ONLY valid JSON (no markdown, no explanation). Keep all string values concise (≤120 chars each).
+{${hasFavColleges ? `
+  "favorite_college_analysis": [
+    { "college_name": string, "feasibility": "Reachable"|"Stretch"|"Very Tough"|"Out of Range", "your_estimated_cutoff": string, "required_cutoff": string, "gap_summary": string, "historical_cutoffs": [{"year": string, "cutoff": string, "category": string}], "alternative_routes": string[], "similar_colleges": string[], "accessible_branches": string[] }
+  ],` : ""}
   "courses": [
-    {
-      "name": string,
-      "probability": "High"|"Medium"|"Low",
-      "match_reason": string,
-      "future_scope": string,
-      "avg_salary_lpa": string,
-      "duration": string,
-      "top_institutes": string[]
-    }
+    { "name": string, "probability": "High"|"Medium"|"Low", "match_reason": string, "future_scope": string, "avg_salary_lpa": string, "duration": string, "top_institutes": string[] }
   ],
   "colleges": [
-    {
-      "name": string,
-      "location": string,
-      "state": string,
-      "category": "Dream"|"Moderate"|"Safe",
-      "probability": "High"|"Medium"|"Low",
-      "cutoff_hint": string,
-      "fees_range": string,
-      "placement_avg_lpa": string,
-      "college_type": "Govt"|"Private"|"Deemed"|"Central",
-      "courses_offered": string[]
-    }
+    { "name": string, "location": string, "state": string, "category": "Dream"|"Moderate"|"Safe", "probability": "High"|"Medium"|"Low", "cutoff_hint": string, "fees_range": string, "placement_avg_lpa": string, "college_type": "Govt"|"Private"|"Deemed"|"Central", "courses_offered": string[] }
   ],
   "exam_roadmap": [
-    {
-      "exam": string,
-      "importance": "Critical"|"Important"|"Optional",
-      "prep_duration": string,
-      "key_topics": string[],
-      "recommended_resources": string[],
-      "exam_window": string
-    }
+    { "exam": string, "importance": "Critical"|"Important"|"Optional", "prep_duration": string, "key_topics": string[], "recommended_resources": string[], "exam_window": string }
   ],
   "strategy": {
     "summary": string,
@@ -668,15 +716,16 @@ Return ONLY valid JSON (no markdown, no explanation):
 }
 
 Rules:
-- Provide 4–6 courses, 5–8 colleges (mix of state + national), 2–4 exam roadmaps
+- Exactly 4 courses, exactly 5 colleges (mix of state + national), exactly 3 exam roadmaps
 - Colleges MUST be realistic given the student's marks and state
 - Probability must reflect actual cutoff data and community reservation benefits
-- Tips must be specific to the student's state, community, and quota
+- Tips specific to the student's state, community, and quota
 - Include at least 2 "Safe" colleges the student can definitely get into
+- top_institutes: max 4 items; courses_offered: max 4 items; key_topics: max 4 items; recommended_resources: max 3 items; tips: max 5 items; action_timeline: max 5 items${hasFavColleges ? `\n- For each favorite college: analyze feasibility vs the student's actual marks, community, and quota. Provide last 3 years historical cutoffs (OC + student's category if different), 4-5 specific alternative admission routes (management quota, NRI quota, lateral entry after diploma, special counselling rounds, etc.), 3-4 similar alternative colleges if out of reach, and 2-3 branches in the same college with lower cutoffs. historical_cutoffs: max 3 items; alternative_routes: max 5 items; similar_colleges: max 4 items; accessible_branches: max 3 items.` : ""}
 `;
 
   try {
-    const raw = await callClaude(prompt, 3000);
+    const raw = await callClaude(prompt, 8000);
     const result = parseJSON<Omit<CareerPredictionResult, "is_fallback">>(raw);
     return { ...result, is_fallback: false };
   } catch (err) {
@@ -923,7 +972,7 @@ export async function predictPlacement(input: PlacementPrepInput): Promise<Place
 
 Placement exams: ${input.placement_exams.length > 0 ? input.placement_exams.join(", ") : "AMCAT, eLitmus"}.
 
-Return ONLY valid JSON with no extra text:
+Return ONLY valid JSON with no extra text. Keep all string values concise (≤120 chars each).
 {
   "amcat_prep":            [{"topic": string, "resource": string, "platform": string, "duration": string, "notes": string}],
   "elitmus_prep":          [{"topic": string, "resource": string, "platform": string, "duration": string, "notes": string}],
@@ -937,13 +986,13 @@ Return ONLY valid JSON with no extra text:
 Rules:
 - AMCAT prep: 5 topics (Quant, Verbal, Logical, Coding/Automata, CS Basics)
 - eLitmus prep: 4 topics (Advanced Maths, Problem Solving, English RC, Speed techniques)
-- Campus calendar: 8 realistic companies that hire from Indian engineering colleges in ${input.branch}, with actual months
-- Off-campus portals: 7 with fresher-specific tips
-- 4-week plan: highly specific, actionable daily tasks tailored to ${input.branch}
-- HR tips: 6 specific fresher interview tips
-- Resume tips: 6 specific tips for an engineering fresher resume`;
+- Campus calendar: 6 realistic companies that hire from Indian engineering colleges in ${input.branch}
+- Off-campus portals: 5 with fresher-specific tips
+- 4-week plan: 4 weeks, max 5 tasks per week, tailored to ${input.branch}
+- HR tips: 5 specific fresher interview tips
+- Resume tips: 5 specific tips for an engineering fresher resume`;
   try {
-    const raw = await callClaude(prompt, 3000);
+    const raw = await callClaude(prompt, 6000);
     return { ...parseJSON<Omit<PlacementPrepResult, "is_fallback">>(raw), is_fallback: false };
   } catch (err) {
     console.error("[predictPlacement] AI parse error:", err);

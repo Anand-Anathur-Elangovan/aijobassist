@@ -86,35 +86,31 @@ export default function UploadResumePage() {
     setUploadState("uploading");
     setErrorMsg(null);
 
+    // 1. Upload the file to storage
     const { url, error } = await uploadResume(selectedFile, user.id);
-
     if (error || !url) {
       setErrorMsg(error?.message ?? "Upload failed. Check your Supabase storage config.");
       setUploadState("error");
       return;
     }
 
-    // Extract resume text server-side (PDF / DOCX → plain text for AI features)
-    let parsedText: string | undefined;
-    try {
-      const parseRes = await fetch("/api/ai/parse-resume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_url: url, user_id: user.id }),
-      });
-      if (parseRes.ok) {
-        const data = await parseRes.json();
-        parsedText = data.parsed_text as string;
-      }
-    } catch {
-      // Non-fatal — AI features will gracefully degrade if text extraction fails
-    }
-
-    const { error: metaError } = await saveResumeMeta(user.id, url, selectedFile.name, parsedText);
-    if (metaError) {
-      setErrorMsg(metaError.message);
+    // 2. Save the metadata row first so we have a resume_id
+    const { data: resumeRow, error: metaError } = await saveResumeMeta(user.id, url, selectedFile.name);
+    if (metaError || !resumeRow) {
+      setErrorMsg(metaError?.message ?? "Could not save resume metadata.");
       setUploadState("error");
       return;
+    }
+
+    // 3. Now parse the resume text and update the existing row with resume_id
+    try {
+      await fetch("/api/ai/parse-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_url: url, user_id: user.id, resume_id: resumeRow.id }),
+      });
+    } catch {
+      // Non-fatal — Smart Match will warn gracefully if text is missing
     }
 
     setUploadedUrl(url);

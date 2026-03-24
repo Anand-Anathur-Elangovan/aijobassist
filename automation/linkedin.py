@@ -189,6 +189,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
     resume_text_raw = task_input.get("resume_text", "").strip()
     if resume_text_raw and keywords:
         try:
+            print("  [LINKEDIN] Enriching keywords from resume…")
             from automation.ai_client import analyze_resume
             resume_info = analyze_resume(resume_text_raw)
             top_skills  = resume_info.get("skills", [])[:3]
@@ -198,8 +199,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             if additions:
                 keywords = f"{keywords} {' '.join(additions)}"
                 print(f"  [LINKEDIN] Keywords enriched from resume: {keywords}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [LINKEDIN] Keyword enrichment skipped ({e})")
 
     # ── Download resume once for the whole run ─────────────────
     # tailor_resume_for_job needs a local file path (or raw text)
@@ -234,11 +235,13 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
         if not task_input.get("resume_path") and task_input.get("tailor_resume"):
             print("  [LINKEDIN] ⚠️  Tailor mode requested but no resume available — tailoring will be skipped")
 
+    print("  [LINKEDIN] Launching browser…")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=stealth_launch_args())
         context = browser.new_context(**stealth_context_options())
         page    = context.new_page()
         inject_stealth(page)
+        print("  [LINKEDIN] Browser launched ✅")
 
         try:
             # ── STEP 1: Login ──────────────────────────────────
@@ -335,6 +338,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             applied  = 0
             skipped  = 0
             total    = len(unique_jobs)
+            _exhausted_pool = False   # flag: pool ran out before hitting max_apply
             for idx, (job_url, company_hint) in enumerate(unique_jobs):
                 if applied >= max_apply:
                     break
@@ -383,6 +387,58 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 else:
                     skipped += 1
                     _log(task_input, f"⏭  Skipped ({skipped} total) — trying next job", "warn")
+            else:
+                # The for loop finished without break → pool exhausted
+                if applied < max_apply:
+                    _exhausted_pool = True
+
+            # ── If pool exhausted, search for more jobs and continue ──
+            if _exhausted_pool and applied < max_apply:
+                _log(task_input, f"Pool of {total} jobs exhausted (applied {applied}/{max_apply}) — searching for more…", "warn")
+                # Search next pages with larger offset
+                extra_jobs: list[tuple[str, str]] = []
+                for _kw in _li_kw_list:
+                    for _li_loc in _li_loc_list:
+                        _loc_tag = f" in '{_li_loc}'" if _li_loc else " (anywhere)"
+                        _log(task_input, f"🔍 Extended search '{_kw}'{_loc_tag}…")
+                        extra_links = _search_jobs(page, _kw, _li_loc, task_input)
+                        extra_jobs.extend([(url, "") for url in extra_links])
+                # Deduplicate and remove already-seen
+                for url, hint in extra_jobs:
+                    if url not in seen_urls and url not in _li_seen_urls:
+                        seen_urls.add(url)
+                        unique_jobs_extra = [(url, hint)]
+                        for ej_url, ej_hint in unique_jobs_extra:
+                            if applied >= max_apply:
+                                break
+                            ctrl = _check_control(task_input)
+                            if ctrl.get("stop_requested"):
+                                break
+                            progress = 5 + int((applied / max_apply) * 90) if max_apply else 5
+                            _set_progress(task_input, progress, ej_url)
+                            _log(task_input, f"[{applied+1}/{max_apply}] Opening {ej_url}")
+                            success = _apply_to_job(page, ej_url, task_input)
+                            if _li_user_id:
+                                try:
+                                    from api_client import record_seen_job as _li_record_seen2
+                                    _li_skip_meta2: dict = {}
+                                    if _li_resume_fp:
+                                        _li_skip_meta2["resume_fingerprint"] = _li_resume_fp
+                                    _li_record_seen2(
+                                        _li_user_id, "linkedin", ej_url,
+                                        status="applied" if success else "skipped",
+                                        skip_reason="applied" if success else "skipped",
+                                        metadata=_li_skip_meta2,
+                                    )
+                                except Exception:
+                                    pass
+                            if success:
+                                applied += 1
+                                _log(task_input, f"✅ Applied ({applied}/{max_apply})", "success")
+                                _record_application(task_input, ej_url, ej_hint)
+                            else:
+                                skipped += 1
+                                _log(task_input, f"⏭  Skipped ({skipped} total) — trying next", "warn")
 
             _set_progress(task_input, 100)
             _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success")
@@ -478,20 +534,23 @@ def _fill_contact_fields(page: Page, task_input: dict):
         return  # nothing to fill
 
     try:
-        # Phone country code dropdown
-        country_sel = page.locator("select[id*='phoneNumber-country']").first
-        if country_sel.is_visible(timeout=2000):
-            country_sel.select_option(phone_country)
-            print(f"  [LINKEDIN] Set phone country: {phone_country}")
-    except Exception:
-        pass
-
-    try:
-        # Phone number input
+        # Phone number input — skip if already filled
         phone_input = page.locator("input[id*='phoneNumber-nationalNumber']").first
         if phone_input.is_visible(timeout=2000):
-            human_type(page, phone, locator=phone_input)
-            print(f"  [LINKEDIN] Filled phone: {phone}")
+            existing = (phone_input.input_value() or "").strip()
+            if existing:
+                print(f"  [LINKEDIN] Phone already filled ({existing}) — skipping")
+            else:
+                # Set country code first (only when we're actually filling the number)
+                try:
+                    country_sel = page.locator("select[id*='phoneNumber-country']").first
+                    if country_sel.is_visible(timeout=1000):
+                        country_sel.select_option(phone_country)
+                        print(f"  [LINKEDIN] Set phone country: {phone_country}")
+                except Exception:
+                    pass
+                human_type(page, phone, locator=phone_input)
+                print(f"  [LINKEDIN] Filled phone: {phone}")
     except Exception:
         pass
 
@@ -577,11 +636,209 @@ def _upload_resume(page: Page, task_input: dict):
                 pass
 
 
+def _pick_autocomplete(page: Page, inp, typed_text: str, timeout: int = 3000) -> bool:
+    """
+    After typing in an input, wait for an autocomplete/typeahead dropdown to appear
+    and click the best matching suggestion. Returns True if a suggestion was selected.
+    Works with LinkedIn's aria-autocomplete inputs and role="listbox" suggestion containers.
+    """
+    try:
+        # Wait briefly for the dropdown to appear
+        human_sleep(0.8, 1.5)
+
+        # LinkedIn uses several patterns for autocomplete suggestions:
+        suggestion_selectors = [
+            # LinkedIn's standard autocomplete suggestions
+            "div[role='listbox'] div[role='option']",
+            "ul[role='listbox'] li[role='option']",
+            "[role='listbox'] [role='option']",
+            # Generic dropdown suggestions
+            ".basic-typeahead__selectable",
+            ".typeahead-suggestion",
+            ".autocomplete-suggestion",
+            ".suggestions-list li",
+            "ul.typeahead-results li",
+            # Visible dropdown items near the input
+            ".fb-typeahead-result",
+        ]
+
+        suggestions = []
+        for sel in suggestion_selectors:
+            try:
+                items = page.locator(sel).all()
+                visible = [item for item in items if item.is_visible(timeout=500)]
+                if visible:
+                    suggestions = visible
+                    break
+            except Exception:
+                continue
+
+        if not suggestions:
+            return False
+
+        # Find best match: prefer exact match, then starts-with, then contains
+        typed_lower = typed_text.strip().lower()
+        best_match = None
+        best_score = -1
+
+        for item in suggestions:
+            try:
+                item_text = (item.inner_text() or "").strip().lower()
+                if not item_text:
+                    continue
+                if item_text == typed_lower:
+                    best_match = item
+                    best_score = 3
+                    break
+                elif item_text.startswith(typed_lower) and best_score < 2:
+                    best_match = item
+                    best_score = 2
+                elif typed_lower in item_text and best_score < 1:
+                    best_match = item
+                    best_score = 1
+            except Exception:
+                continue
+
+        # If no text match, just pick the first suggestion
+        if best_match is None and suggestions:
+            best_match = suggestions[0]
+
+        if best_match:
+            try:
+                selected_text = best_match.inner_text().strip()
+                best_match.click(timeout=2000)
+                human_sleep(0.3, 0.8)
+                print(f"  [LINKEDIN] Autocomplete selected: '{selected_text[:60]}'")
+                return True
+            except Exception:
+                # Try JS click as fallback
+                try:
+                    best_match.evaluate("el => el.click()")
+                    print(f"  [LINKEDIN] Autocomplete selected (JS click)")
+                    return True
+                except Exception:
+                    pass
+
+    except Exception:
+        pass
+    return False
+
+
+def _is_autocomplete_input(inp) -> bool:
+    """Check if an input field is an autocomplete/typeahead input."""
+    try:
+        aria_ac = (inp.get_attribute("aria-autocomplete") or "").lower()
+        if aria_ac in ("list", "both"):
+            return True
+        role = (inp.get_attribute("role") or "").lower()
+        if role == "combobox":
+            return True
+        inp_class = (inp.get_attribute("class") or "").lower()
+        if any(kw in inp_class for kw in ("typeahead", "autocomplete", "combobox")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _build_user_profile(task_input: dict) -> dict:
+    """
+    Build a user_profile dict from task_input for Claude AI calls.
+    If dashboard fields are empty, auto-extracts from resume text as fallback.
+    Only extracts once per run (cached in task_input under _resume_profile_cache).
+    """
+    # Return cached version if already built this run
+    if "_user_profile_cache" in task_input:
+        return dict(task_input["_user_profile_cache"])
+
+    profile = {
+        "full_name": task_input.get("full_name", ""),
+        "email": task_input.get("email", ""),
+        "phone": task_input.get("phone", ""),
+        "current_city": task_input.get("current_city", ""),
+        "linkedin_url": task_input.get("linkedin_url", ""),
+        "github_url": task_input.get("github_url", ""),
+        "portfolio_url": task_input.get("portfolio_url", ""),
+        "years_experience": task_input.get("years_experience", 2),
+        "highest_education": task_input.get("highest_education", ""),
+        "notice_period": task_input.get("notice_period", ""),
+        "salary_expectation": task_input.get("salary_expectation", ""),
+        "current_ctc": task_input.get("current_ctc", ""),
+    }
+
+    # Add employment context
+    emps = task_input.get("employments") or task_input.get("_employment_data") or []
+    if emps:
+        current = next((e for e in emps if e.get("is_current")), emps[0])
+        profile["current_company"] = current.get("company", "")
+        profile["current_position"] = current.get("position", "")
+
+    # Add education context
+    edus = task_input.get("educations") or task_input.get("_education_data") or []
+    if edus:
+        profile["school"] = edus[0].get("school", "")
+        profile["degree"] = edus[0].get("degree", "")
+        profile["major"] = edus[0].get("major", "")
+        grad_year = edus[0].get("end_year", "")
+        if grad_year:
+            profile["graduation_year"] = str(grad_year)
+
+    # ── Resume fallback: extract missing fields from resume text ──
+    # If key profile fields are still empty, auto-extract from resume once
+    resume_text = task_input.get("resume_text", "")
+    needs_resume_extract = resume_text and (
+        not profile.get("current_company") or
+        not profile.get("school") or
+        not profile.get("current_city") or
+        not emps or not edus
+    )
+
+    if needs_resume_extract and not task_input.get("_resume_extracted"):
+        task_input["_resume_extracted"] = True  # prevent re-extraction
+        try:
+            from automation.ai_client import extract_employment, extract_education, analyze_resume
+            # Extract employment if missing
+            if not emps:
+                extracted_emps = extract_employment(resume_text)
+                if extracted_emps:
+                    task_input["_employment_data"] = extracted_emps
+                    current = next((e for e in extracted_emps if e.get("is_current")), extracted_emps[0])
+                    profile["current_company"] = profile.get("current_company") or current.get("company", "")
+                    profile["current_position"] = profile.get("current_position") or current.get("position", "")
+                    print(f"  [PROFILE] 💼 Auto-extracted {len(extracted_emps)} employment entries from resume")
+            # Extract education if missing
+            if not edus:
+                extracted_edus = extract_education(resume_text)
+                if extracted_edus:
+                    task_input["_education_data"] = extracted_edus
+                    profile["school"] = profile.get("school") or extracted_edus[0].get("school", "")
+                    profile["degree"] = profile.get("degree") or extracted_edus[0].get("degree", "")
+                    profile["major"] = profile.get("major") or extracted_edus[0].get("major", "")
+                    grad_year = extracted_edus[0].get("end_year", "")
+                    if grad_year:
+                        profile["graduation_year"] = profile.get("graduation_year") or str(grad_year)
+                    print(f"  [PROFILE] 🎓 Auto-extracted {len(extracted_edus)} education entries from resume")
+            # Extract basic info (email, years_experience) if missing
+            if not profile.get("email") or not profile.get("years_experience"):
+                basic = analyze_resume(resume_text)
+                if not profile.get("email") and basic.get("email_hint"):
+                    profile["email"] = basic["email_hint"]
+                if not profile.get("years_experience") and basic.get("years_experience"):
+                    profile["years_experience"] = basic["years_experience"]
+        except Exception as e:
+            print(f"  [PROFILE] ⚠️ Resume fallback extraction failed: {e}")
+
+    # Cache the built profile for this run
+    task_input["_user_profile_cache"] = dict(profile)
+    return profile
+
+
 def _fill_additional_questions(page: Page, task_input: dict):
     """
     Auto-fill additional application questions.
     Handles: years-of-experience inputs, decimal-with-minimum inputs,
-    skill rating inputs, yes/no selects, open text.
+    skill rating inputs, yes/no selects, open text, autocomplete/typeahead,
+    education fields, and checkboxes.
     """
     task_input   = task_input or {}
     years        = task_input.get("years_experience", 2)
@@ -679,14 +936,34 @@ def _fill_additional_questions(page: Page, task_input: dict):
                         inp.fill(str(int(fill_val)))
                         print(f"  [LINKEDIN] Filled unknown numeric '{label_text[:60]}' = {fill_val}")
                     elif input_type == "text" and label_text:
+                        # Check if this is an autocomplete/typeahead input
+                        is_autocomplete = _is_autocomplete_input(inp)
+
+                        # Detect city/location fields for autocomplete
+                        is_city_field = any(w in label_text for w in (
+                            "city", "location", "town", "where", "place", "metro",
+                            "hometown", "home town", "address",
+                        ))
+
                         # Use Claude to compose a free-text answer
                         try:
                             from automation.ai_client import claude_answer_question
                             resume_summary = task_input.get("resume_text", "")[:500]
-                            answer = claude_answer_question(label_text, [], resume_summary)
+                            user_profile = _build_user_profile(task_input)
+
+                            # For city fields, prefer profile data directly
+                            if is_city_field:
+                                answer = (task_input.get("current_city") or "").strip()
+                            else:
+                                answer = claude_answer_question(label_text, [], resume_summary, user_profile=user_profile)
+
                             if answer:
                                 human_type(page, answer, locator=inp)
-                                print(f"  [LINKEDIN] Claude filled text '{label_text[:60]}' = {answer[:60]}")
+                                print(f"  [LINKEDIN] {'Claude' if not is_city_field else 'Profile'} filled text '{label_text[:60]}' = {answer[:60]}")
+
+                                # Try to pick from autocomplete if dropdown appears
+                                if is_autocomplete or is_city_field:
+                                    _pick_autocomplete(page, inp, answer)
                         except Exception:
                             pass
                     # Leave truly unknown fields empty
@@ -750,6 +1027,9 @@ def _fill_additional_questions(page: Page, task_input: dict):
         _NO_KEYWORDS = (
             "sponsorship", "require visa", "need visa", "need sponsorship",
             "require sponsorship", "do you need", "will you require",
+            "personal relationship", "relationship with", "know the employee",
+            "associated with deloitte", "employed by any company",
+            "applied to", "applied in the past",
         )
         # Keywords that should get "Yes" (all other yes/no questions)
         _YES_KEYWORDS = (
@@ -758,6 +1038,8 @@ def _fill_additional_questions(page: Page, task_input: dict):
             "start immediately", "immediately", "urgently",
             "can you start", "available immediately",
             "background check", "drug test", "agree",
+            "text/sms updates", "sms updates", "email me about",
+            "newsletter",
         )
 
         # Collect ALL radio inputs (including CSS-hidden ones)
@@ -823,20 +1105,53 @@ def _fill_additional_questions(page: Page, task_input: dict):
 
                 # Decide: should this group get "Yes" or "No"?
                 want_no = any(kw in question_text for kw in _NO_KEYWORDS)
+
+                # Location-based radio (e.g. "Are you currently based in Bangkok?")
+                if not want_no and any(kw in question_text for kw in ("currently based", "open to relocate", "willing to relocate")):
+                    user_city = (task_input.get("current_city") or "").lower()
+                    user_locs = [p.strip().lower() for p in str(task_input.get("location", "")).split(",") if p.strip()]
+                    # Check if the question mentions a city/country that matches user's location
+                    all_locs = [user_city] + user_locs if user_city else user_locs
+                    if all_locs and any(loc in question_text for loc in all_locs):
+                        want_no = False  # Yes — user is there or willing
+                    else:
+                        want_no = True   # No — not based there
+
                 want_yes = not want_no  # default is Yes for all other questions
 
                 # Find the target option
                 target_radio, target_label_id = None, None
-                # First pass: find Yes or No option matching intent
-                for r, lbl, val, inp_id in options:
-                    is_yes = val in ("yes", "true", "1") or lbl in ("yes",)
-                    is_no  = val in ("no", "false", "0") or lbl in ("no",)
-                    if want_yes and is_yes:
-                        target_radio, target_label_id = r, inp_id
-                        break
-                    if want_no and is_no:
-                        target_radio, target_label_id = r, inp_id
-                        break
+                # Check if these are simple Yes/No radio options
+                option_labels = [lbl for _, lbl, _, _ in options]
+                is_yes_no = set(option_labels) <= {"yes", "no", ""}
+
+                if is_yes_no:
+                    # Simple Yes/No — use keyword heuristics
+                    for r, lbl, val, inp_id in options:
+                        is_yes = val in ("yes", "true", "1") or lbl in ("yes",)
+                        is_no  = val in ("no", "false", "0") or lbl in ("no",)
+                        if want_yes and is_yes:
+                            target_radio, target_label_id = r, inp_id
+                            break
+                        if want_no and is_no:
+                            target_radio, target_label_id = r, inp_id
+                            break
+                else:
+                    # Non-Yes/No radios — use Claude to pick the best option
+                    try:
+                        from automation.ai_client import claude_answer_question
+                        non_blank = [lbl for _, lbl, _, _ in options if lbl.strip()]
+                        if non_blank and question_text:
+                            resume_summary = task_input.get("resume_text", "")[:500]
+                            user_profile = _build_user_profile(task_input)
+                            answer = claude_answer_question(question_text, non_blank, resume_summary, user_profile=user_profile)
+                            for r, lbl, val, inp_id in options:
+                                if lbl == answer.lower() or answer.lower() in lbl or lbl in answer.lower():
+                                    target_radio, target_label_id = r, inp_id
+                                    print(f"  [LINKEDIN] Radio → Claude picked '{lbl}' for: {question_text[:60]!r}")
+                                    break
+                    except Exception:
+                        pass
 
                 # Fallback: first option in the group
                 if target_radio is None and options:
@@ -992,6 +1307,35 @@ def _fill_additional_questions(page: Page, task_input: dict):
                                 sel.select_option(v)
                                 break
 
+                # How did you hear about this job → LinkedIn
+                elif any(w in question_text for w in ("how did you hear", "how did you find", "where did you hear", "source")):
+                    if not _pick(["linkedin", "job board", "online", "internet"]):
+                        for i, v in enumerate(opt_vals):
+                            if v.lower() not in _SKIP_VALS:
+                                sel.select_option(v)
+                                break
+
+                # Highest education / academic level
+                elif any(w in question_text for w in ("education", "academic level", "degree", "qualification")):
+                    edu = (task_input.get("highest_education") or "").lower()
+                    if edu:
+                        # Try to match the user's education first
+                        if not _pick([edu]):
+                            _pick(["bachelor", "master", "b.tech", "b.e", "m.tech", "m.e"])
+                    else:
+                        _pick(["bachelor", "master", "b.tech", "b.e", "m.tech", "m.e"])
+
+                # Country / region based
+                elif any(w in question_text for w in ("country", "region", "based in")):
+                    city = (task_input.get("current_city") or "").lower()
+                    country = (task_input.get("phone_country") or "").split("(")[0].strip().lower()
+                    if city and _pick([city]):
+                        pass
+                    elif country and _pick([country]):
+                        pass
+                    else:
+                        _pick(["india"])
+
                 # Generic Yes/No dropdown
                 elif opt_texts and set(t for t in opt_texts if t not in _SKIP_VALS) <= {"yes", "no"}:
                     _pick(["yes"])
@@ -1005,7 +1349,8 @@ def _fill_additional_questions(page: Page, task_input: dict):
                             try:
                                 from automation.ai_client import claude_answer_question
                                 resume_summary = task_input.get("resume_text", "")[:500]
-                                answer = claude_answer_question(question_text, non_blank, resume_summary)
+                                user_profile = _build_user_profile(task_input)
+                                answer = claude_answer_question(question_text, non_blank, resume_summary, user_profile=user_profile)
                                 matched = False
                                 for i, t in enumerate(opt_texts):
                                     if t == answer.lower() and opt_vals[i].lower() not in _SKIP_VALS:
@@ -1030,6 +1375,593 @@ def _fill_additional_questions(page: Page, task_input: dict):
 
             except Exception:
                 pass
+    except Exception:
+        pass
+
+    # ── Checkboxes (privacy / terms / agreement) ───────────────
+    try:
+        checkboxes = page.locator("input[type='checkbox']").all()
+        for cb in checkboxes:
+            try:
+                if cb.is_checked():
+                    continue
+                # Get associated label text
+                cb_id = cb.get_attribute("id") or ""
+                label_text = ""
+                if cb_id:
+                    lbl = page.locator(f"label[for='{cb_id}']")
+                    if lbl.count() > 0:
+                        label_text = lbl.first.inner_text().lower()
+                if not label_text:
+                    try:
+                        label_text = cb.evaluate(
+                            "el => el.closest('label') ? el.closest('label').innerText : ''"
+                        ).lower()
+                    except Exception:
+                        pass
+                # Also check nearby text for context
+                if not label_text:
+                    try:
+                        label_text = cb.evaluate(
+                            """el => {
+                                let p = el.parentElement;
+                                for (let i = 0; i < 4; i++) {
+                                    if (!p) break;
+                                    const t = p.innerText || '';
+                                    if (t.length > 5 && t.length < 500) return t;
+                                    p = p.parentElement;
+                                }
+                                return '';
+                            }"""
+                        ).lower()
+                    except Exception:
+                        pass
+
+                # Check if this looks like a terms/privacy/agreement checkbox
+                _AGREE_KEYWORDS = (
+                    "agree", "terms", "privacy", "consent", "certify",
+                    "acknowledge", "confirm", "policy", "declaration",
+                    "i have read", "i accept", "checking this box",
+                    "by checking", "i understand",
+                )
+                if any(kw in label_text for kw in _AGREE_KEYWORDS) or not label_text:
+                    # Click the label if possible (checkbox may be CSS-hidden)
+                    clicked = False
+                    if cb_id:
+                        try:
+                            lbl_el = page.locator(f"label[for='{cb_id}']").first
+                            if lbl_el.is_visible(timeout=1000):
+                                lbl_el.click(timeout=2000)
+                                clicked = True
+                        except Exception:
+                            pass
+                    if not clicked:
+                        try:
+                            cb.click(timeout=2000)
+                            clicked = True
+                        except Exception:
+                            pass
+                    if not clicked:
+                        try:
+                            cb.evaluate("el => el.click()")
+                            clicked = True
+                        except Exception:
+                            pass
+                    if clicked:
+                        print(f"  [LINKEDIN] ☑ Checked: '{label_text[:60]}'")
+                        micro_pause()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── Education section fields ───────────────────────────────
+    # LinkedIn Easy Apply sometimes has education sub-forms with:
+    # School, City, Degree (dropdown), Major/Field of study, Dates
+    _fill_education_fields(page, task_input)
+
+    # ── Employment / Work Experience fields ────────────────────
+    _fill_employment_fields(page, task_input)
+
+
+def _fill_education_fields(page: Page, task_input: dict):
+    """
+    Fill education section fields in LinkedIn Easy Apply forms.
+    Extracts education data from resume via AI and fills school, city, degree, major, dates.
+    """
+    task_input = task_input or {}
+
+    # Check if there are education-related fields on this page
+    edu_labels = page.locator(
+        "label:visible"
+    ).all()
+    has_edu_fields = False
+    for lbl in edu_labels:
+        try:
+            txt = (lbl.inner_text() or "").lower()
+            if any(kw in txt for kw in ("school", "university", "college", "degree", "field of study", "major")):
+                has_edu_fields = True
+                break
+        except Exception:
+            pass
+
+    if not has_edu_fields:
+        return
+
+    # Get or extract education data
+    # Priority: 1) Dashboard-provided educations, 2) AI extraction from resume
+    edu_data = task_input.get("_education_data")
+    if edu_data is None:
+        # Check if user provided education from dashboard
+        dashboard_edu = task_input.get("educations")
+        if dashboard_edu and len(dashboard_edu) > 0:
+            edu_data = dashboard_edu
+            task_input["_education_data"] = edu_data
+            print(f"  [LINKEDIN] 🎓 Using {len(edu_data)} education entries from dashboard profile")
+        else:
+            # Fall back to AI extraction from resume
+            resume_text = task_input.get("resume_text", "")
+            if resume_text:
+                try:
+                    from automation.ai_client import extract_education
+                    edu_data = extract_education(resume_text)
+                    task_input["_education_data"] = edu_data
+                    if edu_data:
+                        print(f"  [LINKEDIN] 🎓 Extracted {len(edu_data)} education entries from resume")
+                except Exception as e:
+                    print(f"  [LINKEDIN] ⚠️ Education extraction failed: {e}")
+                    edu_data = []
+                    task_input["_education_data"] = edu_data
+
+    if not edu_data:
+        return
+
+    # Use the most recent education entry (first in the list)
+    edu = edu_data[0] if edu_data else {}
+
+    # Map label keywords to education data fields
+    _EDU_FIELD_MAP = {
+        ("school", "university", "college", "institution"): "school",
+        ("degree",): "_degree_dropdown",  # handled as dropdown below
+        ("field of study", "major", "area of study", "specialization", "discipline"): "major",
+        ("gpa", "grade", "cgpa", "percentage"): "gpa",
+    }
+
+    # Fill text inputs for education fields
+    try:
+        inputs = page.locator("input[type='text']:visible").all()
+        for inp in inputs:
+            try:
+                val = (inp.input_value() or "").strip()
+                if val:
+                    continue
+
+                inp_id = inp.get_attribute("id") or ""
+                label_text = ""
+                if inp_id:
+                    lbl = page.locator(f"label[for='{inp_id}']")
+                    if lbl.count() > 0:
+                        label_text = lbl.first.inner_text().lower()
+
+                if not label_text:
+                    continue
+
+                # Match against education field keywords
+                for keywords, field_key in _EDU_FIELD_MAP.items():
+                    if any(kw in label_text for kw in keywords):
+                        if field_key == "_degree_dropdown":
+                            continue  # handled in dropdown section
+                        fill_value = edu.get(field_key, "")
+                        if fill_value:
+                            human_type(page, str(fill_value), locator=inp)
+                            print(f"  [LINKEDIN] 🎓 Filled education '{label_text[:50]}' = {fill_value[:50]}")
+                            # Try autocomplete if it appears (e.g., School name)
+                            if _is_autocomplete_input(inp) or any(kw in label_text for kw in ("school", "university", "college")):
+                                _pick_autocomplete(page, inp, str(fill_value))
+                        break
+
+                # City field in education section
+                if any(kw in label_text for kw in ("city", "location")) and "school" not in label_text:
+                    city = edu.get("city", "")
+                    if city:
+                        human_type(page, city, locator=inp)
+                        print(f"  [LINKEDIN] 🎓 Filled education city = {city}")
+                        if _is_autocomplete_input(inp):
+                            _pick_autocomplete(page, inp, city)
+
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Fill degree dropdown (select element)
+    try:
+        selects = page.locator("select:visible").all()
+        for sel in selects:
+            try:
+                sel_id = sel.get_attribute("id") or ""
+                question_text = ""
+                if sel_id:
+                    lbl = page.locator(f"label[for='{sel_id}']")
+                    if lbl.count() > 0:
+                        question_text = lbl.first.inner_text().lower()
+                if not question_text:
+                    continue
+                if "degree" not in question_text:
+                    continue
+
+                current = sel.evaluate("el => el.value") or ""
+                if current and current.lower() not in ("", "select an option", "none", "please select"):
+                    continue
+
+                degree = edu.get("degree", "")
+                if not degree:
+                    continue
+
+                opts = sel.locator("option").all()
+                opt_vals = [(o.get_attribute("value") or "").strip() for o in opts]
+                opt_texts = [(o.inner_text() or "").strip().lower() for o in opts]
+                degree_lower = degree.lower()
+
+                # Try to match degree
+                matched = False
+                for i, t in enumerate(opt_texts):
+                    if degree_lower in t or t in degree_lower:
+                        sel.select_option(opt_vals[i])
+                        print(f"  [LINKEDIN] 🎓 Degree dropdown → '{opt_texts[i]}'")
+                        matched = True
+                        break
+                if not matched:
+                    # Try common degree mappings
+                    degree_map = {
+                        "b.tech": "bachelor", "b.e": "bachelor", "bsc": "bachelor",
+                        "ba": "bachelor", "bba": "bachelor", "bcom": "bachelor",
+                        "m.tech": "master", "m.e": "master", "msc": "master",
+                        "ma": "master", "mba": "master", "mcom": "master",
+                        "phd": "doctor", "ph.d": "doctor",
+                        "diploma": "associate",
+                    }
+                    mapped = None
+                    for key, val_mapped in degree_map.items():
+                        if key in degree_lower:
+                            mapped = val_mapped
+                            break
+                    if mapped:
+                        for i, t in enumerate(opt_texts):
+                            if mapped in t:
+                                sel.select_option(opt_vals[i])
+                                print(f"  [LINKEDIN] 🎓 Degree dropdown (mapped) → '{opt_texts[i]}'")
+                                break
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Fill date fields (month/year dropdowns or inputs)
+    try:
+        # Look for date-related selects (start/end month, start/end year)
+        selects = page.locator("select:visible").all()
+        for sel in selects:
+            try:
+                sel_id = sel.get_attribute("id") or ""
+                question_text = ""
+                if sel_id:
+                    lbl = page.locator(f"label[for='{sel_id}']")
+                    if lbl.count() > 0:
+                        question_text = lbl.first.inner_text().lower()
+                if not question_text:
+                    question_text = sel.evaluate(
+                        """el => {
+                            let p = el.parentElement;
+                            for (let i = 0; i < 4; i++) {
+                                if (!p) break;
+                                const h = p.querySelector('label,legend,span');
+                                if (h && h.innerText.trim().length > 2) return h.innerText.trim();
+                                p = p.parentElement;
+                            }
+                            return '';
+                        }"""
+                    ).lower()
+
+                current = sel.evaluate("el => el.value") or ""
+                if current and current.lower() not in ("", "select an option", "none", "please select", "month", "year"):
+                    continue
+
+                opts = sel.locator("option").all()
+                opt_vals = [(o.get_attribute("value") or "").strip() for o in opts]
+                opt_texts = [(o.inner_text() or "").strip().lower() for o in opts]
+
+                # Determine if this is a month or year dropdown and start or end
+                is_month = "month" in question_text or any("january" in t or "february" in t for t in opt_texts)
+                is_year = "year" in question_text or any(t.isdigit() and len(t) == 4 for t in opt_texts)
+                is_start = "start" in question_text or "from" in question_text
+                is_end = "end" in question_text or "to" in question_text
+
+                # Default to end date if not clearly start
+                if not is_start and not is_end:
+                    # Check parent section for clues
+                    try:
+                        section_text = sel.evaluate(
+                            """el => {
+                                let p = el.parentElement;
+                                for (let i = 0; i < 6; i++) {
+                                    if (!p) break;
+                                    const t = p.innerText || '';
+                                    if (t.toLowerCase().includes('start') || t.toLowerCase().includes('from')) return 'start';
+                                    if (t.toLowerCase().includes('end') || t.toLowerCase().includes('to date')) return 'end';
+                                    p = p.parentElement;
+                                }
+                                return 'end';
+                            }"""
+                        ).lower()
+                        is_start = section_text == "start"
+                        is_end = section_text == "end"
+                    except Exception:
+                        is_end = True
+
+                if is_month:
+                    month_val = edu.get("start_month" if is_start else "end_month", "")
+                    if month_val:
+                        month_int = int(month_val)
+                        # Month options are usually month names or numbers
+                        for i, t in enumerate(opt_texts):
+                            # Match by number or month name
+                            import calendar
+                            month_names = [m.lower() for m in calendar.month_name[1:]]
+                            if (t.isdigit() and int(t) == month_int) or \
+                               (month_int <= 12 and t.startswith(month_names[month_int - 1][:3])):
+                                sel.select_option(opt_vals[i])
+                                print(f"  [LINKEDIN] 🎓 {'Start' if is_start else 'End'} month → '{opt_texts[i]}'")
+                                break
+
+                elif is_year:
+                    year_val = edu.get("start_year" if is_start else "end_year", "")
+                    if year_val:
+                        for i, t in enumerate(opt_texts):
+                            if t == str(year_val):
+                                sel.select_option(opt_vals[i])
+                                print(f"  [LINKEDIN] 🎓 {'Start' if is_start else 'End'} year → '{year_val}'")
+                                break
+
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _fill_employment_fields(page: Page, task_input: dict):
+    """
+    Fill employment/work experience fields in LinkedIn Easy Apply forms.
+    Uses dashboard-provided employment data first, falls back to AI extraction.
+    Handles: company name, title/position, city, dates.
+    """
+    task_input = task_input or {}
+
+    # Check if there are employment-related fields on this page
+    has_emp_fields = False
+    for lbl in page.locator("label:visible").all():
+        try:
+            txt = (lbl.inner_text() or "").lower()
+            if any(kw in txt for kw in ("company", "employer", "organization", "title", "position", "job title")):
+                has_emp_fields = True
+                break
+        except Exception:
+            pass
+
+    if not has_emp_fields:
+        return
+
+    # Get or extract employment data
+    emp_data = task_input.get("_employment_data")
+    if emp_data is None:
+        dashboard_emp = task_input.get("employments")
+        if dashboard_emp and len(dashboard_emp) > 0:
+            emp_data = dashboard_emp
+            task_input["_employment_data"] = emp_data
+            print(f"  [LINKEDIN] 💼 Using {len(emp_data)} employment entries from dashboard")
+        else:
+            resume_text = task_input.get("resume_text", "")
+            if resume_text:
+                try:
+                    from automation.ai_client import extract_employment
+                    emp_data = extract_employment(resume_text)
+                    task_input["_employment_data"] = emp_data
+                    if emp_data:
+                        print(f"  [LINKEDIN] 💼 Extracted {len(emp_data)} employment entries from resume")
+                except Exception as e:
+                    print(f"  [LINKEDIN] ⚠️ Employment extraction failed: {e}")
+                    emp_data = []
+                    task_input["_employment_data"] = emp_data
+
+    if not emp_data:
+        return
+
+    # Use the most recent (current) employment entry
+    emp = emp_data[0] if emp_data else {}
+
+    # Map label keywords to employment data fields
+    _EMP_FIELD_MAP = {
+        ("company", "employer", "organization", "company name"): "company",
+        ("title", "position", "job title", "role", "designation"): "position",
+    }
+
+    try:
+        inputs = page.locator("input[type='text']:visible").all()
+        for inp in inputs:
+            try:
+                val = (inp.input_value() or "").strip()
+                if val:
+                    continue
+
+                inp_id = inp.get_attribute("id") or ""
+                label_text = ""
+                if inp_id:
+                    lbl = page.locator(f"label[for='{inp_id}']")
+                    if lbl.count() > 0:
+                        label_text = lbl.first.inner_text().lower()
+
+                if not label_text:
+                    continue
+
+                for keywords, field_key in _EMP_FIELD_MAP.items():
+                    if any(kw in label_text for kw in keywords):
+                        fill_value = emp.get(field_key, "")
+                        if fill_value:
+                            human_type(page, str(fill_value), locator=inp)
+                            print(f"  [LINKEDIN] 💼 Filled employment '{label_text[:50]}' = {fill_value[:50]}")
+                            if _is_autocomplete_input(inp) or any(kw in label_text for kw in ("company", "employer")):
+                                _pick_autocomplete(page, inp, str(fill_value))
+                        break
+
+                # City field in employment section
+                if any(kw in label_text for kw in ("city", "location")) and not any(kw in label_text for kw in ("company", "title")):
+                    city = emp.get("city", "") or task_input.get("current_city", "")
+                    if city:
+                        human_type(page, city, locator=inp)
+                        print(f"  [LINKEDIN] 💼 Filled employment city = {city}")
+                        if _is_autocomplete_input(inp):
+                            _pick_autocomplete(page, inp, city)
+
+                # Description/responsibilities
+                if any(kw in label_text for kw in ("description", "responsibilities", "summary")):
+                    desc = emp.get("description", "")
+                    if desc:
+                        human_type(page, str(desc)[:500], locator=inp)
+                        print(f"  [LINKEDIN] 💼 Filled employment description")
+
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Fill employment date fields (month/year dropdowns)
+    try:
+        import calendar
+        selects = page.locator("select:visible").all()
+        for sel in selects:
+            try:
+                sel_id = sel.get_attribute("id") or ""
+                question_text = ""
+                if sel_id:
+                    lbl = page.locator(f"label[for='{sel_id}']")
+                    if lbl.count() > 0:
+                        question_text = lbl.first.inner_text().lower()
+                if not question_text:
+                    question_text = sel.evaluate(
+                        """el => {
+                            let p = el.parentElement;
+                            for (let i = 0; i < 4; i++) {
+                                if (!p) break;
+                                const h = p.querySelector('label,legend,span');
+                                if (h && h.innerText.trim().length > 2) return h.innerText.trim();
+                                p = p.parentElement;
+                            }
+                            return '';
+                        }"""
+                    ).lower()
+
+                # Skip already-filled selects
+                current = sel.evaluate("el => el.value") or ""
+                if current and current.lower() not in ("", "select an option", "none", "please select", "month", "year"):
+                    continue
+
+                # Check if this is within employment section context
+                section_text = sel.evaluate(
+                    """el => {
+                        let p = el.parentElement;
+                        for (let i = 0; i < 8; i++) {
+                            if (!p) break;
+                            const t = p.innerText || '';
+                            if (t.toLowerCase().includes('work experience') ||
+                                t.toLowerCase().includes('employment') ||
+                                t.toLowerCase().includes('company')) return 'employment';
+                            p = p.parentElement;
+                        }
+                        return '';
+                    }"""
+                ).lower()
+                if "employment" not in section_text and not any(kw in question_text for kw in ("title", "company", "work")):
+                    continue
+
+                opts = sel.locator("option").all()
+                opt_vals = [(o.get_attribute("value") or "").strip() for o in opts]
+                opt_texts = [(o.inner_text() or "").strip().lower() for o in opts]
+
+                is_month = "month" in question_text or any("january" in t or "february" in t for t in opt_texts)
+                is_year = "year" in question_text or any(t.isdigit() and len(t) == 4 for t in opt_texts)
+                is_start = "start" in question_text or "from" in question_text
+                is_end = "end" in question_text or "to" in question_text
+
+                if not is_start and not is_end:
+                    parent_hint = sel.evaluate(
+                        """el => {
+                            let p = el.parentElement;
+                            for (let i = 0; i < 6; i++) {
+                                if (!p) break;
+                                const t = (p.innerText || '').toLowerCase();
+                                if (t.includes('start') || t.includes('from')) return 'start';
+                                if (t.includes('end') || t.includes('to date')) return 'end';
+                                p = p.parentElement;
+                            }
+                            return 'start';
+                        }"""
+                    ).lower()
+                    is_start = parent_hint == "start"
+                    is_end = parent_hint == "end"
+
+                if is_month:
+                    month_val = emp.get("start_month" if is_start else "end_month", "")
+                    if month_val:
+                        month_int = int(month_val)
+                        month_names = [m.lower() for m in calendar.month_name[1:]]
+                        for i, t in enumerate(opt_texts):
+                            if (t.isdigit() and int(t) == month_int) or \
+                               (month_int <= 12 and t.startswith(month_names[month_int - 1][:3])):
+                                sel.select_option(opt_vals[i])
+                                print(f"  [LINKEDIN] 💼 {'Start' if is_start else 'End'} month → '{opt_texts[i]}'")
+                                break
+
+                elif is_year:
+                    year_val = emp.get("start_year" if is_start else "end_year", "")
+                    if year_val:
+                        for i, t in enumerate(opt_texts):
+                            if t == str(year_val):
+                                sel.select_option(opt_vals[i])
+                                print(f"  [LINKEDIN] 💼 {'Start' if is_start else 'End'} year → '{year_val}'")
+                                break
+
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Handle "I currently work here" checkbox
+    try:
+        if emp.get("is_current"):
+            checkboxes = page.locator("input[type='checkbox']:visible").all()
+            for cb in checkboxes:
+                try:
+                    if cb.is_checked():
+                        continue
+                    cb_id = cb.get_attribute("id") or ""
+                    label_text = ""
+                    if cb_id:
+                        lbl = page.locator(f"label[for='{cb_id}']")
+                        if lbl.count() > 0:
+                            label_text = lbl.first.inner_text().lower()
+                    if any(kw in label_text for kw in ("currently work", "current", "present")):
+                        try:
+                            lbl_el = page.locator(f"label[for='{cb_id}']").first
+                            if lbl_el.is_visible(timeout=1000):
+                                lbl_el.click(timeout=2000)
+                            else:
+                                cb.click(timeout=2000)
+                        except Exception:
+                            cb.evaluate("el => el.click()")
+                        print(f"  [LINKEDIN] 💼 ☑ Checked 'Currently work here'")
+                        break
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -1170,8 +2102,11 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
 
     # ── Pagination ─────────────────────────────────────────────────────
     max_apply   = int(task_input.get("max_apply", MAX_APPLY))
-    target_pool = max_apply * 3   # fetch 3× so skips don't exhaust the list
-    max_pages   = 10
+    # When smart_match is on, most jobs get skipped — fetch a much larger pool
+    smart_match = task_input.get("smart_match", False)
+    pool_mult   = 10 if smart_match else 4
+    target_pool = max(max_apply * pool_mult, 30)   # minimum 30 jobs
+    max_pages   = 20
     seen: set   = set()
     job_links: list[str] = []
 

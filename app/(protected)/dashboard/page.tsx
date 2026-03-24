@@ -24,6 +24,55 @@ type TaskRow = {
   output?: { applied_count?: number; message?: string } | null;
 };
 
+type EmploymentEntry = {
+  company: string;
+  position: string;
+  city: string;
+  start_month: string;
+  start_year: string;
+  end_month: string;
+  end_year: string;
+  is_current: boolean;
+  description: string;
+};
+
+type EducationEntry = {
+  school: string;
+  city: string;
+  degree: string;
+  major: string;
+  start_month: string;
+  start_year: string;
+  end_month: string;
+  end_year: string;
+  gpa: string;
+};
+
+type ProjectEntry = {
+  name: string;
+  url: string;
+  technologies: string;
+  description: string;
+};
+
+const EMPTY_EMPLOYMENT: EmploymentEntry = {
+  company: "", position: "", city: "", start_month: "", start_year: "",
+  end_month: "", end_year: "", is_current: false, description: "",
+};
+const EMPTY_EDUCATION: EducationEntry = {
+  school: "", city: "", degree: "", major: "", start_month: "", start_year: "",
+  end_month: "", end_year: "", gpa: "",
+};
+const EMPTY_PROJECT: ProjectEntry = {
+  name: "", url: "", technologies: "", description: "",
+};
+
+const MONTHS = [
+  "", "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+const YEARS = Array.from({ length: 30 }, (_, i) => String(new Date().getFullYear() - i));
+
 export default function DashboardPage() {
   const { user } = useAuth();
   const { plan, subscription, usage, getRemaining } = useSubscription();
@@ -46,6 +95,19 @@ export default function DashboardPage() {
   const [maxApply, setMaxApply] = useState("5");
   const [noticePeriod, setNoticePeriod] = useState("30");
   const [salaryExpectation, setSalaryExpectation] = useState("");
+  const [currentCtc, setCurrentCtc] = useState("");
+  // Profile fields for form filling
+  const [currentCity, setCurrentCity] = useState("");
+  const [linkedinUrl, setLinkedinUrl] = useState("");
+  const [githubUrl, setGithubUrl] = useState("");
+  const [portfolioUrl, setPortfolioUrl] = useState("");
+  const [highestEducation, setHighestEducation] = useState("");
+  // Employment, Education & Projects — persisted to user_profiles.job_preferences
+  const [employments, setEmployments] = useState<EmploymentEntry[]>([]);
+  const [educations, setEducations] = useState<EducationEntry[]>([]);
+  const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileLoaded, setProfileLoaded] = useState(false);
   const [platform, setPlatform] = useState<"linkedin" | "naukri">("linkedin");
   const [semiAuto, setSemiAuto] = useState(false);
   const [applyMode, setApplyMode] = useState<"auto" | "tailor">("auto");
@@ -147,6 +209,56 @@ export default function DashboardPage() {
       }
     });
 
+    // Load saved profile fields from user_profiles.job_preferences
+    supabase.from("user_profiles").select("job_preferences").eq("user_id", user.id).maybeSingle().then(({ data }) => {
+      if (data?.job_preferences) {
+        const p = data.job_preferences as Record<string, unknown>;
+        // Profile fields
+        if (p.current_city) setCurrentCity(p.current_city as string);
+        if (p.linkedin_url) setLinkedinUrl(p.linkedin_url as string);
+        if (p.github_url) setGithubUrl(p.github_url as string);
+        if (p.portfolio_url) setPortfolioUrl(p.portfolio_url as string);
+        if (p.highest_education) setHighestEducation(p.highest_education as string);
+        if (p.phone) setPhone(p.phone as string);
+        if (p.phone_country) setPhoneCountry(p.phone_country as string);
+        if (p.years_experience) setYearsExp(String(p.years_experience));
+        if (p.notice_period) setNoticePeriod(String(p.notice_period));
+        if (p.salary_expectation) setSalaryExpectation(String(p.salary_expectation));
+        if (p.current_ctc) setCurrentCtc(String(p.current_ctc));
+        if (Array.isArray(p.employments)) setEmployments(p.employments as EmploymentEntry[]);
+        if (Array.isArray(p.educations)) setEducations(p.educations as EducationEntry[]);
+        if (Array.isArray(p.projects)) setProjects(p.projects as ProjectEntry[]);
+        // Search & automation settings
+        if (p.keywords) setKeywords(p.keywords as string);
+        if (p.keywords2 !== undefined) setKeywords2(p.keywords2 as string);
+        if (p.keywords3 !== undefined) setKeywords3(p.keywords3 as string);
+        if (Array.isArray(p.location_list)) setLocationList(p.location_list as string[]);
+        if (p.remote_enabled !== undefined) setRemoteEnabled(p.remote_enabled as boolean);
+        if (p.max_apply) setMaxApply(String(p.max_apply));
+        if (p.skill_rating) setSkillRating(String(p.skill_rating));
+        if (p.platform) setPlatform(p.platform as "linkedin" | "naukri");
+        if (p.semi_auto !== undefined) setSemiAuto(p.semi_auto as boolean);
+        if (p.apply_mode) setApplyMode(p.apply_mode as "auto" | "tailor");
+        if (p.auto_cover_letter !== undefined) setAutoCoverLetter(p.auto_cover_letter as boolean);
+        if (p.smart_match !== undefined) setSmartMatch(p.smart_match as boolean);
+        if (p.match_threshold) setMatchThreshold(p.match_threshold as number);
+        if (p.schedule_enabled !== undefined) setScheduleEnabled(p.schedule_enabled as boolean);
+        if (p.schedule_start_hour !== undefined) setScheduleStartHour(p.schedule_start_hour as number);
+        if (p.schedule_end_hour !== undefined) setScheduleEndHour(p.schedule_end_hour as number);
+        if (p.tailor_prompt !== undefined) setTailorPrompt(p.tailor_prompt as string);
+        if (Array.isArray(p.fav_companies)) setFavCompanies(p.fav_companies as string[]);
+        // Platform filters
+        if (p.linkedin_date_posted) setLinkedinDatePosted(p.linkedin_date_posted as "any" | "past24h" | "pastWeek" | "pastMonth");
+        if (p.linkedin_exp_level) setLinkedinExpLevel(p.linkedin_exp_level as "all" | "internship" | "entry" | "associate" | "mid" | "director" | "executive");
+        if (p.linkedin_job_type) setLinkedinJobType(p.linkedin_job_type as "all" | "fullTime" | "partTime" | "contract" | "temporary" | "internship");
+        if (p.naukri_date_posted) setNaukriDatePosted(p.naukri_date_posted as "any" | "1" | "3" | "7" | "15" | "30");
+        if (p.naukri_work_mode) setNaukriWorkMode(p.naukri_work_mode as "any" | "remote" | "hybrid" | "office");
+        if (p.naukri_job_type) setNaukriJobType(p.naukri_job_type as "all" | "fullTime" | "partTime" | "contract" | "temporary");
+        if (p.naukri_apply_types) setNaukriApplyTypes(p.naukri_apply_types as "both" | "direct_only" | "company_site_only");
+      }
+      setProfileLoaded(true);
+    });
+
     fetchTasks();
 
     // Supabase Realtime — subscribe to task row changes for this user
@@ -220,10 +332,73 @@ export default function DashboardPage() {
     }
   };
 
+  const saveProfile = async (silent = false) => {
+    const { data: userData } = await supabase.auth.getUser();
+    const u = userData.user;
+    if (!u) { if (!silent) alert("Not logged in"); return; }
+    if (!silent) setProfileSaving(true);
+    const prefs = {
+      // Profile fields
+      current_city: currentCity.trim(),
+      linkedin_url: linkedinUrl.trim(),
+      github_url: githubUrl.trim(),
+      portfolio_url: portfolioUrl.trim(),
+      highest_education: highestEducation.trim(),
+      phone: phone.trim(),
+      phone_country: phoneCountry,
+      years_experience: Number(yearsExp) || 0,
+      notice_period: Number(noticePeriod) || 0,
+      salary_expectation: salaryExpectation ? Number(salaryExpectation) : null,
+      current_ctc: currentCtc ? Number(currentCtc) : null,
+      employments: employments.filter(e => e.company.trim() || e.position.trim()),
+      educations: educations.filter(e => e.school.trim() || e.degree.trim()),
+      projects: projects.filter(p => p.name.trim()),
+      // Search & automation settings (persist across refresh)
+      keywords: keywords.trim(),
+      keywords2: keywords2.trim(),
+      keywords3: keywords3.trim(),
+      location_list: locationList,
+      remote_enabled: remoteEnabled,
+      max_apply: Number(maxApply) || 5,
+      skill_rating: Number(skillRating) || 8,
+      platform,
+      semi_auto: semiAuto,
+      apply_mode: applyMode,
+      auto_cover_letter: autoCoverLetter,
+      smart_match: smartMatch,
+      match_threshold: matchThreshold,
+      schedule_enabled: scheduleEnabled,
+      schedule_start_hour: scheduleStartHour,
+      schedule_end_hour: scheduleEndHour,
+      tailor_prompt: tailorPrompt,
+      fav_companies: favCompanies,
+      // Platform-specific filters
+      linkedin_date_posted: linkedinDatePosted,
+      linkedin_exp_level: linkedinExpLevel,
+      linkedin_job_type: linkedinJobType,
+      naukri_date_posted: naukriDatePosted,
+      naukri_work_mode: naukriWorkMode,
+      naukri_job_type: naukriJobType,
+      naukri_apply_types: naukriApplyTypes,
+    };
+    const { error } = await supabase.from("user_profiles").upsert(
+      { user_id: u.id, job_preferences: prefs, updated_at: new Date().toISOString() },
+      { onConflict: "user_id" }
+    );
+    if (!silent) {
+      setProfileSaving(false);
+      if (error) alert("Save failed: " + error.message);
+      else alert("Profile saved ✓");
+    }
+  };
+
   const createTask = async () => {
     const { data: userData } = await supabase.auth.getUser();
     const u = userData.user;
     if (!u) { alert("User not logged in"); return; }
+
+    // Auto-save profile before creating task
+    await saveProfile(true);
 
     setTaskLoading(true);
     const taskType = applyMode === "tailor" ? "TAILOR_AND_APPLY" : "AUTO_APPLY";
@@ -245,7 +420,20 @@ export default function DashboardPage() {
         max_apply: Number(maxApply),
         notice_period: Number(noticePeriod),
         salary_expectation: salaryExpectation ? Number(salaryExpectation) : undefined,
+        ...(currentCtc && { current_ctc: Number(currentCtc) }),
         followup_days: Number(followupDays),
+        // Profile fields for AI form filling
+        ...(currentCity.trim() && { current_city: currentCity.trim() }),
+        ...(linkedinUrl.trim() && { linkedin_url: linkedinUrl.trim() }),
+        ...(githubUrl.trim() && { github_url: githubUrl.trim() }),
+        ...(portfolioUrl.trim() && { portfolio_url: portfolioUrl.trim() }),
+        ...(highestEducation.trim() && { highest_education: highestEducation.trim() }),
+        // Employment, Education & Projects
+        ...(employments.length > 0 && { employments }),
+        ...(educations.length > 0 && { educations }),
+        ...(projects.length > 0 && { projects }),
+        full_name: u.user_metadata?.full_name || u.email?.split("@")[0] || "",
+        email: u.email || "",
         ...(linkedinEmail && { linkedin_email: linkedinEmail }),
         ...(linkedinPassword && { linkedin_password: linkedinPassword }),
         ...(gmailAddress && { gmail_address: gmailAddress }),
@@ -1283,6 +1471,15 @@ export default function DashboardPage() {
               />
             </div>
             <div>
+              <label className="block font-mono text-xs text-slate-400 mb-1">Current CTC (optional)</label>
+              <input
+                type="number" min="0" placeholder="e.g. 600000"
+                value={currentCtc}
+                onChange={(e) => setCurrentCtc(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div>
               <label className="block font-mono text-xs text-slate-400 mb-1">Expected Salary (optional)</label>
               <input
                 type="number" min="0" placeholder="e.g. 800000"
@@ -1292,6 +1489,330 @@ export default function DashboardPage() {
               />
             </div>
           </div>
+
+          {/* Profile fields for AI form filling */}
+          <div className="mt-3 pt-3 border-t border-slate-700/50">
+            <div className="flex items-center justify-between mb-3">
+              <p className="font-mono text-xs text-slate-500 uppercase tracking-widest">
+                Profile (used by AI to fill application forms)
+              </p>
+              <button
+                onClick={() => saveProfile()}
+                disabled={profileSaving}
+                className="text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1 rounded-lg transition-colors"
+              >
+                {profileSaving ? "Saving…" : "💾 Save Profile"}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block font-mono text-xs text-slate-400 mb-1">Current City</label>
+                <input
+                  type="text" placeholder="e.g. Chennai"
+                  value={currentCity}
+                  onChange={(e) => setCurrentCity(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block font-mono text-xs text-slate-400 mb-1">Highest Education</label>
+                <select
+                  value={highestEducation}
+                  onChange={(e) => setHighestEducation(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="">Select</option>
+                  <option value="High School">High School</option>
+                  <option value="Diploma">Diploma</option>
+                  <option value="Bachelor's Degree">Bachelor&apos;s Degree</option>
+                  <option value="Master's Degree">Master&apos;s Degree</option>
+                  <option value="Doctorate">Doctorate</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-mono text-xs text-slate-400 mb-1">LinkedIn URL</label>
+                <input
+                  type="url" placeholder="https://linkedin.com/in/yourprofile"
+                  value={linkedinUrl}
+                  onChange={(e) => setLinkedinUrl(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block font-mono text-xs text-slate-400 mb-1">GitHub URL</label>
+                <input
+                  type="url" placeholder="https://github.com/yourusername"
+                  value={githubUrl}
+                  onChange={(e) => setGithubUrl(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block font-mono text-xs text-slate-400 mb-1">Portfolio / Website URL</label>
+                <input
+                  type="url" placeholder="https://yourportfolio.com"
+                  value={portfolioUrl}
+                  onChange={(e) => setPortfolioUrl(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            {/* ── Employment History ──────────────────────────────── */}
+            <details className="mt-4 group">
+              <summary className="cursor-pointer font-mono text-xs text-blue-400 uppercase tracking-widest select-none hover:text-blue-300 transition-colors">
+                💼 Employment History ({employments.length}) — <span className="text-slate-500 normal-case">optional, helps AI fill work experience forms</span>
+              </summary>
+              <div className="mt-3 space-y-3">
+                {employments.map((emp, idx) => (
+                  <div key={idx} className="bg-slate-800/60 border border-slate-700/50 rounded-lg p-3 relative">
+                    <button
+                      onClick={() => setEmployments(prev => prev.filter((_, i) => i !== idx))}
+                      className="absolute top-2 right-2 text-slate-500 hover:text-red-400 text-xs"
+                      title="Remove"
+                    >✕</button>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Company</label>
+                        <input type="text" placeholder="e.g. Google" value={emp.company}
+                          onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, company: e.target.value } : em))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Position / Title</label>
+                        <input type="text" placeholder="e.g. Software Engineer" value={emp.position}
+                          onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, position: e.target.value } : em))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">City</label>
+                        <input type="text" placeholder="e.g. Bangalore" value={emp.city}
+                          onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, city: e.target.value } : em))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-1.5 font-mono text-[10px] text-slate-500 cursor-pointer">
+                          <input type="checkbox" checked={emp.is_current}
+                            onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, is_current: e.target.checked } : em))}
+                            className="rounded border-slate-600" />
+                          Currently working here
+                        </label>
+                      </div>
+                      <div className="flex gap-2">
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Start Month</label>
+                          <select value={emp.start_month}
+                            onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, start_month: e.target.value } : em))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
+                            <option value="">Month</option>
+                            {MONTHS.slice(1).map((m, mi) => <option key={mi} value={String(mi + 1)}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Start Year</label>
+                          <select value={emp.start_year}
+                            onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, start_year: e.target.value } : em))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
+                            <option value="">Year</option>
+                            {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">End Month</label>
+                          <select value={emp.end_month} disabled={emp.is_current}
+                            onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, end_month: e.target.value } : em))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 disabled:opacity-40">
+                            <option value="">{emp.is_current ? "Present" : "Month"}</option>
+                            {MONTHS.slice(1).map((m, mi) => <option key={mi} value={String(mi + 1)}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">End Year</label>
+                          <select value={emp.end_year} disabled={emp.is_current}
+                            onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, end_year: e.target.value } : em))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 disabled:opacity-40">
+                            <option value="">{emp.is_current ? "Present" : "Year"}</option>
+                            {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Description (optional)</label>
+                        <textarea rows={2} placeholder="Key responsibilities or achievements…" value={emp.description}
+                          onChange={e => setEmployments(prev => prev.map((em, i) => i === idx ? { ...em, description: e.target.value } : em))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500 resize-none" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setEmployments(prev => [...prev, { ...EMPTY_EMPLOYMENT }])}
+                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+                >+ Add Employment</button>
+              </div>
+            </details>
+
+            {/* ── Education Details ───────────────────────────────── */}
+            <details className="mt-4 group">
+              <summary className="cursor-pointer font-mono text-xs text-blue-400 uppercase tracking-widest select-none hover:text-blue-300 transition-colors">
+                🎓 Education ({educations.length}) — <span className="text-slate-500 normal-case">optional, helps AI fill education forms</span>
+              </summary>
+              <div className="mt-3 space-y-3">
+                {educations.map((edu, idx) => (
+                  <div key={idx} className="bg-slate-800/60 border border-slate-700/50 rounded-lg p-3 relative">
+                    <button
+                      onClick={() => setEducations(prev => prev.filter((_, i) => i !== idx))}
+                      className="absolute top-2 right-2 text-slate-500 hover:text-red-400 text-xs"
+                      title="Remove"
+                    >✕</button>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">School / University</label>
+                        <input type="text" placeholder="e.g. Anna University" value={edu.school}
+                          onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, school: e.target.value } : ed))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">City</label>
+                        <input type="text" placeholder="e.g. Chennai" value={edu.city}
+                          onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, city: e.target.value } : ed))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Degree</label>
+                        <select value={edu.degree}
+                          onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, degree: e.target.value } : ed))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
+                          <option value="">Select Degree</option>
+                          <option value="High School">High School</option>
+                          <option value="Diploma">Diploma</option>
+                          <option value="Associate's Degree">Associate&apos;s Degree</option>
+                          <option value="Bachelor's Degree">Bachelor&apos;s Degree</option>
+                          <option value="Master's Degree">Master&apos;s Degree</option>
+                          <option value="Doctorate">Doctorate</option>
+                          <option value="B.Tech">B.Tech</option>
+                          <option value="B.E">B.E</option>
+                          <option value="M.Tech">M.Tech</option>
+                          <option value="MBA">MBA</option>
+                          <option value="BCA">BCA</option>
+                          <option value="MCA">MCA</option>
+                          <option value="B.Sc">B.Sc</option>
+                          <option value="M.Sc">M.Sc</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Major / Field of Study</label>
+                        <input type="text" placeholder="e.g. Computer Science" value={edu.major}
+                          onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, major: e.target.value } : ed))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div className="flex gap-2">
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Start Month</label>
+                          <select value={edu.start_month}
+                            onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, start_month: e.target.value } : ed))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
+                            <option value="">Month</option>
+                            {MONTHS.slice(1).map((m, mi) => <option key={mi} value={String(mi + 1)}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Start Year</label>
+                          <select value={edu.start_year}
+                            onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, start_year: e.target.value } : ed))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
+                            <option value="">Year</option>
+                            {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">End Month</label>
+                          <select value={edu.end_month}
+                            onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, end_month: e.target.value } : ed))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
+                            <option value="">Month</option>
+                            {MONTHS.slice(1).map((m, mi) => <option key={mi} value={String(mi + 1)}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div className="flex-1">
+                          <label className="block font-mono text-[10px] text-slate-500 mb-0.5">End Year</label>
+                          <select value={edu.end_year}
+                            onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, end_year: e.target.value } : ed))}
+                            className="w-full bg-slate-900 border border-slate-700 text-white text-xs rounded px-2 py-1.5 focus:outline-none focus:border-blue-500">
+                            <option value="">Year</option>
+                            {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">GPA / Percentage (optional)</label>
+                        <input type="text" placeholder="e.g. 8.5 or 85%" value={edu.gpa}
+                          onChange={e => setEducations(prev => prev.map((ed, i) => i === idx ? { ...ed, gpa: e.target.value } : ed))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setEducations(prev => [...prev, { ...EMPTY_EDUCATION }])}
+                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+                >+ Add Education</button>
+              </div>
+            </details>
+
+            {/* ── Projects ───────────────────────────────────────── */}
+            <details className="mt-4 group">
+              <summary className="cursor-pointer font-mono text-xs text-blue-400 uppercase tracking-widest select-none hover:text-blue-300 transition-colors">
+                🚀 Projects ({projects.length}) — <span className="text-slate-500 normal-case">optional, showcase your work</span>
+              </summary>
+              <div className="mt-3 space-y-3">
+                {projects.map((proj, idx) => (
+                  <div key={idx} className="bg-slate-800/60 border border-slate-700/50 rounded-lg p-3 relative">
+                    <button
+                      onClick={() => setProjects(prev => prev.filter((_, i) => i !== idx))}
+                      className="absolute top-2 right-2 text-slate-500 hover:text-red-400 text-xs"
+                      title="Remove"
+                    >✕</button>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Project Name</label>
+                        <input type="text" placeholder="e.g. VantaHire" value={proj.name}
+                          onChange={e => setProjects(prev => prev.map((p, i) => i === idx ? { ...p, name: e.target.value } : p))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">URL (optional)</label>
+                        <input type="url" placeholder="https://github.com/..." value={proj.url}
+                          onChange={e => setProjects(prev => prev.map((p, i) => i === idx ? { ...p, url: e.target.value } : p))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Technologies</label>
+                        <input type="text" placeholder="e.g. React, Node.js, PostgreSQL" value={proj.technologies}
+                          onChange={e => setProjects(prev => prev.map((p, i) => i === idx ? { ...p, technologies: e.target.value } : p))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                      <div>
+                        <label className="block font-mono text-[10px] text-slate-500 mb-0.5">Description</label>
+                        <input type="text" placeholder="Brief description…" value={proj.description}
+                          onChange={e => setProjects(prev => prev.map((p, i) => i === idx ? { ...p, description: e.target.value } : p))}
+                          className="w-full bg-slate-900 border border-slate-700 text-white text-sm rounded px-2 py-1.5 focus:outline-none focus:border-blue-500" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setProjects(prev => [...prev, { ...EMPTY_PROJECT }])}
+                  className="text-xs text-blue-400 hover:text-blue-300 font-mono"
+                >+ Add Project</button>
+              </div>
+            </details>
+          </div>
+
           <div className="flex justify-end">
             <button
               onClick={() => {

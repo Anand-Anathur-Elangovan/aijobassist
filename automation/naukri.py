@@ -117,6 +117,7 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
     resume_text_raw = task_input.get("resume_text", "").strip()
     if resume_text_raw and keywords:
         try:
+            print("  [NAUKRI] Enriching keywords from resume…")
             from automation.ai_client import analyze_resume
             resume_info = analyze_resume(resume_text_raw)
             top_skills  = resume_info.get("skills", [])[:3]
@@ -125,9 +126,10 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
             if additions:
                 keywords = f"{keywords} {' '.join(additions)}"
                 print(f"  [NAUKRI] Keywords enriched from resume: {keywords}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [NAUKRI] Keyword enrichment skipped ({e})")
 
+    print("  [NAUKRI] Launching browser…")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=stealth_launch_args())
         context = browser.new_context(**stealth_context_options())
@@ -236,6 +238,10 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                     skipped += 1
                     print(f"  [NAUKRI] ⏭  Skipped [{_skip_reason}] ({skipped} total) — trying next job")
 
+            if applied < max_apply and skipped > 0:
+                print(f"  [NAUKRI] Pool exhausted (applied {applied}/{max_apply}, skipped {skipped}) — try broader keywords or lower match threshold")
+
+            print(f"  [NAUKRI] Run complete — applied: {applied}, skipped: {skipped}")
             return {
                 "applied_count": applied,
                 "skipped_count": skipped,
@@ -475,9 +481,11 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
 
     # ── Collect job links across multiple pages ──────────────
     max_apply   = int((task_input or {}).get("max_apply", MAX_APPLY))
-    # Pool per keyword: 3× buffer so skips don't exhaust the list; floor 100, cap 300
-    target_pool = min(max(max_apply * 3, 100), 300)
-    max_pages   = 15                       # safety cap (300 URLs ÷ ~20/page)
+    # When smart_match is on, most jobs get skipped — fetch a much larger pool
+    smart_match = (task_input or {}).get("smart_match", False)
+    pool_mult   = 10 if smart_match else 4
+    target_pool = min(max(max_apply * pool_mult, 100), 500)
+    max_pages   = 25                       # safety cap
     seen: set   = set()
     job_links: list[str] = []
 
@@ -893,6 +901,18 @@ def _fill_naukri_fields(page: Page, task_input: dict):
                 elif any(w in combined for w in ("notice", "noticeperiod")):
                     human_type(page, str(int(notice)), locator=inp)
                     print(f"  [NAUKRI] Filled notice = {notice}")
+                elif any(w in combined for w in ("company", "organization", "employer")):
+                    emps = task_input.get("employments") or []
+                    curr = next((e for e in emps if e.get("is_current")), emps[0] if emps else None)
+                    if curr and curr.get("company"):
+                        human_type(page, curr["company"], locator=inp)
+                        print(f"  [NAUKRI] Filled company = {curr['company']}")
+                elif any(w in combined for w in ("designation", "jobtitle", "job_title", "position", "title")):
+                    emps = task_input.get("employments") or []
+                    curr = next((e for e in emps if e.get("is_current")), emps[0] if emps else None)
+                    if curr and curr.get("position"):
+                        human_type(page, curr["position"], locator=inp)
+                        print(f"  [NAUKRI] Filled designation = {curr['position']}")
                 elif any(w in combined for w in ("currentctc", "current ctc", "current_ctc", "presentctc")):
                     current_ctc = str(task_input.get("current_ctc") or "")
                     if current_ctc:
@@ -980,6 +1000,79 @@ def _fill_naukri_fields(page: Page, task_input: dict):
                 r.click()
                 seen_names.add(name)
                 print(f"  [NAUKRI] Clicked first radio — group '{name}'")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── Checkboxes (privacy / terms / agreement) ────────────
+    try:
+        checkboxes = page.locator("input[type='checkbox']").all()
+        for cb in checkboxes:
+            try:
+                if cb.is_checked():
+                    continue
+                cb_id = cb.get_attribute("id") or ""
+                label_text = ""
+                if cb_id:
+                    lbl = page.locator(f"label[for='{cb_id}']")
+                    if lbl.count() > 0:
+                        label_text = lbl.first.inner_text().lower()
+                if not label_text:
+                    try:
+                        label_text = cb.evaluate(
+                            "el => el.closest('label') ? el.closest('label').innerText : ''"
+                        ).lower()
+                    except Exception:
+                        pass
+                if not label_text:
+                    try:
+                        label_text = cb.evaluate(
+                            """el => {
+                                let p = el.parentElement;
+                                for (let i = 0; i < 4; i++) {
+                                    if (!p) break;
+                                    const t = p.innerText || '';
+                                    if (t.length > 5 && t.length < 500) return t;
+                                    p = p.parentElement;
+                                }
+                                return '';
+                            }"""
+                        ).lower()
+                    except Exception:
+                        pass
+
+                _AGREE_KW = (
+                    "agree", "terms", "privacy", "consent", "certify",
+                    "acknowledge", "confirm", "policy", "declaration",
+                    "i have read", "i accept", "checking this box",
+                    "by checking", "i understand",
+                )
+                if any(kw in label_text for kw in _AGREE_KW) or not label_text:
+                    clicked = False
+                    if cb_id:
+                        try:
+                            lbl_el = page.locator(f"label[for='{cb_id}']").first
+                            if lbl_el.is_visible(timeout=1000):
+                                lbl_el.click(timeout=2000)
+                                clicked = True
+                        except Exception:
+                            pass
+                    if not clicked:
+                        try:
+                            cb.click(timeout=2000)
+                            clicked = True
+                        except Exception:
+                            pass
+                    if not clicked:
+                        try:
+                            cb.evaluate("el => el.click()")
+                            clicked = True
+                        except Exception:
+                            pass
+                    if clicked:
+                        print(f"  [NAUKRI] ☑ Checked: '{label_text[:60]}'")
+                        micro_pause()
             except Exception:
                 pass
     except Exception:
@@ -1371,7 +1464,30 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
                 "years_experience": years,
                 "cover_note":       cover_note,
                 "resume_text":      task_input.get("resume_text", ""),
+                "current_city":     task_input.get("current_city", ""),
+                "linkedin_url":     task_input.get("linkedin_url", ""),
+                "github_url":       task_input.get("github_url", ""),
+                "portfolio_url":    task_input.get("portfolio_url", ""),
+                "highest_education": task_input.get("highest_education", ""),
+                "notice_period":    task_input.get("notice_period", ""),
+                "salary_expectation": task_input.get("salary_expectation", ""),
+                "current_ctc":      task_input.get("current_ctc", ""),
             }
+            # Add employment context
+            emps = task_input.get("employments") or []
+            current_emp = next((e for e in emps if e.get("is_current")), emps[0] if emps else None)
+            if current_emp:
+                user_profile["current_company"] = current_emp.get("company", "")
+                user_profile["current_position"] = current_emp.get("position", "")
+            # Add education context
+            edus = task_input.get("educations") or []
+            if edus:
+                user_profile["school"] = edus[0].get("school", "")
+                user_profile["degree"] = edus[0].get("degree", "")
+                user_profile["major"] = edus[0].get("major", "")
+                grad_year = edus[0].get("end_year", "")
+                if grad_year:
+                    user_profile["graduation_year"] = str(grad_year)
             actions = analyze_and_fill_form(form_html, user_profile)
             if actions:
                 print(f"  [NAUKRI] 🤖 Claude returned {len(actions)} form actions")
@@ -1463,6 +1579,48 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
     # ── Resume upload (always, regardless of fill method) ──────────
     _upload_resume(page, task_input)
     human_sleep(0.5, 1.5)
+
+    # ── Checkboxes (terms / privacy / agreement) ──────────────────
+    try:
+        checkboxes = page.locator("input[type='checkbox']").all()
+        for cb in checkboxes:
+            try:
+                if cb.is_checked():
+                    continue
+                cb_id = cb.get_attribute("id") or ""
+                label_text = ""
+                if cb_id:
+                    lbl = page.locator(f"label[for='{cb_id}']")
+                    if lbl.count() > 0:
+                        label_text = lbl.first.inner_text().lower()
+                if not label_text:
+                    try:
+                        label_text = cb.evaluate(
+                            "el => el.closest('label') ? el.closest('label').innerText : ''"
+                        ).lower()
+                    except Exception:
+                        pass
+                _AGREE_KW = (
+                    "agree", "terms", "privacy", "consent", "certify",
+                    "acknowledge", "confirm", "policy", "declaration",
+                    "i have read", "i accept", "checking this box",
+                    "by checking", "i understand",
+                )
+                if any(kw in label_text for kw in _AGREE_KW) or not label_text:
+                    try:
+                        cb.click(timeout=2000)
+                        print(f"  [NAUKRI] ☑ Checked: '{label_text[:60]}'")
+                        micro_pause()
+                    except Exception:
+                        try:
+                            cb.evaluate("el => el.click()")
+                            print(f"  [NAUKRI] ☑ Checked (JS): '{label_text[:60]}'")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # ── Semi-auto: hand off to user, poll for completion ───────────
     if semi_auto:

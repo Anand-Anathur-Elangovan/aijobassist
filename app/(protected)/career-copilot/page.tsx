@@ -8,6 +8,7 @@ import type {
   CareerCourseResult,
   CareerCollegeResult,
   CareerExamRoadmap,
+  FavoriteCollegeAnalysis,
   PlacementPrepResult,
   PlacementResource,
   DriveTiming,
@@ -17,21 +18,22 @@ import type {
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-type FormStep = 1 | 2 | 3 | 4;
+type FormStep = 1 | 2 | 3 | 4 | 5;
 type CopilotMode = "pathfinder" | "placement";
 type PlacementTab = "exam" | "calendar" | "offcampus" | "plan";
 
 interface StudentForm {
-  student_name:   string;
-  state:          string;
-  board:          string;
-  marks_10th:     string;
-  marks_12th:     string;
-  stream_12th:    string;
-  entrance_exams: string[];
-  community:      string;
-  quota:          string[];
-  interests:      string[];
+  student_name:      string;
+  state:             string;
+  board:             string;
+  marks_10th:        string;
+  marks_12th:        string;
+  stream_12th:       string;
+  entrance_exams:    string[];
+  community:         string;
+  quota:             string[];
+  interests:         string[];
+  favorite_colleges: string[];
 }
 
 interface PlacementForm {
@@ -165,6 +167,13 @@ const IMP_COLORS: Record<string, string> = {
   Optional:  "text-slate-400 bg-slate-400/10 border-slate-400/30",
 };
 
+const FEASIBILITY_COLORS: Record<string, string> = {
+  "Reachable":    "text-emerald-400 bg-emerald-400/10 border-emerald-400/30",
+  "Stretch":      "text-amber-400 bg-amber-400/10 border-amber-400/30",
+  "Very Tough":   "text-orange-400 bg-orange-400/10 border-orange-400/30",
+  "Out of Range": "text-red-400 bg-red-400/10 border-red-400/30",
+};
+
 // ── Sub-components ────────────────────────────────────────────────────────
 
 function PillBadge({ label, color }: { label: string; color: string }) {
@@ -172,6 +181,99 @@ function PillBadge({ label, color }: { label: string; color: string }) {
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border ${color}`}>
       {label}
     </span>
+  );
+}
+
+function FavoriteCollegeCard({ a }: { a: FavoriteCollegeAnalysis }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="card p-0 overflow-hidden border-2 border-amber-400/20">
+      <button
+        className="w-full text-left p-4 flex items-start gap-3 hover:bg-slate-800/40 transition-colors"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="text-amber-400 text-lg shrink-0 mt-0.5">⭐</span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <p className="text-white font-semibold text-sm">{a.college_name}</p>
+            <PillBadge label={a.feasibility} color={FEASIBILITY_COLORS[a.feasibility] ?? PROB_COLORS.Low} />
+          </div>
+          <p className="text-xs text-slate-400">{a.gap_summary}</p>
+        </div>
+        <div className="text-right shrink-0 min-w-[90px]">
+          <p className="text-[10px] text-slate-500">Your cutoff</p>
+          <p className="text-sm font-mono text-white">{a.your_estimated_cutoff}</p>
+          <p className="text-[10px] text-slate-500 mt-0.5">Required</p>
+          <p className="text-xs font-mono text-amber-400">{a.required_cutoff}</p>
+          <span className={`text-slate-500 transition-transform inline-block mt-1 ${open ? "rotate-180" : ""}`}>▾</span>
+        </div>
+      </button>
+      {open && (
+        <div className="border-t border-slate-800 p-4 pt-3 space-y-4">
+          {/* Historical Cutoffs */}
+          {(a.historical_cutoffs?.length ?? 0) > 0 && (
+            <div>
+              <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-2">📊 Historical Cutoffs (Last 3 Years)</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-800">
+                      <th className="text-left text-slate-500 pb-1.5 font-medium pr-6">Year</th>
+                      <th className="text-left text-slate-500 pb-1.5 font-medium pr-6">Cutoff</th>
+                      <th className="text-left text-slate-500 pb-1.5 font-medium">Category</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {a.historical_cutoffs.map((h, i) => (
+                      <tr key={i}>
+                        <td className="py-1.5 text-slate-400 font-mono pr-6">{h.year}</td>
+                        <td className="py-1.5 text-white font-mono font-semibold pr-6">{h.cutoff}</td>
+                        <td className="py-1.5 text-slate-400">{h.category}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          {/* Alternative Routes */}
+          {(a.alternative_routes?.length ?? 0) > 0 && (
+            <div>
+              <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-2">🛤️ Alternative Admission Routes</p>
+              <ul className="space-y-1.5">
+                {a.alternative_routes.map((r, i) => (
+                  <li key={i} className="text-sm text-slate-300 flex gap-2">
+                    <span className="text-amber-400 shrink-0">→</span>{r}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {/* Similar Colleges */}
+          {(a.similar_colleges?.length ?? 0) > 0 && (
+            <div>
+              <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-2">🏛️ Similar Colleges (Alternatives if Out of Reach)</p>
+              <div className="flex flex-wrap gap-1.5">
+                {a.similar_colleges.map((c, i) => (
+                  <span key={i} className="px-2.5 py-1 bg-blue-400/10 border border-blue-400/20 text-blue-300 text-xs rounded-lg">{c}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Accessible Branches */}
+          {(a.accessible_branches?.length ?? 0) > 0 && (
+            <div>
+              <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-2">🎓 Accessible Branches in Same College</p>
+              <div className="flex flex-wrap gap-1.5">
+                {a.accessible_branches.map((b, i) => (
+                  <span key={i} className="px-2.5 py-1 bg-emerald-400/10 border border-emerald-400/20 text-emerald-300 text-xs rounded-lg">{b}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -306,16 +408,17 @@ function ExamCard({ e }: { e: CareerExamRoadmap }) {
 // ── Main Page ──────────────────────────────────────────────────────────────
 
 const EMPTY_FORM: StudentForm = {
-  student_name:   "",
-  state:          "",
-  board:          "CBSE",
-  marks_10th:     "",
-  marks_12th:     "",
-  stream_12th:    "",
-  entrance_exams: [],
-  community:      "OC",
-  quota:          [],
-  interests:      [],
+  student_name:      "",
+  state:             "",
+  board:             "CBSE",
+  marks_10th:        "",
+  marks_12th:        "",
+  stream_12th:       "",
+  entrance_exams:    [],
+  community:         "OC",
+  quota:             [],
+  interests:         [],
+  favorite_colleges: [],
 };
 
 export default function CareerCopilotPage() {
@@ -325,7 +428,7 @@ export default function CareerCopilotPage() {
   const [form, setForm] = useState<StudentForm>(EMPTY_FORM);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<CareerPredictionResult | null>(null);
-  const [activeTab, setActiveTab] = useState<"courses" | "colleges" | "exams" | "strategy">("courses");
+  const [activeTab, setActiveTab] = useState<"courses" | "colleges" | "exams" | "strategy" | "favorites">("courses");
   const [placementForm, setPlacementForm] = useState<PlacementForm>(EMPTY_PLACEMENT);
   const [placementLoading, setPlacementLoading] = useState(false);
   const [placementResult, setPlacementResult] = useState<PlacementPrepResult | null>(null);
@@ -333,6 +436,7 @@ export default function CareerCopilotPage() {
   const [error, setError] = useState<string | null>(null);
   const [placementError, setPlacementError] = useState<string | null>(null);
   const [interestInput, setInterestInput] = useState("");
+  const [favCollegeInput, setFavCollegeInput] = useState("");
   const [showCutoff, setShowCutoff] = useState(false);
   const [cutoffMarks, setCutoffMarks] = useState({ math: "", physics: "", chemistry: "", neet: "" });
   const resultRef = useRef<HTMLDivElement>(null);
@@ -352,25 +456,27 @@ export default function CareerCopilotPage() {
         const data = await res.json();
         if (data.profile) {
           setForm({
-            student_name:   data.profile.student_name ?? "",
-            state:          data.profile.state ?? "",
-            board:          data.profile.board ?? "CBSE",
-            marks_10th:     data.profile.marks_10th?.toString() ?? "",
-            marks_12th:     data.profile.marks_12th?.toString() ?? "",
-            stream_12th:    data.profile.stream_12th ?? "",
-            entrance_exams: data.profile.entrance_exams ?? [],
-            community:      data.profile.community ?? "OC",
-            quota:          data.profile.quota ?? [],
-            interests:      data.profile.interests ?? [],
+            student_name:      data.profile.student_name ?? "",
+            state:             data.profile.state ?? "",
+            board:             data.profile.board ?? "CBSE",
+            marks_10th:        data.profile.marks_10th?.toString() ?? "",
+            marks_12th:        data.profile.marks_12th?.toString() ?? "",
+            stream_12th:       data.profile.stream_12th ?? "",
+            entrance_exams:    data.profile.entrance_exams ?? [],
+            community:         data.profile.community ?? "OC",
+            quota:             data.profile.quota ?? [],
+            interests:         data.profile.interests ?? [],
+            favorite_colleges: data.profile.favorite_colleges ?? [],
           });
         }
         if (data.last_prediction) {
           setResult({
-            courses:      data.last_prediction.courses,
-            colleges:     data.last_prediction.colleges,
-            exam_roadmap: data.last_prediction.exam_roadmap,
-            strategy:     data.last_prediction.strategy,
-            is_fallback:  data.last_prediction.is_fallback,
+            courses:                   data.last_prediction.courses,
+            colleges:                  data.last_prediction.colleges,
+            exam_roadmap:              data.last_prediction.exam_roadmap,
+            strategy:                  data.last_prediction.strategy,
+            favorite_college_analysis: data.last_prediction.favorite_college_analysis ?? undefined,
+            is_fallback:               data.last_prediction.is_fallback,
           });
         }
       } catch { /* silent */ }
@@ -441,6 +547,12 @@ export default function CareerCopilotPage() {
           ...form,
           marks_10th: form.marks_10th ? parseFloat(form.marks_10th) : undefined,
           marks_12th: form.marks_12th ? parseFloat(form.marks_12th) : undefined,
+          cutoff_marks: {
+            math:      cutoffMarks.math      ? parseFloat(cutoffMarks.math)      : undefined,
+            physics:   cutoffMarks.physics   ? parseFloat(cutoffMarks.physics)   : undefined,
+            chemistry: cutoffMarks.chemistry ? parseFloat(cutoffMarks.chemistry) : undefined,
+            neet:      cutoffMarks.neet      ? parseFloat(cutoffMarks.neet)      : undefined,
+          },
         }),
       });
 
@@ -827,6 +939,80 @@ export default function CareerCopilotPage() {
     );
   }
 
+  function StepFavoriteColleges() {
+    return (
+      <div className="space-y-4">
+        <div className="bg-amber-400/5 border border-amber-400/20 rounded-lg p-4 text-sm text-amber-300 flex items-start gap-3">
+          <span className="shrink-0 text-xl">⭐</span>
+          <div>
+            <p className="font-semibold mb-1">Dream College Feasibility Check</p>
+            <p className="text-xs text-amber-200/70">Enter up to 5 colleges you aspire to attend. AI will check your real chance of getting in using your marks, community, and quota — including last 3 years of historical cutoffs, how close or far you are, alternative admission routes (management quota, lateral entry, etc.), and similar backup colleges.</p>
+          </div>
+        </div>
+        <div>
+          <label className={labelCls}>Add Your Dream College</label>
+          <div className="flex gap-2">
+            <input
+              className={inputCls}
+              placeholder="e.g. IIT Madras, VIT Vellore, PSG Tech Coimbatore..."
+              value={favCollegeInput}
+              disabled={form.favorite_colleges.length >= 5}
+              onChange={(e) => setFavCollegeInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const val = favCollegeInput.trim();
+                  if (val && !form.favorite_colleges.includes(val) && form.favorite_colleges.length < 5) {
+                    setForm({ ...form, favorite_colleges: [...form.favorite_colleges, val] });
+                    setFavCollegeInput("");
+                  }
+                }
+              }}
+            />
+            <button
+              type="button"
+              disabled={!favCollegeInput.trim() || form.favorite_colleges.length >= 5}
+              onClick={() => {
+                const val = favCollegeInput.trim();
+                if (val && !form.favorite_colleges.includes(val) && form.favorite_colleges.length < 5) {
+                  setForm({ ...form, favorite_colleges: [...form.favorite_colleges, val] });
+                  setFavCollegeInput("");
+                }
+              }}
+              className="px-4 py-2.5 bg-amber-400 text-slate-950 font-semibold rounded-lg hover:bg-amber-300 transition-all text-sm disabled:opacity-40 shrink-0"
+            >
+              Add
+            </button>
+          </div>
+          <p className="text-xs text-slate-600 mt-1.5">{form.favorite_colleges.length}/5 colleges added</p>
+        </div>
+        {form.favorite_colleges.length > 0 ? (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-500 uppercase tracking-wider font-medium">Your Dream Colleges</p>
+            <div className="flex flex-wrap gap-2">
+              {form.favorite_colleges.map((c, i) => (
+                <span key={i} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-400/10 border border-amber-400/30 text-amber-400 text-sm rounded-lg font-medium">
+                  ⭐ {c}
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, favorite_colleges: form.favorite_colleges.filter((_, j) => j !== i) })}
+                    className="hover:text-white ml-0.5 text-lg leading-none"
+                  >×</button>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="text-center py-8 text-slate-600">
+            <p className="text-4xl mb-2">⭐</p>
+            <p className="text-sm">No dream colleges added yet — this step is optional.</p>
+            <p className="text-xs mt-1">Skip to run analysis without college feasibility check.</p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // ── Result tabs ───────────────────────────────────────────────────────
 
   const TABS = [
@@ -834,6 +1020,9 @@ export default function CareerCopilotPage() {
     { key: "colleges" as const, label: "🏛️ Colleges",  count: result?.colleges.length },
     { key: "exams"    as const, label: "📝 Exam Prep", count: result?.exam_roadmap.length },
     { key: "strategy" as const, label: "🗺️ Strategy" },
+    ...(result?.favorite_college_analysis?.length
+      ? [{ key: "favorites" as const, label: "⭐ My Colleges", count: result.favorite_college_analysis.length }]
+      : []),
   ];
 
   const STEPS_META = [
@@ -841,6 +1030,7 @@ export default function CareerCopilotPage() {
     { num: 2 as FormStep, label: "Academic Marks" },
     { num: 3 as FormStep, label: "Entrance Exams" },
     { num: 4 as FormStep, label: "Interests" },
+    { num: 5 as FormStep, label: "Dream Colleges" },
   ];
 
   return (
@@ -909,6 +1099,7 @@ export default function CareerCopilotPage() {
           {step === 2 && <StepAcademic />}
           {step === 3 && <StepExams />}
           {step === 4 && <StepInterests />}
+          {step === 5 && <StepFavoriteColleges />}
         </div>
 
         {/* Error */}
@@ -928,7 +1119,7 @@ export default function CareerCopilotPage() {
             ← Back
           </button>
 
-          {step < 4 ? (
+          {step < 5 ? (
             <button
               onClick={() => setStep((s) => (s + 1) as FormStep)}
               className="px-5 py-2.5 bg-amber-400 text-slate-950 font-semibold rounded-lg hover:bg-amber-300 transition-all text-sm"
@@ -1202,6 +1393,18 @@ export default function CareerCopilotPage() {
                     ))}
                   </ul>
                 </div>
+              </div>
+            )}
+
+            {/* Tab: My Colleges */}
+            {activeTab === "favorites" && result.favorite_college_analysis && (
+              <div className="space-y-3">
+                <p className="text-sm text-slate-400 mb-4">
+                  Feasibility analysis for your dream colleges — historical cutoffs, how close you are, and alternative routes to get in.
+                </p>
+                {result.favorite_college_analysis.map((a, i) => (
+                  <FavoriteCollegeCard key={i} a={a} />
+                ))}
               </div>
             )}
           </div>

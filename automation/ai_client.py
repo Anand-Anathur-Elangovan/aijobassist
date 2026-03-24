@@ -13,6 +13,7 @@ Setup (one-time):
 import os
 import re
 import json
+import requests as _http
 
 
 DEFAULT_ANTHROPIC_API_KEY = ""  # Set ANTHROPIC_API_KEY in your environment / .env file
@@ -130,23 +131,30 @@ def _call_claude(prompt: str, max_tokens: int = 4096) -> dict:
     if _API_DISABLED:
         raise RuntimeError("Claude disabled for this run (permanent API error)")
 
-    try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("Run:  pip install anthropic")
-
     api_key = _get_api_key()
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set")
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
+        resp = _http.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60,
         )
-        raw = msg.content[0].text.strip()
+        if resp.status_code != 200:
+            error_body = resp.text[:300]
+            raise RuntimeError(f"Claude API {resp.status_code}: {error_body}")
+        data = resp.json()
+        raw = data["content"][0]["text"].strip()
         # Strip markdown fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s*```$", "", raw)
@@ -169,17 +177,27 @@ def call_claude(prompt: str, max_tokens: int = 1024) -> str:
         return ""
 
     try:
-        import anthropic
         api_key = _get_api_key()
         if not api_key:
             raise RuntimeError("No API key")
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
+        resp = _http.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-5",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60,
         )
-        return msg.content[0].text.strip()
+        if resp.status_code != 200:
+            raise RuntimeError(f"Claude API {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        return data["content"][0]["text"].strip()
     except Exception as e:
         if _is_permanent_error(e):
             _API_DISABLED = True
@@ -285,6 +303,96 @@ Resume:
         "years_experience":     None,   # mock — real AI would extract this
         "education":            [],     # mock — real AI would extract this
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 1b. extract_education — structured education data from resume
+# ══════════════════════════════════════════════════════════════════════════
+def extract_education(resume_text: str) -> list[dict]:
+    """
+    Extract structured education entries from resume text.
+    Returns a list of dicts, each with:
+      school, city, degree, major, start_month, start_year, end_month, end_year, gpa
+    Uses Claude when available, otherwise returns empty list.
+    """
+    if not _has_api_key() or not resume_text:
+        return []
+
+    prompt = f"""Extract ALL education entries from this resume. Return ONLY a valid JSON array, no prose.
+
+Each entry must have these fields (use empty string if not found):
+[
+  {{
+    "school": "<university/college name>",
+    "city": "<city where the school is located>",
+    "degree": "<degree type e.g. Bachelor's Degree, Master's Degree, B.Tech, MBA>",
+    "major": "<field of study e.g. Computer Science, Mechanical Engineering>",
+    "start_month": "<numeric month 1-12 or empty>",
+    "start_year": "<4-digit year or empty>",
+    "end_month": "<numeric month 1-12 or empty>",
+    "end_year": "<4-digit year or empty>",
+    "gpa": "<GPA/percentage or empty>"
+  }}
+]
+
+If no education found, return an empty array: []
+
+Resume:
+{resume_text}"""
+
+    try:
+        result = _call_claude(prompt, max_tokens=1500)
+        if isinstance(result, list):
+            return result
+        return []
+    except Exception as e:
+        print(f"  [AI] extract_education failed: {e}")
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 1c. extract_employment — structured work history from resume
+# ══════════════════════════════════════════════════════════════════════════
+def extract_employment(resume_text: str) -> list[dict]:
+    """
+    Extract structured employment entries from resume text.
+    Returns a list of dicts, each with:
+      company, position, city, start_month, start_year, end_month, end_year, is_current, description
+    Uses Claude when available, otherwise returns empty list.
+    """
+    if not _has_api_key() or not resume_text:
+        return []
+
+    prompt = f"""Extract ALL employment/work experience entries from this resume. Return ONLY a valid JSON array, no prose.
+
+Each entry must have these fields (use empty string if not found):
+[
+  {{
+    "company": "<company name>",
+    "position": "<job title / role>",
+    "city": "<city where the job is located>",
+    "start_month": "<numeric month 1-12 or empty>",
+    "start_year": "<4-digit year or empty>",
+    "end_month": "<numeric month 1-12 or empty>",
+    "end_year": "<4-digit year or empty>",
+    "is_current": <true if currently employed here, else false>,
+    "description": "<brief 1-2 line description of role/responsibilities>"
+  }}
+]
+
+Order from most recent to oldest. If no employment found, return an empty array: []
+
+Resume:
+{resume_text}"""
+
+    try:
+        result = _call_claude(prompt, max_tokens=2000)
+        if isinstance(result, list):
+            return result
+        return []
+    except Exception as e:
+        print(f"  [AI] extract_employment failed: {e}")
+        return []
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -549,6 +657,10 @@ def analyze_and_fill_form(form_html: str, user_profile: dict) -> list[dict]:
     phone = user_profile.get("phone", "")
     years = user_profile.get("years_experience", 2)
     cover = user_profile.get("cover_note", "I am very interested in this role.")
+    city  = user_profile.get("current_city", "")
+    linkedin = user_profile.get("linkedin_url", "")
+    github   = user_profile.get("github_url", "")
+    portfolio = user_profile.get("portfolio_url", "")
 
     # Trim HTML — keep only form/input/label/button/select/textarea tags, max ~4000 chars
     # Remove script/style blocks first to save tokens
@@ -567,7 +679,20 @@ User profile:
 - Email: {email}
 - Phone: {phone}
 - Years of experience: {years}
+- Current city: {city or "N/A"}
+- LinkedIn: {linkedin or "N/A"}
+- GitHub: {github or "N/A"}
+- Portfolio/Website: {portfolio or "N/A"}
 - Cover note: {cover}
+
+RULES:
+- Give the SHORTEST possible answers. Never write full sentences.
+- For yes/no: just "Yes" or "No".
+- For name fields: just the name.
+- For URL fields: just the URL, or leave empty if N/A.
+- For number fields: just the number.
+- NEVER start answers with "I", "My", or "The".
+- NEVER explain or add filler text.
 
 Analyse the HTML below and return a JSON array of actions to fill the form.
 Each action object must have:
@@ -602,6 +727,7 @@ def claude_answer_question(
     options: list[str],
     resume_summary: str = "",
     context: str = "",
+    user_profile: dict | None = None,
 ) -> str:
     """
     Given a single application question and its available options (or empty list for
@@ -611,37 +737,259 @@ def claude_answer_question(
     composed free-text answer.  Falls back to the first option (or empty string)
     if Claude is unavailable.
     """
+    user_profile = user_profile or {}
+    q_lower = question_text.lower()
+
+    # ── Helper: match answer to options ────────────────────────────
+    def _match_option(answer: str) -> str | None:
+        """Find the best matching option for a given answer. Returns exact option text or None."""
+        if not options or not answer:
+            return None
+        a_lower = answer.strip().lower()
+        # Exact match
+        for opt in options:
+            if opt.strip().lower() == a_lower:
+                return opt
+        # Contains match (both directions)
+        for opt in options:
+            o_lower = opt.strip().lower()
+            if a_lower in o_lower or o_lower in a_lower:
+                return opt
+        # Word overlap — pick option with most shared words
+        a_words = set(a_lower.split())
+        best_opt, best_score = None, 0
+        for opt in options:
+            o_words = set(opt.strip().lower().split())
+            overlap = len(a_words & o_words)
+            if overlap > best_score:
+                best_score = overlap
+                best_opt = opt
+        if best_score >= 1:
+            return best_opt
+        return None
+
+    # ── Claude validation helper for direct fills ──────────────────
+    def _validate_fill(field_name: str, value: str) -> str:
+        """
+        Log a direct-lookup fill and (for substantive fields) call Claude to
+        verify the value matches the resume. Corrects the answer if Claude
+        disagrees; always logs the result so mismatches are visible.
+        """
+        opts_preview = f"  options={options[:4]}" if options else ""
+        print(f"  [FILL] '{question_text[:70]}' → {field_name}: '{value}'{opts_preview}")
+
+        # Unambiguous fields — no need to validate, just return
+        SKIP_VALIDATE = {
+            "LinkedIn URL", "GitHub URL", "Portfolio URL",
+            "Name", "Email", "Phone",
+            "Expected CTC", "Current CTC", "Gender/Diversity",
+        }
+        if field_name in SKIP_VALIDATE or not resume_summary or not _has_api_key():
+            return value
+
+        opts_hint = (
+            f"\nAvailable options: {options[:5]}" if options else ""
+        )
+        verify_prompt = (
+            f"Resume summary:\n{resume_summary[:800]}\n\n"
+            f"Form field: \"{question_text}\"\n"
+            f"Auto-filled value: \"{value}\"{opts_hint}\n\n"
+            "Is this fill accurate based on the resume?\n"
+            "Reply with EXACTLY one of:\n"
+            "  CONFIRM\n"
+            "  CORRECT: <right value>\n"
+            "No other text."
+        )
+        try:
+            resp = call_claude(verify_prompt, max_tokens=60).strip()
+            if resp.upper().startswith("CONFIRM"):
+                print(f"  [VALIDATE \u2713] {field_name}: '{value}' confirmed by Claude")
+                return value
+            if resp.upper().startswith("CORRECT:"):
+                corrected = resp[8:].strip().strip("\"'")
+                if options:
+                    m = _match_option(corrected)
+                    corrected = m if m else value  # keep original if no option match
+                print(f"  [VALIDATE \u2717] {field_name}: '{value}' \u2192 corrected to '{corrected}'")
+                return corrected
+            # Unclear response — keep original
+            print(f"  [VALIDATE ?] {field_name}: unclear response '{resp[:40]}', keeping '{value}'")
+        except Exception as e:
+            print(f"  [VALIDATE !] {field_name} validation error: {e}")
+        return value
+
+    # ── Direct profile lookups — skip AI, validate substantive fields ──
+    if any(k in q_lower for k in ("linkedin profile", "linkedin url", "linkedin link")):
+        url = user_profile.get("linkedin_url", "").strip()
+        if url:
+            return _validate_fill("LinkedIn URL", url)
+        return "No"
+
+    if any(k in q_lower for k in ("github profile", "github url", "github link")):
+        url = user_profile.get("github_url", "").strip()
+        if url:
+            return _validate_fill("GitHub URL", url)
+        return "No"
+
+    if any(k in q_lower for k in ("website", "blog", "portfolio")):
+        url = user_profile.get("portfolio_url", "").strip()
+        if url:
+            return _validate_fill("Portfolio URL", url)
+        return "No"
+
+    if any(k in q_lower for k in ("your full name", "your name", "candidate name", "applicant name")):
+        name = user_profile.get("full_name", "").strip()
+        if name:
+            return _validate_fill("Name", name)
+
+    if any(k in q_lower for k in ("employee's name", "employee name", "referral name", "referrer name")):
+        return user_profile.get("full_name", "") or ""
+
+    if any(k in q_lower for k in ("your email", "email address", "email id", "contact email")):
+        email = user_profile.get("email", "").strip()
+        if email:
+            return _validate_fill("Email", email)
+
+    if any(k in q_lower for k in ("your phone", "phone number", "mobile number", "contact number", "mobile no")):
+        phone = user_profile.get("phone", "").strip()
+        if phone:
+            return _validate_fill("Phone", phone)
+
+    if any(k in q_lower for k in ("currently based", "current city", "current location", "where are you located", "your city", "your location", "residing", "based out of")):
+        city = user_profile.get("current_city", "").strip()
+        if city:
+            matched = _match_option(city)
+            return _validate_fill("City", matched if matched else city)
+
+    if any(k in q_lower for k in ("current company", "current employer", "current organization", "present company", "company name", "working at", "employed at")):
+        company = user_profile.get("current_company", "").strip()
+        if company:
+            return _validate_fill("Current company", company)
+
+    if any(k in q_lower for k in ("current designation", "current title", "current role", "current position", "job title", "designation")):
+        pos = user_profile.get("current_position", "").strip()
+        if pos:
+            return _validate_fill("Current position", pos)
+
+    if any(k in q_lower for k in ("years of experience", "total experience", "work experience", "professional experience", "how many years")):
+        yrs = str(user_profile.get("years_experience", "")).strip()
+        if yrs:
+            if options:
+                matched = _match_option(yrs)
+                if matched:
+                    return _validate_fill("Years of experience", matched)
+            return _validate_fill("Years of experience", yrs)
+
+    if any(k in q_lower for k in ("notice period", "serving notice", "joining time", "how soon can you join")):
+        np_val = str(user_profile.get("notice_period", "")).strip()
+        if np_val:
+            matched = _match_option(np_val)
+            return _validate_fill("Notice period", matched if matched else np_val)
+
+    if any(k in q_lower for k in ("expected ctc", "expected salary", "expected compensation", "salary expectation")):
+        sal = str(user_profile.get("salary_expectation", "")).strip()
+        if sal:
+            return _validate_fill("Expected CTC", sal)
+
+    if any(k in q_lower for k in ("current ctc", "current salary", "present salary", "present ctc")):
+        sal = str(user_profile.get("current_ctc", "") or user_profile.get("salary_expectation", "")).strip()
+        if sal:
+            return _validate_fill("Current CTC", sal)
+
+    if any(k in q_lower for k in ("highest education", "highest qualification", "highest degree", "academic qualification")):
+        edu = user_profile.get("highest_education", "").strip() or user_profile.get("degree", "").strip()
+        if edu:
+            matched = _match_option(edu)
+            return _validate_fill("Highest education", matched if matched else edu)
+
+    if any(k in q_lower for k in ("university", "college name", "school name", "institute", "alma mater")):
+        school = user_profile.get("school", "").strip()
+        if school:
+            return _validate_fill("School/University", school)
+
+    if any(k in q_lower for k in ("graduation year", "year of passing", "year of graduation", "passout year", "batch")):
+        grad_year = str(user_profile.get("graduation_year", "")).strip()
+        if grad_year:
+            matched = _match_option(grad_year)
+            return _validate_fill("Graduation year", matched if matched else grad_year)
+
+    if any(k in q_lower for k in ("gender", "ethnicity", "race", "disability", "veteran", "pronoun", "sexual orientation")):
+        if options:
+            # Prefer "Prefer not" / "Decline" options
+            for opt in options:
+                o = opt.lower()
+                if any(k in o for k in ("prefer not", "decline", "not wish", "not specified", "choose not")):
+                    return opt
+            return options[0]
+        return "Prefer not to say"
+
     if not _has_api_key():
         return options[0] if options else ""
+
+    # Build profile block for Claude
+    profile_lines = []
+    for key, label in [
+        ("full_name", "Name"), ("email", "Email"), ("phone", "Phone"),
+        ("current_city", "Current city"), ("linkedin_url", "LinkedIn"),
+        ("github_url", "GitHub"), ("portfolio_url", "Portfolio/Website"),
+        ("years_experience", "Years of experience"),
+        ("highest_education", "Highest education"),
+        ("current_company", "Current company"),
+        ("current_position", "Current position/title"),
+        ("school", "School/University"),
+        ("degree", "Degree"),
+        ("major", "Major/Field of study"),
+    ]:
+        val = user_profile.get(key, "")
+        if val:
+            profile_lines.append(f"- {label}: {val}")
+    # Add notice period & salary
+    for key, label in [
+        ("notice_period", "Notice period (days)"),
+        ("salary_expectation", "Expected salary/CTC"),
+        ("current_ctc", "Current CTC"),
+    ]:
+        val = str(user_profile.get(key, "")).strip()
+        if val:
+            profile_lines.append(f"- {label}: {val}")
+    profile_block = "\n".join(profile_lines) if profile_lines else "(not provided)"
 
     opts_block = ""
     if options:
         opts_block = "\nAvailable options (you MUST pick one verbatim):\n" + "\n".join(f"- {o}" for o in options)
 
-    prompt = f"""You are helping a job applicant answer an application screening question truthfully and professionally.
+    prompt = f"""You are filling a job application form. Answer the question below.
 
-Applicant background:
+RULES — follow these strictly:
+- Give the SHORTEST possible answer. Never write a full sentence.
+- For yes/no questions: answer ONLY "Yes" or "No".
+- For name fields: answer ONLY the name, nothing else.
+- For URL fields: answer ONLY the URL, or "No" if unavailable.
+- For number fields: answer ONLY the number.
+- For free-text: answer in 3-10 words maximum. No fluff, no filler.
+- NEVER start with "I", "My", "The", or any preamble.
+- NEVER explain your answer.
+
+Applicant profile:
+{profile_block}
+
+Resume summary:
 {resume_summary or "(not provided)"}
 
-{f"Application context: {context}" if context else ""}
+{f"Context: {context}" if context else ""}
 
 Question: {question_text}
 {opts_block}
 
-{"Return ONLY the exact option text — no other words." if options else "Write a concise, honest 1-2 sentence answer. Return ONLY the answer text."}"""
+{"Return ONLY the exact option text — no other words." if options else "Return ONLY the direct answer — no explanation, no sentence."}"""
 
     try:
         raw = call_claude(prompt, max_tokens=200)
         if options:
-            # Find the closest matching option
-            raw_lower = raw.strip().lower()
-            for opt in options:
-                if opt.strip().lower() in raw_lower or raw_lower in opt.strip().lower():
-                    return opt
-            # Exact prefix match fallback
-            for opt in options:
-                if raw_lower.startswith(opt.strip().lower()[:20]):
-                    return opt
+            # Use the fuzzy matcher for best option
+            matched = _match_option(raw.strip())
+            if matched:
+                return matched
             return options[0]  # last resort
         return raw.strip()
     except Exception as e:

@@ -85,12 +85,16 @@ export async function saveResumeMeta(
   fileName: string,
   parsedText?: string
 ) {
-  return supabase.from("resumes").upsert({
-    user_id: userId,
-    title: fileName,
-    content: { file_url: fileUrl, file_name: fileName },
-    ...(parsedText ? { parsed_text: parsedText } : {}),
-  });
+  return supabase
+    .from("resumes")
+    .upsert({
+      user_id: userId,
+      title: fileName,
+      content: { file_url: fileUrl, file_name: fileName },
+      ...(parsedText ? { parsed_text: parsedText } : {}),
+    })
+    .select("id")
+    .single();
 }
 
 /**

@@ -55,6 +55,9 @@ def main():
     print("  VantaHire Task Runner — Started")
     print("=" * 50)
 
+    # Track if we've executed at least one task (for exit-after-run mode)
+    ran_any_task = False
+
     last_gmail_check = datetime.now(timezone.utc) - timedelta(seconds=GMAIL_INTERVAL)  # run on first boot
 
     while True:
@@ -88,6 +91,7 @@ def main():
                 output = run_task(task)
                 update_task(task_id, "DONE", output=output)
                 print(f"[STATUS] {task_id} → DONE  output={output}")
+                ran_any_task = True
 
                 # Record usage for quota tracking
                 quota_map = {
@@ -105,8 +109,16 @@ def main():
                 error_msg = str(e)
                 update_task(task_id, "FAILED", error=error_msg)
                 print(f"[STATUS] {task_id} → FAILED  error={error_msg}")
+                ran_any_task = True
 
         else:
+            # No pending tasks
+            if ran_any_task:
+                # We've completed at least one task — exit cleanly
+                print("\n" + "=" * 50)
+                print("  All tasks completed. Exiting.")
+                print("=" * 50)
+                break
             print("[IDLE]  No pending tasks. Sleeping...")
 
         time.sleep(POLL_INTERVAL)
