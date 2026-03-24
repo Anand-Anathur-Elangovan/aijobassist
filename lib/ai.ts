@@ -684,3 +684,269 @@ Rules:
     return careerFallback(input);
   }
 }
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 6. skillGapWithLearning — Match score + 2-week personalised learning plan
+// ═════════════════════════════════════════════════════════════════════════
+
+export interface LearningResource {
+  skill:         string;
+  priority:      "High" | "Medium" | "Low";
+  time_to_learn: string;
+  resources: Array<{
+    platform:     string;
+    search_query: string;
+    duration:     string;
+  }>;
+}
+
+export interface SkillGapResult extends MatchScoreResult {
+  learning_plan:     LearningResource[];
+  two_week_schedule: string[];
+}
+
+export async function skillGapWithLearning(
+  resumeText: string,
+  jdText:     string,
+): Promise<SkillGapResult> {
+  if (hasApiKey()) {
+    const prompt = `Compare this resume against the job description. For each missing skill, create a realistic 2-week self-study plan with specific resource recommendations.
+
+Return ONLY valid JSON with no extra text:
+{
+  "score": number (0-100 ATS match),
+  "matching_skills": string[],
+  "missing_skills": string[],
+  "suggestions": string[],
+  "learning_plan": [
+    {
+      "skill": string,
+      "priority": "High"|"Medium"|"Low",
+      "time_to_learn": string (e.g. "2-3 days"),
+      "resources": [
+        { "platform": string, "search_query": string, "duration": string }
+      ]
+    }
+  ],
+  "two_week_schedule": string[] (7 specific, actionable day-range items)
+}
+
+Rules:
+- learning_plan covers the top 5-6 missing skills by priority
+- For each skill provide exactly 3 resources mixing YouTube, Udemy/Coursera, and Official Docs/Practice
+- Resources use real search terms people would type into those platforms
+- two_week_schedule items are specific (e.g. "Week 1 Day 1-2: React Hooks — FreeCodeCamp 3h crash course + build a counter app")
+
+Resume:
+${resumeText.slice(0, 2000)}
+
+Job Description:
+${jdText.slice(0, 3000)}`;
+    try {
+      return parseJSON<SkillGapResult>(await callClaude(prompt, 3000));
+    } catch {
+      // fall through to mock
+    }
+  }
+  // ── Mock fallback ────────────────────────────────────────────────────
+  const base = await matchScore(resumeText, jdText);
+  const learning_plan: LearningResource[] = base.missing_skills.slice(0, 6).map((skill, i) => ({
+    skill,
+    priority: (i < 2 ? "High" : i < 4 ? "Medium" : "Low") as "High" | "Medium" | "Low",
+    time_to_learn: i < 2 ? "2-3 days" : "4-5 days",
+    resources: [
+      { platform: "YouTube",             search_query: `${skill} complete tutorial for beginners 2024`, duration: "3-5 hours" },
+      { platform: "Udemy",               search_query: `${skill} masterclass complete course`,           duration: "8-15 hours" },
+      { platform: "Official Docs / Practice", search_query: `${skill} official documentation getting started`, duration: "2-3 hours" },
+    ],
+  }));
+  const s0 = base.missing_skills[0] ?? "your top missing skill";
+  const s1 = base.missing_skills[1] ?? "second skill";
+  const s2 = base.missing_skills[2] ?? "third skill";
+  const two_week_schedule = [
+    `Week 1 Day 1-2: ${s0} — watch YouTube crash course (3-5h) + build a small follow-along project`,
+    `Week 1 Day 3-4: ${s1} — read official docs walkthrough + complete a starter example`,
+    `Week 1 Day 5-7: ${s2} + first mini-project combining all 3 skills learned this week`,
+    `Week 2 Day 1-2: Deepen ${s0} — start Udemy course, complete first 3 modules`,
+    `Week 2 Day 3-4: Build a portfolio project combining ${s0} and ${s1}, push to GitHub with a clear README`,
+    `Week 2 Day 5-6: Update your resume to list newly acquired tools + tweak project bullets to match JD keywords`,
+    `Week 2 Day 7: Mock interview — explain your new skills out loud; prep "Tell me about your ${s0} experience"`,
+  ];
+  return { ...base, learning_plan, two_week_schedule };
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 7. predictPlacement — Campus Placement Prep Engine
+// ═════════════════════════════════════════════════════════════════════════
+
+export interface PlacementPrepInput {
+  college:          string;
+  degree:           string;
+  branch:           string;
+  graduation_year:  number;
+  cgpa?:            number;
+  placement_exams:  string[];  // ["AMCAT", "eLitmus", "Cocubes"]
+  target_role?:     string;
+}
+
+export interface PlacementResource {
+  topic:    string;
+  resource: string;
+  platform: string;
+  duration: string;
+  notes:    string;
+}
+
+export interface DriveTiming {
+  company:        string;
+  typical_months: string;
+  role:           string;
+  ctc_range:      string;
+  eligibility:    string;
+}
+
+export interface OffCampusPortal {
+  name:  string;
+  url:   string;
+  focus: string;
+  tips:  string;
+}
+
+export interface PlacementWeekPlan {
+  week:  string;
+  tasks: string[];
+}
+
+export interface PlacementPrepResult {
+  amcat_prep:            PlacementResource[];
+  elitmus_prep:          PlacementResource[];
+  campus_drive_calendar: DriveTiming[];
+  off_campus_portals:    OffCampusPortal[];
+  four_week_plan:        PlacementWeekPlan[];
+  hr_tips:               string[];
+  resume_tips:           string[];
+  is_fallback?:          boolean;
+}
+
+function placementFallback(input: PlacementPrepInput): PlacementPrepResult {
+  const role = input.target_role ?? `${input.branch} Engineer`;
+  return {
+    amcat_prep: [
+      { topic: "Quantitative Aptitude", resource: "AMCAT Sample Papers (amcat.in/practice)", platform: "amcat.in", duration: "5-7 days", notes: "Time & Work, Percentages, Number Series, Permutation & Combination" },
+      { topic: "Verbal Ability", resource: "Wren & Martin High School English Grammar", platform: "Book / PDF", duration: "3-4 days", notes: "Sentence correction, comprehension, vocabulary — 30 min/day" },
+      { topic: "Logical Reasoning", resource: "R.S. Aggarwal Modern Approach to Verbal Reasoning", platform: "Book / PDF", duration: "4-5 days", notes: "Syllogisms, Blood Relations, Coding-Decoding, Series" },
+      { topic: "Coding / Automata Fix", resource: "LeetCode Easy — Arrays & Strings category", platform: "leetcode.com", duration: "1 week (2/day)", notes: "AMCAT tech tests ask you to fix broken code, not write from scratch — practice debugging" },
+      { topic: "CS Fundamentals", resource: "GeeksForGeeks — OS, DBMS, OOPs basics", platform: "geeksforgeeks.org", duration: "3 days", notes: "Core CS concepts tested in AMCAT for all tech roles" },
+    ],
+    elitmus_prep: [
+      { topic: "Advanced Mathematics", resource: "CAT Previous Year Quant Section (2018–2023)", platform: "testprepkart.com / Free PDFs", duration: "1 week", notes: "eLitmus difficulty is CAT-level — do not take it lightly; arithmetic shortcuts are essential" },
+      { topic: "Problem Solving / Puzzles", resource: "IndiaBix Logical Reasoning Level 3–4", platform: "indiabix.com", duration: "5 days", notes: "Focus on analytical puzzles + seating arrangement — time yourself strictly" },
+      { topic: "English Reading Comprehension", resource: "The Hindu editorial daily + RC99 Practice Book", platform: "thehindu.com", duration: "Daily 30 min", notes: "Inference-based questions dominate — practice eliminating wrong answer choices" },
+      { topic: "Speed & Accuracy", resource: "Magical Book on Quicker Maths by M. Tyra", platform: "Book", duration: "4 days", notes: "Vedic math shortcuts critical — eLitmus is strict on time" },
+    ],
+    campus_drive_calendar: [
+      { company: "TCS",       typical_months: "Aug–Oct (PPT: July)",    role: "Ninja / Digital / Prime",               ctc_range: "₹3.36–7 LPA",  eligibility: "60% throughout, no active backlogs, all branches" },
+      { company: "Infosys",   typical_months: "Sep–Nov",                 role: "Systems Engineer / SP / Power Prog",    ctc_range: "₹3.6–8 LPA",   eligibility: "65% aggregate, no backlogs, B.E/B.Tech/MCA" },
+      { company: "Wipro",     typical_months: "Oct–Dec",                 role: "Project Engineer / Turbo / Elite",      ctc_range: "₹3.5–6.5 LPA", eligibility: "60%, no backlogs in last 2 sems, all streams" },
+      { company: "Accenture", typical_months: "Aug–Sep (early drive)",   role: "ASE / Associate",                       ctc_range: "₹4.5–8 LPA",   eligibility: "60%, any engineering stream" },
+      { company: "Cognizant", typical_months: "Nov–Jan",                 role: "PAT / GenC / GenC Elevate / GenC Pro",  ctc_range: "₹4–5.5 LPA",   eligibility: "60%, CSE/IT/ECE/EEE preferred" },
+      { company: "Capgemini", typical_months: "Oct–Nov",                 role: "Analyst / Sr Analyst",                  ctc_range: "₹3.8–5.5 LPA", eligibility: "60%, all engineering branches" },
+      { company: "Zoho",      typical_months: "Sep–Nov (ZEAL test)",     role: "Member Technical Staff",                ctc_range: "₹5–15 LPA",    eligibility: "Strong aptitude + coding, 60%+" },
+      { company: `${role} Startups`, typical_months: "Year-round (off-campus too)", role, ctc_range: "₹8–25 LPA", eligibility: "GitHub projects + contest rankings often outweigh %" },
+    ],
+    off_campus_portals: [
+      { name: "Naukri Freshers",    url: "naukri.com",        focus: "India's largest portal — filter '0–1 years experience'",   tips: "Complete 100% profile + upload resume for better search visibility; apply within 24h of new postings" },
+      { name: "LinkedIn Jobs",      url: "linkedin.com/jobs", focus: "Best for IT, tech, consulting fresher roles",               tips: "Enable 'Open to Work'; filter 'Entry Level' + 'Easy Apply'; connect with college alumni in target companies first" },
+      { name: "Internshala Jobs",   url: "internshala.com",   focus: "Fresher-only jobs + internship-to-PPO conversions",        tips: "Set email alerts — these close very fast; apply within 6 hours of new postings" },
+      { name: "Unstop (D2C)",       url: "unstop.com",        focus: "Hiring contests, hackathons, and fresher jobs",             tips: "Win company challenges (TCS CodeVita, InfyTQ) — winners get direct interview calls, bypassing written tests" },
+      { name: "Instahyre",          url: "instahyre.com",     focus: "AI-matched jobs for freshers — strong for product cos",    tips: "Complete skills test on platform — companies message you directly based on your score" },
+      { name: "Cutshort.io",        url: "cutshort.io",       focus: "Tech startup & product company jobs (less MNC noise)",     tips: "Strong GitHub + portfolio increases matches significantly; startups here hire faster than MNCs" },
+      { name: "HackerEarth Jobs",   url: "hackerearth.com",   focus: "Coding-challenge-based job matching",                      tips: "Improve HackerEarth ranking — recruiters browse profiles by rank and invite top candidates directly" },
+    ],
+    four_week_plan: [
+      { week: "Week 1 — Resume & Baseline", tasks: [
+        "Update resume: one page, quantify every project (e.g. 'Reduced load time 40%'), add GitHub + LinkedIn URLs",
+        "Complete 3 AMCAT/eLitmus mock tests — identify and list your weakest sections",
+        "Set up profiles on Naukri, LinkedIn, Internshala, Unstop — 100% profile completion",
+        "Start 2 LeetCode Easy problems per day (Arrays + Strings focus)",
+        "Research the 10 companies most likely to visit your campus — note eligibility criteria for each",
+      ]},
+      { week: "Week 2 — Aptitude & Skills", tasks: [
+        "30 min/day on your weakest aptitude section (Quant / Verbal / Logical)",
+        "Solve 10 coding problems covering Arrays, Strings, and Basic Math on LeetCode",
+        "Attend an online company info session or recruiter webinar for a target company",
+        "Build or update one project — push to GitHub with a clear README + live demo if possible",
+        "Apply to 3–5 off-campus roles daily on Naukri and LinkedIn; customise cover note each time",
+      ]},
+      { week: "Week 3 — Intensive Mock Tests", tasks: [
+        "Two full-length timed tests daily (AMCAT or eLitmus official mock pattern)",
+        "2 LeetCode Medium problems per day — review optimal solutions, not just 'accepted'",
+        "Take actual AMCAT / eLitmus test if not yet done — pH score opens more off-campus doors",
+        "Practice 10 HR questions aloud — record yourself, play back and refine",
+        "Mock technical interview with a friend or on Pramp.com — DSA + project walkthrough",
+      ]},
+      { week: "Week 4 — Interview Ready", tasks: [
+        "Dress rehearsal: formal attire prepared, document folder ready (all mark sheets, certs)",
+        "Prepare 5 STAR stories from your projects (Situation → Task → Action → measurable Result)",
+        "Research each shortlisted company's recent news, products, and Glassdoor interview reviews",
+        "Final resume review with a senior or mentor — one last polish",
+        "Check campus placement portal every morning; reach out to alumni at target companies on LinkedIn",
+      ]},
+    ],
+    hr_tips: [
+      "Tell me about yourself: 90 seconds max — Name, Degree + Branch, 1-2 strongest projects, why this company specifically",
+      "Why this company? → Name one specific thing you admire: their product, tech stack, recent milestone, or culture value",
+      "Salary expected: 'As per company standard' or state the known CTC band; never lowball — it signals lack of awareness",
+      "Strengths: one technical ('I debug quickly') + one soft skill ('I communicate blockers early') with a brief example each",
+      "Weakness: name a real one (e.g. 'I over-engineer') + what you're actively doing to improve it — shows self-awareness",
+      "5-year goal: 'Grow into a senior engineer / tech lead role while contributing to challenging problems here at [company]'",
+    ],
+    resume_tips: [
+      "One page maximum — freshers get 6–10 seconds; use every line wisely on impact, not filler",
+      "Lead with a 2-line objective tailored to the specific role — not generic 'seeking a challenging position'",
+      "Projects are your experience: Problem → What you built → Measurable result (% improvement / users / accuracy)",
+      "Skills: 'Languages: Python, Java | Frameworks: React, FastAPI | Tools: Git, Docker, Supabase' — no rating bars",
+      "GPA: include only if ≥ 7.5/10 or ≥ 75% — otherwise leave it off and use the space for a project description",
+      "Avoid 'Responsible for', 'Worked on', 'Helped with' — every bullet starts with a strong action verb + quantified result",
+    ],
+    is_fallback: true,
+  };
+}
+
+export async function predictPlacement(input: PlacementPrepInput): Promise<PlacementPrepResult> {
+  if (!hasApiKey()) {
+    return placementFallback(input);
+  }
+  const prompt = `You are an expert Indian campus placement advisor. A ${input.degree} student in ${input.branch} from "${input.college}" graduating in ${input.graduation_year}${input.cgpa ? ` with CGPA ${input.cgpa}` : ""} wants placement prep${input.target_role ? ` targeting "${input.target_role}" roles` : ""}.
+
+Placement exams: ${input.placement_exams.length > 0 ? input.placement_exams.join(", ") : "AMCAT, eLitmus"}.
+
+Return ONLY valid JSON with no extra text:
+{
+  "amcat_prep":            [{"topic": string, "resource": string, "platform": string, "duration": string, "notes": string}],
+  "elitmus_prep":          [{"topic": string, "resource": string, "platform": string, "duration": string, "notes": string}],
+  "campus_drive_calendar": [{"company": string, "typical_months": string, "role": string, "ctc_range": string, "eligibility": string}],
+  "off_campus_portals":    [{"name": string, "url": string, "focus": string, "tips": string}],
+  "four_week_plan":        [{"week": string, "tasks": string[]}],
+  "hr_tips":               string[],
+  "resume_tips":           string[]
+}
+
+Rules:
+- AMCAT prep: 5 topics (Quant, Verbal, Logical, Coding/Automata, CS Basics)
+- eLitmus prep: 4 topics (Advanced Maths, Problem Solving, English RC, Speed techniques)
+- Campus calendar: 8 realistic companies that hire from Indian engineering colleges in ${input.branch}, with actual months
+- Off-campus portals: 7 with fresher-specific tips
+- 4-week plan: highly specific, actionable daily tasks tailored to ${input.branch}
+- HR tips: 6 specific fresher interview tips
+- Resume tips: 6 specific tips for an engineering fresher resume`;
+  try {
+    const raw = await callClaude(prompt, 3000);
+    return { ...parseJSON<Omit<PlacementPrepResult, "is_fallback">>(raw), is_fallback: false };
+  } catch (err) {
+    console.error("[predictPlacement] AI parse error:", err);
+    return placementFallback(input);
+  }
+}

@@ -59,6 +59,42 @@ function MiniBar({ value, max, date }: { value: number; max: number; date: strin
   );
 }
 
+// ── Funnel component ─────────────────────────────────────────────────────
+function FunnelBar({ stage, count, total, prev, color, icon }: {
+  stage: string; count: number; total: number; prev: number | null; color: string; icon: string;
+}) {
+  const widthPct    = total > 0 ? Math.max(5, Math.round((count / total) * 100)) : 0;
+  const pctOfTotal  = total > 0 ? Math.round((count / total) * 100) : 0;
+  const dropFromPrev = prev !== null && prev > 0 ? Math.round(((prev - count) / prev) * 100) : null;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-2 text-sm text-slate-300">
+          <span>{icon}</span>
+          <span className="font-semibold uppercase tracking-wide text-xs">{stage}</span>
+        </span>
+        <div className="flex items-center gap-3 text-xs font-mono">
+          {dropFromPrev !== null && dropFromPrev > 0 && (
+            <span className="text-red-400/70 text-[10px]">▼ {dropFromPrev}% dropped</span>
+          )}
+          <span className="text-white font-bold">{count}</span>
+          <span className="text-slate-600">({pctOfTotal}%)</span>
+        </div>
+      </div>
+      <div className="h-9 bg-slate-800/40 rounded-lg overflow-hidden">
+        <div
+          className={`h-full rounded-lg transition-all duration-700 flex items-center px-3 ${color}`}
+          style={{ width: `${widthPct}%` }}
+        >
+          {widthPct > 22 && (
+            <span className="text-xs font-mono text-white/80">{pctOfTotal}%</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 export default function AnalyticsPage() {
   const { user } = useAuth();
@@ -204,6 +240,57 @@ export default function AnalyticsPage() {
               </div>
             ))}
           </div>
+
+          {/* Application Funnel */}
+          {(() => {
+            const FUNNEL_ORDER = ["APPLIED", "SCREENING", "INTERVIEW", "OFFER"];
+            const FUNNEL_META: Record<string, { icon: string; color: string }> = {
+              APPLIED:   { icon: "📤", color: "bg-blue-500/50" },
+              SCREENING: { icon: "🔍", color: "bg-yellow-500/55" },
+              INTERVIEW: { icon: "🎯", color: "bg-purple-500/55" },
+              OFFER:     { icon: "🎉", color: "bg-emerald-500/65" },
+            };
+            const totalApplied = stageCounts.find((s) => s.stage === "APPLIED")?.count ?? stats.total;
+            const funnelData = FUNNEL_ORDER.map((stage) => ({
+              stage,
+              count: stageCounts.find((s) => s.stage === stage)?.count ?? 0,
+              ...FUNNEL_META[stage],
+            }));
+            return (
+              <div className="card">
+                <p className="font-mono text-xs text-slate-400 uppercase tracking-wider mb-5">🏁 Application Funnel</p>
+                <div className="space-y-4">
+                  {funnelData.map((f, i) => (
+                    <FunnelBar
+                      key={f.stage}
+                      stage={f.stage}
+                      count={f.count}
+                      total={totalApplied}
+                      prev={i > 0 ? funnelData[i - 1].count : null}
+                      color={f.color}
+                      icon={f.icon}
+                    />
+                  ))}
+                </div>
+                {totalApplied > 0 && (
+                  <div className="mt-5 pt-4 border-t border-slate-800 grid grid-cols-3 gap-3 text-center">
+                    {([
+                      { label: "Screening Rate",  stageKey: "SCREENING", color: "text-yellow-400"  },
+                      { label: "Interview Rate",  stageKey: "INTERVIEW", color: "text-purple-400" },
+                      { label: "Offer Rate",      stageKey: "OFFER",     color: "text-emerald-400" },
+                    ] as const).map(({ label, stageKey, color }) => (
+                      <div key={stageKey}>
+                        <p className="font-mono text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">{label}</p>
+                        <p className={`font-mono text-xl font-bold ${color}`}>
+                          {Math.round(((stageCounts.find((s) => s.stage === stageKey)?.count ?? 0) / totalApplied) * 100)}%
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Two column layout */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

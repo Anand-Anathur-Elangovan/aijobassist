@@ -8,11 +8,18 @@ import type {
   CareerCourseResult,
   CareerCollegeResult,
   CareerExamRoadmap,
+  PlacementPrepResult,
+  PlacementResource,
+  DriveTiming,
+  OffCampusPortal,
+  PlacementWeekPlan,
 } from "@/lib/ai";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
 type FormStep = 1 | 2 | 3 | 4;
+type CopilotMode = "pathfinder" | "placement";
+type PlacementTab = "exam" | "calendar" | "offcampus" | "plan";
 
 interface StudentForm {
   student_name:   string;
@@ -25,6 +32,16 @@ interface StudentForm {
   community:      string;
   quota:          string[];
   interests:      string[];
+}
+
+interface PlacementForm {
+  college:         string;
+  degree:          string;
+  branch:          string;
+  graduation_year: string;
+  cgpa:            string;
+  placement_exams: string[];
+  target_role:     string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -116,6 +133,20 @@ const QUOTA_OPTIONS = [
   "Linguistic Minority","Government Employee",
 ];
 
+const PLACEMENT_EXAMS_LIST = ["AMCAT", "eLitmus", "Cocubes", "Wheebox", "HackerRank", "MeritTrac", "eLitmus pH"];
+
+const PLACEMENT_DEGREES = ["B.E. / B.Tech", "BCA", "B.Sc CS / IT", "MCA", "MBA", "M.Tech", "B.Sc Other", "Diploma"];
+
+const EMPTY_PLACEMENT: PlacementForm = {
+  college:         "",
+  degree:          "B.E. / B.Tech",
+  branch:          "",
+  graduation_year: String(new Date().getFullYear() + 1),
+  cgpa:            "",
+  placement_exams: ["AMCAT", "eLitmus"],
+  target_role:     "",
+};
+
 const PROB_COLORS: Record<string, string> = {
   High:   "text-emerald-400 bg-emerald-400/10 border-emerald-400/30",
   Medium: "text-amber-400 bg-amber-400/10 border-amber-400/30",
@@ -168,7 +199,6 @@ function CourseCard({ c }: { c: CareerCourseResult }) {
       {open && (
         <div className="border-t border-slate-800 p-4 pt-3 space-y-3">
           <div>
-            <p className="text-xs text-slate-500 uppercase tracking-wider mb-1">Future scope</p>
             <p className="text-sm text-slate-300">{c.future_scope}</p>
           </div>
           <div>
@@ -290,12 +320,18 @@ const EMPTY_FORM: StudentForm = {
 
 export default function CareerCopilotPage() {
   const { user } = useAuth();
+  const [mode, setMode] = useState<CopilotMode>("pathfinder");
   const [step, setStep] = useState<FormStep>(1);
   const [form, setForm] = useState<StudentForm>(EMPTY_FORM);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<CareerPredictionResult | null>(null);
   const [activeTab, setActiveTab] = useState<"courses" | "colleges" | "exams" | "strategy">("courses");
+  const [placementForm, setPlacementForm] = useState<PlacementForm>(EMPTY_PLACEMENT);
+  const [placementLoading, setPlacementLoading] = useState(false);
+  const [placementResult, setPlacementResult] = useState<PlacementPrepResult | null>(null);
+  const [placementTab, setPlacementTab] = useState<PlacementTab>("exam");
   const [error, setError] = useState<string | null>(null);
+  const [placementError, setPlacementError] = useState<string | null>(null);
   const [interestInput, setInterestInput] = useState("");
   const [showCutoff, setShowCutoff] = useState(false);
   const [cutoffMarks, setCutoffMarks] = useState({ math: "", physics: "", chemistry: "", neet: "" });
@@ -343,6 +379,45 @@ export default function CareerCopilotPage() {
 
   function toggle<T>(arr: T[], val: T): T[] {
     return arr.includes(val) ? arr.filter((x) => x !== val) : [...arr, val];
+  }
+
+  async function handlePlacementPredict() {
+    setPlacementError(null);
+    if (!placementForm.branch.trim()) {
+      setPlacementError("Please enter your branch / specialization.");
+      return;
+    }
+    setPlacementLoading(true);
+    setPlacementResult(null);
+
+    try {
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token;
+      if (!token) throw new Error("Not authenticated");
+
+      const res = await fetch("/api/ai/placement-prep", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          ...placementForm,
+          graduation_year: placementForm.graduation_year ? parseInt(placementForm.graduation_year, 10) : undefined,
+          cgpa: placementForm.cgpa ? parseFloat(placementForm.cgpa) : undefined,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Placement prediction failed");
+      setPlacementResult(data as PlacementPrepResult);
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      setPlacementError(msg);
+    } finally {
+      setPlacementLoading(false);
+    }
   }
 
   async function handlePredict() {
@@ -778,11 +853,29 @@ export default function CareerCopilotPage() {
         </h1>
         <p className="text-slate-400 mt-2 max-w-xl">
           School → College → Career. Enter your marks, interests, and community to get
-          AI-powered course recommendations, college predictions, and an exam strategy.
+          AI-powered course recommendations, college predictions, and an exam strategy. Switch to Placement Mode for AMCAT/eLitmus prep, campus drive planning, and off-campus fresher jobs.
         </p>
       </div>
 
+      <div className="flex gap-1 p-1 bg-slate-900 border border-slate-700 rounded-xl mb-8 max-w-xl">
+        {([
+          { key: "pathfinder" as CopilotMode, label: "🎓 College Pathfinder" },
+          { key: "placement" as CopilotMode, label: "💼 Placement Mode" },
+        ]).map(({ key, label }) => (
+          <button
+            key={key}
+            onClick={() => setMode(key)}
+            className={`flex-1 py-2.5 px-3 rounded-lg text-sm font-semibold transition-all ${
+              mode === key ? "bg-amber-400 text-slate-950" : "text-slate-400 hover:text-white"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Input Form */}
+      {mode === "pathfinder" && (
       <div className="card mb-8">
         {/* Step progress bar */}
         <div className="flex items-center gap-2 mb-6">
@@ -858,9 +951,132 @@ export default function CareerCopilotPage() {
           )}
         </div>
       </div>
+      )}
+
+      {/* Placement Mode */}
+      {mode === "placement" && (
+        <div className="card mb-8 space-y-6">
+          <div>
+            <p className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-1">Campus Hiring</p>
+            <h2 className="text-xl font-display font-bold text-white">College Placement Mode</h2>
+            <p className="text-sm text-slate-400 mt-1 max-w-2xl">
+              Build a focused AMCAT/eLitmus prep plan, see the typical campus drive calendar, and get curated off-campus portals for fresher jobs.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className={labelCls}>College</label>
+              <input
+                className={inputCls}
+                placeholder="e.g. Anna University / SRM / VIT"
+                value={placementForm.college}
+                onChange={(e) => setPlacementForm({ ...placementForm, college: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Degree</label>
+              <select
+                className={inputCls}
+                value={placementForm.degree}
+                onChange={(e) => setPlacementForm({ ...placementForm, degree: e.target.value })}
+              >
+                {PLACEMENT_DEGREES.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={labelCls}>Branch / Specialization *</label>
+              <input
+                className={inputCls}
+                placeholder="e.g. CSE / IT / ECE / Mechanical"
+                value={placementForm.branch}
+                onChange={(e) => setPlacementForm({ ...placementForm, branch: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Target Role</label>
+              <input
+                className={inputCls}
+                placeholder="e.g. Software Engineer / Analyst / Data Analyst"
+                value={placementForm.target_role}
+                onChange={(e) => setPlacementForm({ ...placementForm, target_role: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Graduation Year</label>
+              <input
+                className={inputCls}
+                type="number"
+                min="2024"
+                max="2035"
+                value={placementForm.graduation_year}
+                onChange={(e) => setPlacementForm({ ...placementForm, graduation_year: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>CGPA <span className="text-slate-600 normal-case font-normal tracking-normal">(optional)</span></label>
+              <input
+                className={inputCls}
+                type="number"
+                min="0"
+                max="10"
+                step="0.01"
+                placeholder="e.g. 8.12"
+                value={placementForm.cgpa}
+                onChange={(e) => setPlacementForm({ ...placementForm, cgpa: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className={labelCls}>Placement Exams</label>
+            <div className="flex flex-wrap gap-2">
+              {PLACEMENT_EXAMS_LIST.map((exam) => (
+                <button
+                  key={exam}
+                  type="button"
+                  onClick={() => setPlacementForm({ ...placementForm, placement_exams: toggle(placementForm.placement_exams, exam) })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                    placementForm.placement_exams.includes(exam)
+                      ? "bg-amber-400/15 border-amber-400/40 text-amber-400"
+                      : "bg-slate-800/50 border-slate-700 text-slate-400 hover:border-slate-500"
+                  }`}
+                >
+                  {exam}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-4 text-sm text-blue-300">
+            Includes: AMCAT/eLitmus prep map, campus drive calendar, HR tips, resume fixes, and fresher-focused off-campus aggregators.
+          </div>
+
+          {placementError && (
+            <div className="px-3 py-2.5 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400">
+              ⚠️ {placementError}
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <button
+              onClick={handlePlacementPredict}
+              disabled={placementLoading}
+              className="px-6 py-2.5 bg-amber-400 text-slate-950 font-bold rounded-lg hover:bg-amber-300 transition-all text-sm disabled:opacity-50 flex items-center gap-2"
+            >
+              {placementLoading ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                  Building placement plan...
+                </>
+              ) : "🚀 Build Placement Plan"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Results */}
-      {result && (
+      {mode === "pathfinder" && result && (
         <div ref={resultRef}>
           {/* Fallback banner */}
           {result.is_fallback && (
@@ -998,6 +1214,159 @@ export default function CareerCopilotPage() {
             >
               ↺ Update Profile & Re-run
             </button>
+          </div>
+        </div>
+      )}
+
+      {mode === "placement" && placementResult && (
+        <div ref={resultRef}>
+          {placementResult.is_fallback && (
+            <div className="mb-4 px-4 py-3 bg-amber-400/5 border border-amber-400/20 rounded-lg text-sm text-amber-300 flex items-start gap-2">
+              <span className="shrink-0">⚠️</span>
+              <span>Showing structured fallback guidance. Connect your AI key for more personalised placement planning.</span>
+            </div>
+          )}
+
+          <div className="card">
+            <div className="flex gap-1 border-b border-slate-800 mb-6 -mx-5 px-5 overflow-x-auto pb-0">
+              {([
+                { key: "exam" as PlacementTab, label: "📝 Exam Prep" },
+                { key: "calendar" as PlacementTab, label: "📅 Drive Calendar" },
+                { key: "offcampus" as PlacementTab, label: "🌐 Off-Campus Jobs" },
+                { key: "plan" as PlacementTab, label: "🗺️ 4-Week Plan" },
+              ]).map((t) => (
+                <button
+                  key={t.key}
+                  onClick={() => setPlacementTab(t.key)}
+                  className={`flex items-center gap-1.5 px-3 py-2.5 text-sm font-medium whitespace-nowrap border-b-2 transition-all -mb-px ${
+                    placementTab === t.key
+                      ? "border-amber-400 text-amber-400"
+                      : "border-transparent text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {placementTab === "exam" && (
+              <div className="space-y-6">
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-3">AMCAT Prep</p>
+                  <div className="space-y-2">
+                    {placementResult.amcat_prep.map((item, i) => (
+                      <div key={i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                        <div className="flex items-center justify-between gap-3 mb-1">
+                          <p className="text-sm font-semibold text-white">{item.topic}</p>
+                          <span className="font-mono text-[10px] text-amber-400">{item.duration}</span>
+                        </div>
+                        <p className="text-xs text-slate-400">{item.resource} · {item.platform}</p>
+                        <p className="text-sm text-slate-300 mt-2">{item.notes}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-3">eLitmus Prep</p>
+                  <div className="space-y-2">
+                    {placementResult.elitmus_prep.map((item, i) => (
+                      <div key={i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                        <div className="flex items-center justify-between gap-3 mb-1">
+                          <p className="text-sm font-semibold text-white">{item.topic}</p>
+                          <span className="font-mono text-[10px] text-blue-400">{item.duration}</span>
+                        </div>
+                        <p className="text-xs text-slate-400">{item.resource} · {item.platform}</p>
+                        <p className="text-sm text-slate-300 mt-2">{item.notes}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {placementTab === "calendar" && (
+              <div className="space-y-3">
+                {placementResult.campus_drive_calendar.map((drive, i) => (
+                  <div key={i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-2">
+                      <p className="text-white font-semibold">{drive.company}</p>
+                      <span className="font-mono text-xs text-amber-400">{drive.typical_months}</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+                      <div>
+                        <p className="text-xs text-slate-500 mb-0.5">Role</p>
+                        <p className="text-slate-300">{drive.role}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 mb-0.5">CTC range</p>
+                        <p className="text-emerald-400 font-mono">{drive.ctc_range}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 mb-0.5">Eligibility</p>
+                        <p className="text-slate-300">{drive.eligibility}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {placementTab === "offcampus" && (
+              <div className="space-y-3">
+                {placementResult.off_campus_portals.map((portal, i) => (
+                  <div key={i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-2">
+                      <p className="text-white font-semibold">{portal.name}</p>
+                      <a href={`https://${portal.url}`} target="_blank" rel="noreferrer" className="text-xs text-amber-400 hover:text-amber-300 font-mono">
+                        {portal.url} ↗
+                      </a>
+                    </div>
+                    <p className="text-sm text-slate-300 mb-1">{portal.focus}</p>
+                    <p className="text-sm text-slate-400">{portal.tips}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {placementTab === "plan" && (
+              <div className="space-y-6">
+                <div>
+                  <p className="text-xs text-slate-500 uppercase tracking-wider font-bold mb-3">4-Week Action Plan</p>
+                  <div className="space-y-3">
+                    {placementResult.four_week_plan.map((week, i) => (
+                      <div key={i} className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+                        <p className="text-amber-400 font-semibold text-sm mb-2">{week.week}</p>
+                        <ul className="space-y-1.5">
+                          {week.tasks.map((task, j) => (
+                            <li key={j} className="flex gap-2 text-sm text-slate-300">
+                              <span className="text-amber-400 shrink-0">•</span>{task}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-4">
+                    <p className="text-blue-400 text-xs font-bold uppercase tracking-wider mb-3">🎤 HR Tips</p>
+                    <ul className="space-y-1.5">
+                      {placementResult.hr_tips.map((tip, i) => (
+                        <li key={i} className="text-sm text-slate-300 flex gap-2"><span className="text-blue-400">•</span>{tip}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-4">
+                    <p className="text-emerald-400 text-xs font-bold uppercase tracking-wider mb-3">📄 Resume Tips</p>
+                    <ul className="space-y-1.5">
+                      {placementResult.resume_tips.map((tip, i) => (
+                        <li key={i} className="text-sm text-slate-300 flex gap-2"><span className="text-emerald-400">•</span>{tip}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

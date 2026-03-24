@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { getAuthUser, enforceQuota } from "@/lib/api-auth";
 
 type Question = {
   category: string;
@@ -73,7 +74,14 @@ function mockInterviewPrep(): PrepResult {
 
 export async function POST(req: NextRequest) {
   try {
-    const { jd_text, resume_text } = await req.json();
+    // Auth + quota (allow unauthenticated requests to use the mock fallback)
+    const user = await getAuthUser(req);
+    if (user && process.env.ANTHROPIC_API_KEY?.trim()) {
+      const quotaError = await enforceQuota(user.id, "jd_analysis", user.email ?? undefined);
+      if (quotaError) return quotaError;
+    }
+
+    const { jd_text, resume_text, company, role } = await req.json();
     if (!jd_text || jd_text.trim().length < 50) {
       return NextResponse.json(
         { error: "Please provide a full job description (at least 50 characters)." },
@@ -89,26 +97,31 @@ export async function POST(req: NextRequest) {
       ? `\nCandidate Resume:\n${resume_text.slice(0, 2000)}`
       : "";
 
-    const prompt = `You are an expert interview coach preparing a candidate for a job interview.
+    const companyLine = company?.trim()   ? `\nCompany:       ${company.trim()}`  : "";
+    const roleLine    = role?.trim()      ? `\nRole applying: ${role.trim()}`     : "";
+
+    const prompt = `You are an expert interview coach preparing a candidate for a specific job interview.
+${companyLine}${roleLine}
 
 Job Description:
 ${jd_text.slice(0, 4000)}
 ${resumeSection}
 
-Generate 10 highly likely interview questions for this role with strong suggested answers.
-Cover: Technical skills, Behavioral (STAR format), Situational, and Role-specific questions.
+Generate exactly 10 highly likely interview questions for this specific role with strong suggested answers.
+Questions must be tailored to the actual JD — not generic.${company?.trim() ? ` Include 1-2 company-specific questions about ${company.trim()}'s work, culture, or products.` : ""}
+Cover: Technical skills from the JD, Behavioral (STAR format), Situational, and Role-specific.
 
 Return ONLY valid JSON, no prose:
 {
   "questions": [
     {
       "category": "<Technical|Behavioral|Situational|Role-specific>",
-      "question": "<interview question>",
+      "question": "<specific interview question tailored to this JD>",
       "answer":   "<suggested answer 3-6 sentences, use STAR format for behavioral>"
     }
   ],
-  "key_topics": ["<topic to prepare>"],
-  "preparation_tips": ["<actionable tip>"]
+  "key_topics": ["<specific topic from this JD to prepare>"],
+  "preparation_tips": ["<actionable tip specific to this role>"]
 }`;
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
