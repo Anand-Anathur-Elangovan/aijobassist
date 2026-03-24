@@ -7,9 +7,15 @@ Supports full-auto and semi-auto modes.
 import os
 import re
 import time
+import random
 import tempfile
 import requests as http_req
 from playwright.sync_api import sync_playwright, Page
+from automation.human import (
+    human_sleep, micro_pause, thinking_pause, reading_pause,
+    human_mouse_move, human_click, human_type,
+    human_scroll_down, idle_jiggle,
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -266,7 +272,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
     # Navigate directly to the Naukri login page (more reliable than clicking the header button)
     print("  [NAUKRI] Navigating to login page...")
     page.goto("https://www.naukri.com/nlogin/login", wait_until="domcontentloaded")
-    time.sleep(4)  # React SPA needs time to render
+    human_sleep(3.5, 5.5)  # React SPA needs time to render
 
     # If already logged in (avatar / profile icon visible), skip login
     for _logged_in_sel in [
@@ -327,7 +333,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
                 try:
                     el = page.locator(email_sel).first
                     if el.is_visible(timeout=1500):
-                        el.fill(email)
+                        human_type(page, email, locator=el)
                         filled_email = True
                         print(f"  [NAUKRI] Email filled ({email_sel})")
                         break
@@ -343,7 +349,8 @@ def _login(page: Page, task_input: dict = None) -> bool:
                     try:
                         pwd_el = page.locator(pwd_sel).first
                         if pwd_el.is_visible(timeout=1500):
-                            pwd_el.fill(password)
+                            human_sleep(0.4, 1.0)   # pause between email → password
+                            human_type(page, password, locator=pwd_el, typo_rate=0.0)
                             print("  [NAUKRI] Password filled — clicking Login...")
                             break
                     except Exception:
@@ -358,10 +365,11 @@ def _login(page: Page, task_input: dict = None) -> bool:
                     try:
                         b = page.locator(btn_sel).first
                         if b.is_visible(timeout=1500):
-                            b.click()
+                            human_sleep(0.5, 1.5)  # brief hesitation before login click
+                            human_click(page, locator=b)
                             print("  [NAUKRI] Login button clicked — waiting for redirect...")
                             auto_login_attempted = True
-                            time.sleep(4)
+                            human_sleep(3.5, 5.5)
                             break
                     except Exception:
                         continue
@@ -450,18 +458,18 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
     search_url = f"{base_url}?{urlencode(params)}" if params else base_url
     print(f"  [NAUKRI] URL: {search_url}")
     page.goto(search_url, wait_until="domcontentloaded")
-    time.sleep(5)  # give React SPA time to render initial batch
+    human_sleep(4.5, 6.5)  # give React SPA time to render initial batch
 
     # Scroll down to trigger lazy-loaded job cards
     for _ in range(3):
         page.keyboard.press("End")
-        time.sleep(1.5)
+        human_sleep(1.2, 2.0)
     page.keyboard.press("Home")
-    time.sleep(2)
+    human_sleep(1.5, 2.5)
 
     # Also try sidebar filters as a best-effort secondary attempt
     _apply_filters(page, task_input)
-    time.sleep(2)
+    human_sleep(1.5, 2.5)
 
     # ── Collect job links across multiple pages ──────────────
     max_apply   = int((task_input or {}).get("max_apply", MAX_APPLY))
@@ -525,12 +533,12 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
             next_url  = f"{next_base}?{urlencode(params)}" if params else next_base
             print(f"  [NAUKRI] Paginating to page {page_num}: {next_url}")
             page.goto(next_url, wait_until="domcontentloaded")
-            time.sleep(4)
+            human_sleep(3.5, 5.5)
             for _ in range(3):
                 page.keyboard.press("End")
-                time.sleep(1.5)
+                human_sleep(1.2, 2.0)
             page.keyboard.press("Home")
-            time.sleep(2)
+            human_sleep(1.5, 2.5)
 
         new_links = _collect_links_from_page()
         before = len(job_links)
@@ -586,7 +594,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
     if not _safe_goto(page, job_url):
         print(f"  [NAUKRI] Could not load job page after retries — skipping")
         return False
-    time.sleep(NAV_WAIT)
+    human_sleep(NAV_WAIT, NAV_WAIT + 2)
 
     try:
         # ── Skip if already applied ───────────────────────────────
@@ -754,8 +762,8 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             return False
 
         url_before = page.url
-        apply_btn.click()
-        time.sleep(3)
+        human_click(page, locator=apply_btn)
+        idle_jiggle(page, duration=random.uniform(2.5, 4.0))   # jiggle while form loads
 
         # Bail if redirected externally
         if "naukri.com" not in page.url:
@@ -767,7 +775,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         if semi_auto:
             # Pre-fill what we can before handing off
             _fill_naukri_fields(page, task_input)
-            time.sleep(1)
+            human_sleep(0.8, 1.5)
             print(
                 "  [NAUKRI] [SEMI-AUTO] ⏸  Form pre-filled. "
                 "Please review and click Submit/Apply in the browser."
@@ -1016,7 +1024,7 @@ def _handle_application_flow(page: Page, task_input: dict) -> bool:
     )
 
     for step in range(20):
-        time.sleep(2)
+        human_sleep(1.5, 3.0)
         print(f"  [NAUKRI] Application step {step + 1}")
 
         if _check_applied_success(page):
@@ -1307,7 +1315,7 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
         "I am very interested in this role and my skills align well with the requirements.",
     )
 
-    time.sleep(2)
+    human_sleep(1.5, 3.0)
 
     ai_did_fill = False
 

@@ -7,9 +7,15 @@ import os
 import re
 import sys
 import time
+import random
 import tempfile
 import requests as http_req
 from playwright.sync_api import sync_playwright, Page
+from automation.human import (
+    human_sleep, micro_pause, thinking_pause, reading_pause,
+    human_mouse_move, human_click, human_type,
+    human_scroll_down, idle_jiggle,
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -414,13 +420,13 @@ def _login(page: Page, task_input: dict = None) -> bool:
 
     print("  [LINKEDIN] Opening login page...")
     page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded")
-    time.sleep(NAV_WAIT)
+    human_sleep(NAV_WAIT, NAV_WAIT + 2)
 
     if email:
         try:
             email_input = page.locator("input#username, input[name='session_key']").first
             if email_input.is_visible(timeout=3000):
-                email_input.fill(email)
+                human_type(page, email, locator=email_input)
                 print(f"  [LINKEDIN] Pre-filled email: {email}")
         except Exception:
             pass
@@ -429,10 +435,12 @@ def _login(page: Page, task_input: dict = None) -> bool:
         try:
             pwd_input = page.locator("input#password, input[name='session_password']").first
             if pwd_input.is_visible(timeout=3000):
-                pwd_input.fill(password)
+                human_sleep(0.4, 1.0)   # natural pause between email → password
+                human_type(page, password, locator=pwd_input, typo_rate=0.0)
+            human_sleep(0.5, 1.5)       # brief hesitation before clicking Sign In
             sign_in = page.locator("button[type='submit'], button[data-litms-control-urn='login-submit']").first
             if sign_in.is_visible(timeout=2000):
-                sign_in.click()
+                human_click(page, locator=sign_in)
                 print("  [LINKEDIN] Auto-clicked Sign In")
         except Exception:
             pass
@@ -555,7 +563,7 @@ def _upload_resume(page: Page, task_input: dict):
             owned_tmp   = True
 
         file_input.set_input_files(upload_path)
-        time.sleep(2)
+        human_sleep(1.5, 3.0)   # wait for upload processing
         print(f"  [LINKEDIN] ✅ Resume uploaded")
     except Exception as e:
         print(f"  [LINKEDIN] Resume upload error: {e}")
@@ -675,7 +683,7 @@ def _fill_additional_questions(page: Page, task_input: dict):
                             resume_summary = task_input.get("resume_text", "")[:500]
                             answer = claude_answer_question(label_text, [], resume_summary)
                             if answer:
-                                inp.fill(answer)
+                                human_type(page, answer, locator=inp)
                                 print(f"  [LINKEDIN] Claude filled text '{label_text[:60]}' = {answer[:60]}")
                         except Exception:
                             pass
@@ -711,7 +719,7 @@ def _fill_additional_questions(page: Page, task_input: dict):
             try:
                 if ta.input_value().strip():
                     continue
-                ta.fill(cover_note)
+                human_type(page, cover_note, locator=ta)
                 print("  [LINKEDIN] Filled textarea")
             except Exception:
                 pass
@@ -853,7 +861,7 @@ def _fill_additional_questions(page: Page, task_input: dict):
                     answer = "No" if want_no else "Yes"
                     q_preview = question_text[:60] if question_text else name
                     print(f"  [LINKEDIN] Radio → '{answer}' for: {q_preview!r}")
-                    time.sleep(0.3)
+                    micro_pause()
 
             except Exception:
                 pass
@@ -1157,7 +1165,8 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
         search_url = f"{base_url}&start={start}"
         print(f"  [LINKEDIN] Page {page_num + 1} URL: {search_url}")
         page.goto(search_url, wait_until="domcontentloaded")
-        time.sleep(NAV_WAIT + 2)
+        human_sleep(NAV_WAIT + 1, NAV_WAIT + 4)
+        human_scroll_down(page, steps=random.randint(2, 4))   # browse-style scroll
 
         before = len(job_links)
         try:
@@ -1202,7 +1211,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
     if not _safe_goto(page, job_url):
         print(f"  [LINKEDIN] Could not load job page after retries — skipping")
         return False
-    time.sleep(NAV_WAIT)
+    human_sleep(NAV_WAIT, NAV_WAIT + 2)
 
     try:
         # ── Skip if already applied ───────────────────────────────
@@ -1224,7 +1233,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         jd_text         = ""
 
         if needs_jd:
-            time.sleep(2)
+            human_sleep(1.5, 3.0)
             # Expand "Show more" so full JD is in DOM
             for expand_sel in [
                 "button.jobs-description__footer-button",
@@ -1270,6 +1279,10 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                             break
                 except Exception:
                     continue
+
+            # Simulate reading the job description
+            if jd_text:
+                reading_pause(min(len(jd_text), 1200))
 
             if not jd_text:
                 for fallback_sel in ["main", "div[role='main']", "div.scaffold-layout__detail"]:
@@ -1372,17 +1385,17 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             print(f"  [LINKEDIN] No Easy Apply button — skipping")
             return False
 
-        easy_apply_btn.click()
-        time.sleep(4)  # wait for modal/apply page to fully load
+        human_click(page, locator=easy_apply_btn)
+        idle_jiggle(page, duration=random.uniform(3.0, 5.5))   # jiggle while modal loads
 
         # ── Multi-step apply loop (up to 10 steps) ────────────────
         for step in range(10):
-            time.sleep(2.5)
+            human_sleep(2.0, 3.5)
             print(f"  [LINKEDIN] Form step {step + 1}")
 
             # Fill every visible field on this step
             _fill_all_fields(page, task_input)
-            time.sleep(1.5)  # let validation re-evaluate
+            human_sleep(1.0, 2.5)  # let validation re-evaluate
 
             semi_auto    = task_input.get("semi_auto", False)
             _SUBMIT_SEL  = ("button[aria-label='Submit application'], "
@@ -1446,8 +1459,9 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                         return False
                 else:
                     submit_btn = page.locator(_SUBMIT_SEL).first
-                    submit_btn.click()
-                    time.sleep(3)
+                    human_sleep(0.5, 1.5)  # last-second hesitation before submit
+                    human_click(page, locator=submit_btn)
+                    human_sleep(2.5, 4.5)
                     print(f"  [LINKEDIN] ✅ {label}")
                     _dismiss_post_apply_modal(page)
                     return True
