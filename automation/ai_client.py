@@ -100,6 +100,12 @@ def _inject_mock_keywords(resume_text: str, jd_text: str, summary: str, top_miss
 # Claude Sonnet helper — auto-activated when ANTHROPIC_API_KEY is set
 # ──────────────────────────────────────────────────────────────────────────
 
+# ── Model routing ─────────────────────────────────────────────────────────
+# Haiku  → fast, cheap — simple extraction, parsing, classification, Q&A
+# Sonnet → accurate, expensive — tailoring, cover letters, interview prep
+HAIKU_MODEL  = "claude-haiku-4-5"
+SONNET_MODEL = "claude-sonnet-4-5"
+
 # ── Circuit breaker ────────────────────────────────────────────────────────
 # Set to True on permanent API errors (quota exceeded, invalid key, etc.)
 # so all further Claude calls in this process skip immediately.
@@ -125,8 +131,8 @@ def _has_api_key() -> bool:
     return bool(_get_api_key()) and not _API_DISABLED
 
 
-def _call_claude(prompt: str, max_tokens: int = 4096) -> dict:
-    """Call Claude Sonnet and parse the JSON response."""
+def _call_claude(prompt: str, max_tokens: int = 4096, model: str = SONNET_MODEL) -> dict:
+    """Call Claude and parse the JSON response. model= selects Haiku or Sonnet."""
     global _API_DISABLED
     if _API_DISABLED:
         raise RuntimeError("Claude disabled for this run (permanent API error)")
@@ -144,7 +150,7 @@ def _call_claude(prompt: str, max_tokens: int = 4096) -> dict:
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-5",
+                "model": model,
                 "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
             },
@@ -166,7 +172,7 @@ def _call_claude(prompt: str, max_tokens: int = 4096) -> dict:
         raise
 
 
-def call_claude(prompt: str, max_tokens: int = 1024) -> str:
+def call_claude(prompt: str, max_tokens: int = 1024, model: str = SONNET_MODEL) -> str:
     """
     Call Claude and return the raw text response (no JSON parsing).
     Used by gmail_client.py and other modules that need free-form text.
@@ -188,7 +194,7 @@ def call_claude(prompt: str, max_tokens: int = 1024) -> str:
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-5",
+                "model": model,
                 "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
             },
@@ -290,7 +296,7 @@ def analyze_resume(resume_text: str) -> dict:
 Resume:
 {resume_text}"""
         try:
-            return _call_claude(prompt)
+            return _call_claude(prompt, model=HAIKU_MODEL)
         except Exception:
             pass  # fall through to mock
 
@@ -341,7 +347,7 @@ Resume:
 {resume_text}"""
 
     try:
-        result = _call_claude(prompt, max_tokens=1500)
+        result = _call_claude(prompt, max_tokens=1500, model=HAIKU_MODEL)
         if isinstance(result, list):
             return result
         return []
@@ -386,7 +392,7 @@ Resume:
 {resume_text}"""
 
     try:
-        result = _call_claude(prompt, max_tokens=2000)
+        result = _call_claude(prompt, max_tokens=2000, model=HAIKU_MODEL)
         if isinstance(result, list):
             return result
         return []
@@ -416,7 +422,7 @@ def analyze_jd(jd_text: str) -> dict:
 JD:
 {jd_text}"""
         try:
-            return _call_claude(prompt)
+            return _call_claude(prompt, model=HAIKU_MODEL)
         except Exception:
             pass  # fall through to mock
 
@@ -453,7 +459,7 @@ Resume:
 Job Description:
 {jd_text}"""
         try:
-            return _call_claude(prompt)
+            return _call_claude(prompt, model=HAIKU_MODEL)
         except Exception:
             pass  # fall through to mock
 
@@ -508,7 +514,7 @@ Resume:
 Job Description:
 {jd_text}"""
         try:
-            return _call_claude(prompt, max_tokens=6000)
+            return _call_claude(prompt, max_tokens=6000, model=SONNET_MODEL)
         except Exception:
             pass  # fall through to mock
 
@@ -588,7 +594,7 @@ Resume:
 Job Description:
 {jd_text}"""
         try:
-            return _call_claude(prompt)
+            return _call_claude(prompt, model=SONNET_MODEL)
         except Exception:
             pass  # fall through to mock
 
@@ -710,7 +716,7 @@ HTML:
 {trimmed_html}"""
 
     try:
-        result = _call_claude(prompt, max_tokens=1500)
+        result = _call_claude(prompt, max_tokens=1500, model=HAIKU_MODEL)
         if isinstance(result, list):
             return result
         return []
@@ -801,7 +807,7 @@ def claude_answer_question(
             "No other text."
         )
         try:
-            resp = call_claude(verify_prompt, max_tokens=60).strip()
+            resp = call_claude(verify_prompt, max_tokens=60, model=HAIKU_MODEL).strip()
             if resp.upper().startswith("CONFIRM"):
                 print(f"  [VALIDATE \u2713] {field_name}: '{value}' confirmed by Claude")
                 return value
@@ -984,7 +990,7 @@ Question: {question_text}
 {"Return ONLY the exact option text — no other words." if options else "Return ONLY the direct answer — no explanation, no sentence."}"""
 
     try:
-        raw = call_claude(prompt, max_tokens=200)
+        raw = call_claude(prompt, max_tokens=200, model=HAIKU_MODEL)
         if options:
             # Use the fuzzy matcher for best option
             matched = _match_option(raw.strip())
@@ -1041,7 +1047,7 @@ Return ONLY valid JSON, no prose:
   "preparation_tips": ["<actionable tip>"]
 }}"""
         try:
-            return _call_claude(prompt, max_tokens=5000)
+            return _call_claude(prompt, max_tokens=5000, model=SONNET_MODEL)
         except Exception:
             pass  # fall through to mock
 

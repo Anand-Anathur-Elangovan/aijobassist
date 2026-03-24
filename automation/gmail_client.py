@@ -79,12 +79,12 @@ Reply with ONLY the email body text, no subject line, no "Dear X"."""
 # ──────────────────────────────────────────────────────────────
 
 def _ai_classify(subject: str, body: str) -> str:
-    """Classify the email type using Claude (or return GENERAL on failure)."""
+    """Classify the email type using Claude Haiku (cheap — simple classification)."""
     prompt = CLASSIFICATION_PROMPT.format(subject=subject, body=body[:800])
     try:
         sys.path.insert(0, os.path.dirname(__file__))
-        from ai_client import call_claude
-        result = call_claude(prompt).strip().upper()
+        from ai_client import call_claude, HAIKU_MODEL
+        result = call_claude(prompt, model=HAIKU_MODEL).strip().upper()
         valid = {"ACKNOWLEDGMENT", "INTERVIEW_INVITE", "REJECTION", "SCHEDULE_REQUEST", "OFFER", "GENERAL"}
         return result if result in valid else "GENERAL"
     except Exception as e:
@@ -104,14 +104,14 @@ def _ai_classify(subject: str, body: str) -> str:
 
 def _ai_generate_reply(subject: str, body: str, classification: str,
                         company: str, role: str, applicant_name: str) -> str:
-    """Generate an AI reply for the email."""
+    """Generate an AI reply for the email using Claude Sonnet (quality writing)."""
     prompt = REPLY_PROMPT.format(
         subject=subject, body=body[:600], classification=classification,
         applicant_name=applicant_name, role=role, company=company,
     )
     try:
-        from ai_client import call_claude
-        return call_claude(prompt).strip()
+        from ai_client import call_claude, SONNET_MODEL
+        return call_claude(prompt, model=SONNET_MODEL).strip()
     except Exception:
         # Soft fallback
         return (
@@ -121,10 +121,10 @@ def _ai_generate_reply(subject: str, body: str, classification: str,
 
 
 def _ai_summarise(subject: str, body: str) -> str:
-    """One-sentence summary of the email."""
+    """One-sentence summary of the email using Claude Haiku (cheap — simple summarisation)."""
     try:
-        from ai_client import call_claude
-        return call_claude(f"Summarise this email in one sentence:\nSubject: {subject}\n{body[:400]}").strip()
+        from ai_client import call_claude, HAIKU_MODEL
+        return call_claude(f"Summarise this email in one sentence:\nSubject: {subject}\n{body[:400]}", model=HAIKU_MODEL).strip()
     except Exception:
         return subject
 

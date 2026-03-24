@@ -153,7 +153,8 @@ def _extract_jd_keywords(jd_text: str) -> list[str]:
 # ──────────────────────────────────────────────────────────────────────────
 def _call_claude(prompt: str, max_tokens: int = 4096) -> str:
     """
-    Call Claude Sonnet API. Requires:
+    Call Claude Sonnet API (resume tailoring always uses Sonnet for accuracy).
+    Requires:
       pip install anthropic
       ANTHROPIC_API_KEY environment variable
     """

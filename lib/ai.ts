@@ -78,15 +78,21 @@ const ALL_SKILLS: string[] = [
   "system design","architecture","code review",
 ];
 
-// ── Claude Sonnet real-API helper ─────────────────────────────────────────
+// ── Model routing ────────────────────────────────────────────────────────
+// Haiku  → fast, cheap — simple extraction, classification, comparison
+// Sonnet → accurate, expensive — complex reasoning, writing, planning
+const HAIKU_MODEL  = "claude-haiku-4-5";
+const SONNET_MODEL = "claude-sonnet-4-5";
+
+// ── Claude real-API helper ────────────────────────────────────────────────
 // Auto-activated when ANTHROPIC_API_KEY is present in environment.
 
-async function callClaude(prompt: string, maxTokens = 4096): Promise<string> {
+async function callClaude(prompt: string, maxTokens = 4096, model = SONNET_MODEL): Promise<string> {
   // Dynamic import so the SDK is only loaded when actually needed
   const Anthropic = (await import("@anthropic-ai/sdk")).default;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const msg = await client.messages.create({
-    model: "claude-sonnet-4-5",
+    model,
     max_tokens: maxTokens,
     messages: [{ role: "user", content: prompt }],
   });
@@ -146,7 +152,7 @@ export async function analyzeJD(jdText: string): Promise<JDAnalysis> {
 }
 Job Description:
 ${jdText}`;
-    return parseJSON<JDAnalysis>(await callClaude(prompt, 1024));
+    return parseJSON<JDAnalysis>(await callClaude(prompt, 1024, HAIKU_MODEL));
   }
   // ── Mock fallback ────────────────────────────────────────────────────
   const found     = extractSkills(jdText);
@@ -183,7 +189,7 @@ ${resumeText}
 
 Job Description:
 ${jdText}`;
-    return parseJSON<MatchScoreResult>(await callClaude(prompt, 1024));
+    return parseJSON<MatchScoreResult>(await callClaude(prompt, 1024, HAIKU_MODEL));
   }
   // ── Mock fallback ────────────────────────────────────────────────────
   const jdSkills    = extractSkills(jdText);
