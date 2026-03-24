@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { getAuthUser, enforceQuota } from "@/lib/api-auth";
+import { SONNET_MODEL } from "@/lib/ai";
 
 type Question = {
   category: string;
@@ -126,7 +127,7 @@ Return ONLY valid JSON, no prose:
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const msg = await client.messages.create({
-      model: "claude-sonnet-4-5",
+      model: SONNET_MODEL,  // interview prep = complex reasoning → Sonnet
       max_tokens: 5000,
       messages: [{ role: "user", content: prompt }],
     });

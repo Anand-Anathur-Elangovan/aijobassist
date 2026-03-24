@@ -81,8 +81,8 @@ const ALL_SKILLS: string[] = [
 // ── Model routing ────────────────────────────────────────────────────────
 // Haiku  → fast, cheap — simple extraction, classification, comparison
 // Sonnet → accurate, expensive — complex reasoning, writing, planning
-const HAIKU_MODEL  = "claude-haiku-4-5";
-const SONNET_MODEL = "claude-sonnet-4-5";
+export const HAIKU_MODEL  = "claude-haiku-4-5";
+export const SONNET_MODEL = "claude-sonnet-4-5";
 
 // ── Claude real-API helper ────────────────────────────────────────────────
 // Auto-activated when ANTHROPIC_API_KEY is present in environment.
