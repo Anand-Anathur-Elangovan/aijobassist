@@ -464,3 +464,137 @@ def natural_wait_for_selector(
         else:
             time.sleep(0.5)
     return False
+
+
+# ──────────────────────────────────────────────────────────────
+# 7. Stealth browser launch helpers
+# ──────────────────────────────────────────────────────────────
+
+# Rotate through common real-world Chrome user agents
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+]
+
+# Realistic viewport sizes (not the telltale 1280×720 automation default)
+_VIEWPORTS = [
+    {"width": 1366, "height": 768},
+    {"width": 1440, "height": 900},
+    {"width": 1536, "height": 864},
+    {"width": 1920, "height": 1080},
+    {"width": 1280, "height": 800},
+]
+
+# JS injected into every new page to hide automation signals
+_STEALTH_SCRIPT = """
+// Remove webdriver property (biggest bot signal)
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined,
+    configurable: true,
+});
+
+// Fake a realistic plugins list (real Chrome has many)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const arr = [
+            {name: 'Chrome PDF Plugin',         filename: 'internal-pdf-viewer',  description: 'Portable Document Format'},
+            {name: 'Chrome PDF Viewer',          filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+            {name: 'Native Client',              filename: 'internal-nacl-plugin', description: ''},
+            {name: 'Widevine Content Decryption Module', filename: 'widevinecdmadapter.dll', description: 'Enables Widevine licenses'},
+        ];
+        arr[Symbol.iterator] = Array.prototype[Symbol.iterator];
+        return arr;
+    },
+    configurable: true,
+});
+
+// Realistic languages
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['en-IN', 'en-US', 'en', 'hi'],
+    configurable: true,
+});
+
+// Hide chrome automation extension
+if (window.chrome) {
+    window.chrome.runtime = window.chrome.runtime || {};
+}
+
+// Prevent iframe detection
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : originalQuery(parameters)
+);
+"""
+
+
+def stealth_launch_args() -> list:
+    """
+    Chromium launch args that reduce automation fingerprint.
+    Pass as `args=stealth_launch_args()` inside `p.chromium.launch(...)`.
+    """
+    return [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-breakpad",
+        "--disable-component-extensions-with-background-pages",
+        "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+        "--disable-ipc-flooding-protection",
+        "--disable-renderer-backgrounding",
+        "--force-color-profile=srgb",
+        "--metrics-recording-only",
+        "--mute-audio",
+        "--safebrowsing-disable-auto-update",
+    ]
+
+
+def stealth_context_options() -> dict:
+    """
+    Returns kwargs for `browser.new_context(...)` with randomised realistic
+    viewport, user-agent, locale, and timezone so every session looks different.
+    """
+    ua  = random.choice(_USER_AGENTS)
+    vp  = random.choice(_VIEWPORTS)
+    # Slightly jitter the viewport ±10 px so successive runs never match exactly
+    vp = {
+        "width":  vp["width"]  + random.randint(-10, 10),
+        "height": vp["height"] + random.randint(-10, 10),
+    }
+    return {
+        "user_agent":    ua,
+        "viewport":      vp,
+        "locale":        "en-IN",
+        "timezone_id":   "Asia/Kolkata",
+        "color_scheme":  "light",
+        "device_scale_factor": random.choice([1.0, 1.25, 1.5]),
+        "has_touch":     False,
+        "is_mobile":     False,
+        "java_script_enabled": True,
+        "extra_http_headers": {
+            "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8,hi;q=0.7",
+        },
+    }
+
+
+def inject_stealth(page) -> None:
+    """
+    Inject the stealth JS payload into a Playwright page so it runs before
+    every document load.  Call this immediately after `context.new_page()`.
+
+    Usage:
+        page = context.new_page()
+        inject_stealth(page)
+    """
+    try:
+        page.add_init_script(_STEALTH_SCRIPT)
+    except Exception:
+        pass  # Never block the bot

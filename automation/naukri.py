@@ -15,6 +15,7 @@ from automation.human import (
     human_sleep, micro_pause, thinking_pause, reading_pause,
     human_mouse_move, human_click, human_type,
     human_scroll_down, idle_jiggle,
+    stealth_launch_args, stealth_context_options, inject_stealth,
 )
 
 
@@ -128,9 +129,10 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
             pass
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
+        browser = p.chromium.launch(headless=False, args=stealth_launch_args())
+        context = browser.new_context(**stealth_context_options())
         page    = context.new_page()
+        inject_stealth(page)
 
         try:
             if not _login(page, task_input):
@@ -305,8 +307,8 @@ def _login(page: Page, task_input: dict = None) -> bool:
             try:
                 btn = page.locator(login_sel).first
                 if btn.is_visible(timeout=2000):
-                    btn.click()
-                    time.sleep(3)
+                    human_click(page, locator=btn)
+                    human_sleep(2.5, 4.5)
                     break
             except Exception:
                 continue
@@ -355,7 +357,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
                             break
                     except Exception:
                         continue
-                time.sleep(0.5)
+                micro_pause()
                 for btn_sel in [
                     "button.loginButton",
                     "button[type='submit']:visible",
@@ -847,20 +849,20 @@ def _fill_naukri_fields(page: Page, task_input: dict):
                 combined    = f"{inp_id} {placeholder} {name_attr}"
 
                 if any(w in combined for w in ("experience", "year", "exp", "totalexp")):
-                    inp.fill(str(int(years)))
+                    human_type(page, str(int(years)), locator=inp)
                     print(f"  [NAUKRI] Filled experience = {years}")
                 elif any(w in combined for w in ("notice", "noticeperiod")):
-                    inp.fill(str(int(notice)))
+                    human_type(page, str(int(notice)), locator=inp)
                     print(f"  [NAUKRI] Filled notice = {notice}")
                 elif any(w in combined for w in ("currentctc", "current ctc", "current_ctc", "presentctc")):
                     current_ctc = str(task_input.get("current_ctc") or "")
                     if current_ctc:
-                        inp.fill(current_ctc)
+                        human_type(page, current_ctc, locator=inp)
                         print(f"  [NAUKRI] Filled current CTC = {current_ctc}")
                 elif any(w in combined for w in ("expectedctc", "expected ctc", "expected_ctc", "salary", "lpa", "ctc", "expected")):
                     expected = str(task_input.get("expected_ctc") or task_input.get("salary_expectation") or "")
                     if expected:
-                        inp.fill(expected)
+                        human_type(page, expected, locator=inp)
                         print(f"  [NAUKRI] Filled expected CTC = {expected}")
             except Exception:
                 pass
@@ -873,7 +875,7 @@ def _fill_naukri_fields(page: Page, task_input: dict):
             try:
                 if (ta.input_value() or "").strip():
                     continue
-                ta.fill(cover_note)
+                human_type(page, cover_note, locator=ta)
                 print("  [NAUKRI] Filled textarea")
             except Exception:
                 pass
@@ -1040,13 +1042,13 @@ def _handle_application_flow(page: Page, task_input: dict) -> bool:
 
         # Legacy web form fields
         _fill_naukri_fields(page, task_input)
-        time.sleep(1)
+        human_sleep(0.8, 1.8)
 
         # Submit button
         try:
             if page.locator(_SUBMIT_SEL).first.is_visible(timeout=2000):
                 if _click_if_visible(page, _SUBMIT_SEL, timeout=2500):
-                    time.sleep(3)
+                    human_sleep(2.5, 4.5)
                     print("  [NAUKRI] Submitted!")
                     return True
         except Exception:
@@ -1123,9 +1125,9 @@ def _handle_chatbot_step(page: Page, task_input: dict) -> bool:
 
         if val:
             try:
-                chatbot_inp.fill(val)
+                human_type(page, val, locator=chatbot_inp)
                 print(f"  [NAUKRI] Chatbot input filled → {val}")
-                time.sleep(0.5)
+                micro_pause()
                 _try_chatbot_proceed(page)
                 return True
             except Exception:
@@ -1134,7 +1136,7 @@ def _handle_chatbot_step(page: Page, task_input: dict) -> bool:
         # No value — skip the question
         if _click_skip(page):
             print("  [NAUKRI] CTC → Skipped")
-            time.sleep(0.5)
+            micro_pause()
             _try_chatbot_proceed(page)
             return True
 
@@ -1169,7 +1171,7 @@ def _handle_chatbot_step(page: Page, task_input: dict) -> bool:
                     _click_radio_by_value(page, "Yes")
             print("  [NAUKRI] Generic radio → answered")
 
-        time.sleep(1)
+        micro_pause()
         _try_chatbot_proceed(page)
         return True
 
@@ -1207,15 +1209,15 @@ def _apply_company_site(page: Page, company_btn, task_input: dict, naukri_job_ur
         # Button click may open a new tab on Naukri
         try:
             with page.context.expect_page(timeout=6000) as popup_info:
-                company_btn.click()
+                human_click(page, locator=company_btn)
             target_page  = popup_info.value
             opened_popup = True
             target_page.wait_for_load_state("domcontentloaded", timeout=20000)
-            time.sleep(2)
+            human_sleep(1.5, 3.0)
             print(f"  [NAUKRI] Company site (new tab): {target_page.url[:70]}")
         except Exception as popup_err:
             print(f"  [NAUKRI] No new-tab popup ({popup_err}) — checking same-tab navigation...")
-            time.sleep(2)
+            human_sleep(1.5, 3.0)
             if "naukri.com" not in page.url:
                 # Button navigated the current tab to the company site
                 target_page = page
@@ -1223,8 +1225,8 @@ def _apply_company_site(page: Page, company_btn, task_input: dict, naukri_job_ur
             else:
                 # Try clicking once more and navigating via data-href or onclick
                 try:
-                    company_btn.click()
-                    time.sleep(3)
+                    human_click(page, locator=company_btn)
+                    human_sleep(2.5, 4.5)
                     if "naukri.com" not in page.url:
                         target_page = page
                         print(f"  [NAUKRI] Company site (same tab, retry): {page.url[:70]}")
@@ -1237,7 +1239,7 @@ def _apply_company_site(page: Page, company_btn, task_input: dict, naukri_job_ur
         print(f"  [NAUKRI] Company site (direct URL): {ext_url[:70]}")
         try:
             page.goto(ext_url, wait_until="domcontentloaded", timeout=20000)
-            time.sleep(3)
+            human_sleep(2.5, 4.5)
             target_page = page
         except Exception as nav_err:
             print(f"  [NAUKRI] Navigation failed: {nav_err}")
@@ -1258,9 +1260,9 @@ def _apply_company_site(page: Page, company_btn, task_input: dict, naukri_job_ur
                 btn_href    = btn.get_attribute("href") or ""
                 # Only click if staying on same domain
                 if not btn_href.startswith("http") or _cur_domain in btn_href:
-                    btn.click()
+                    human_click(target_page, locator=btn)
                     target_page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    time.sleep(2)
+                    human_sleep(1.5, 3.0)
                     print(f"  [NAUKRI] Clicked 'Apply Now' on company site")
                     break
         except Exception:
@@ -1273,7 +1275,7 @@ def _apply_company_site(page: Page, company_btn, task_input: dict, naukri_job_ur
         try:
             print(f"  [NAUKRI] Returning to Naukri: {naukri_return_url[:60]}")
             page.goto(naukri_return_url, wait_until="domcontentloaded", timeout=20000)
-            time.sleep(NAV_WAIT)
+            human_sleep(NAV_WAIT, NAV_WAIT + 2)
         except Exception as back_err:
             print(f"  [NAUKRI] Could not navigate back to Naukri: {back_err}")
 
@@ -1350,12 +1352,12 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
                             continue
                         if action == "fill":
                             if not (el.input_value() or "").strip():
-                                el.fill(str(value))
+                                human_type(page, str(value), locator=el)
                         elif action == "select":
                             el.select_option(str(value))
                         elif action == "click":
-                            el.click()
-                            time.sleep(2)
+                            human_click(page, locator=el)
+                            human_sleep(1.5, 3.0)
                     except Exception:
                         pass
                 ai_did_fill = True
@@ -1370,7 +1372,7 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
                 try:
                     el = page.locator(sel).first
                     if el.is_visible(timeout=800) and not (el.input_value() or "").strip():
-                        el.fill(email_addr)
+                        human_type(page, email_addr, locator=el)
                         break
                 except Exception:
                     pass
@@ -1383,7 +1385,7 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
                 try:
                     el = page.locator(sel).first
                     if el.is_visible(timeout=500) and not (el.input_value() or "").strip():
-                        el.fill(first)
+                        human_type(page, first, locator=el)
                         break
                 except Exception:
                     pass
@@ -1393,7 +1395,7 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
                     try:
                         el = page.locator(sel).first
                         if el.is_visible(timeout=500) and not (el.input_value() or "").strip():
-                            el.fill(last)
+                            human_type(page, last, locator=el)
                             break
                     except Exception:
                         pass
@@ -1403,7 +1405,7 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
                 try:
                     el = page.locator(sel).first
                     if el.is_visible(timeout=500) and not (el.input_value() or "").strip():
-                        el.fill(str(phone))
+                        human_type(page, str(phone), locator=el)
                         break
                 except Exception:
                     pass
@@ -1412,7 +1414,7 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
             for ta in page.locator("textarea:visible").all():
                 try:
                     if not (ta.input_value() or "").strip():
-                        ta.fill(cover_note)
+                        human_type(page, cover_note, locator=ta)
                         break
                 except Exception:
                     pass
@@ -1421,7 +1423,7 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
 
     # ── Resume upload (always, regardless of fill method) ──────────
     _upload_resume(page, task_input)
-    time.sleep(1)
+    human_sleep(0.5, 1.5)
 
     # ── Semi-auto: hand off to user, poll for completion ───────────
     if semi_auto:
@@ -1477,8 +1479,9 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
         try:
             btn = page.locator(sub_sel).first
             if btn.is_visible(timeout=1500):
-                btn.click()
-                time.sleep(3)
+                human_sleep(0.5, 1.5)    # last-second hesitation
+                human_click(page, locator=btn)
+                human_sleep(2.5, 4.5)
                 print("  [NAUKRI] Company site: submitted! ✅")
                 return True
         except Exception:
@@ -1526,7 +1529,7 @@ def _apply_filters(page: Page, task_input: dict):
                         ).first
                         if cb.is_visible(timeout=1500):
                             cb.click()
-                            time.sleep(1)
+                            micro_pause()
                             print(f"  [NAUKRI] Filter: Work mode = {label}")
                             break
                     except Exception:
@@ -1550,7 +1553,7 @@ def _apply_filters(page: Page, task_input: dict):
                     btn = page.locator(btn_sel).first
                     if btn.is_visible(timeout=1500):
                         btn.click()
-                        time.sleep(1)
+                        micro_pause()
                         break
                 except Exception:
                     pass
@@ -1564,7 +1567,7 @@ def _apply_filters(page: Page, task_input: dict):
                     el = page.locator(link_sel).first
                     if el.is_visible(timeout=1500):
                         el.click()
-                        time.sleep(2)
+                        human_sleep(1.5, 3.0)
                         print(f"  [NAUKRI] Filter: Freshness = last {freshness} days")
                         break
                 except Exception:
@@ -1665,7 +1668,7 @@ def _try_chatbot_proceed(page: Page) -> bool:
         try:
             btn = page.locator(sel).first
             if btn.is_visible(timeout=1000):
-                btn.click()
+                human_click(page, locator=btn)
                 return True
         except Exception:
             pass
@@ -1699,7 +1702,7 @@ def _click_if_visible(page: Page, selector: str, timeout: int = 2000) -> bool:
     try:
         btn = page.locator(selector).first
         if btn.is_visible(timeout=timeout):
-            btn.click()
+            human_click(page, locator=btn, timeout=timeout)
             return True
     except Exception:
         pass
@@ -1766,8 +1769,8 @@ def _dismiss_post_apply(page: Page):
         try:
             btn = page.locator(sel).first
             if btn.is_visible(timeout=2000):
-                btn.click()
-                time.sleep(1)
+                human_click(page, locator=btn)
+                human_sleep(0.5, 1.5)
                 return
         except Exception:
             pass

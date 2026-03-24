@@ -15,6 +15,7 @@ from automation.human import (
     human_sleep, micro_pause, thinking_pause, reading_pause,
     human_mouse_move, human_click, human_type,
     human_scroll_down, idle_jiggle,
+    stealth_launch_args, stealth_context_options, inject_stealth,
 )
 
 
@@ -234,9 +235,10 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             print("  [LINKEDIN] ⚠️  Tailor mode requested but no resume available — tailoring will be skipped")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
+        browser = p.chromium.launch(headless=False, args=stealth_launch_args())
+        context = browser.new_context(**stealth_context_options())
         page    = context.new_page()
+        inject_stealth(page)
 
         try:
             # ── STEP 1: Login ──────────────────────────────────
@@ -488,18 +490,18 @@ def _fill_contact_fields(page: Page, task_input: dict):
         # Phone number input
         phone_input = page.locator("input[id*='phoneNumber-nationalNumber']").first
         if phone_input.is_visible(timeout=2000):
-            phone_input.fill(phone)
+            human_type(page, phone, locator=phone_input)
             print(f"  [LINKEDIN] Filled phone: {phone}")
     except Exception:
         pass
 
 
 def _click_if_visible(page: Page, selector: str, timeout: int = 2000) -> bool:
-    """Click the first matching element if visible. Returns True on success."""
+    """Move to element naturally then click. Returns True on success."""
     try:
         btn = page.locator(selector).first
         if btn.is_visible(timeout=timeout):
-            btn.click()
+            human_click(page, locator=btn, timeout=timeout)
             return True
     except Exception:
         pass
@@ -638,36 +640,36 @@ def _fill_additional_questions(page: Page, task_input: dict):
                 if any(w in label_text for w in ("skill rating", "rating", "proficiency", "score")):
                     # Skill ratings: use skill_rating (default 8), respect min
                     fill_val = max(skill_rating, (min_val or 0) + 1)
-                    inp.fill(str(int(fill_val)))
+                    human_type(page, str(int(fill_val)), locator=inp)
                     print(f"  [LINKEDIN] Filled skill rating '{label_text[:60]}' = {fill_val}")
 
                 elif any(w in label_text for w in ("month", "months willing", "months you are")):
                     fill_val = max(6.0, (min_val or 0) + 1)
-                    inp.fill(str(int(fill_val)))
+                    human_type(page, str(int(fill_val)), locator=inp)
                     print(f"  [LINKEDIN] Filled months '{label_text[:60]}' = {fill_val}")
 
                 elif any(w in label_text for w in ("hour", "hours per day", "hours willing")):
                     fill_val = max(5.0, (min_val or 0) + 1)
-                    inp.fill(str(int(fill_val)))
+                    human_type(page, str(int(fill_val)), locator=inp)
                     print(f"  [LINKEDIN] Filled hours '{label_text[:60]}' = {fill_val}")
 
                 elif any(w in label_text for w in ("year", "experience", "how long", "how many")):
                     fill_val = max(float(years), (min_val or 0) + 1) if min_val else float(years)
-                    inp.fill(str(int(fill_val)))
+                    human_type(page, str(int(fill_val)), locator=inp)
                     print(f"  [LINKEDIN] Filled years '{label_text[:60]}' = {fill_val}")
 
                 elif any(w in label_text for w in ("notice", "notice period")):
                     fill_val = int(task_input.get("notice_period", 30))
                     if min_val:
                         fill_val = max(fill_val, int(min_val) + 1)
-                    inp.fill(str(fill_val))
+                    human_type(page, str(fill_val), locator=inp)
 
                 elif any(w in label_text for w in ("salary", "ctc", "expected")):
                     sal = str(task_input.get("salary_expectation", ""))
                     if sal:
                         if min_val:
                             sal = str(max(float(sal), min_val + 1))
-                        inp.fill(sal)
+                        human_type(page, sal, locator=inp)
 
                 else:
                     # Unknown field — try Claude first, then safe numeric default
@@ -1036,8 +1038,8 @@ def _close_modal(page: Page):
         try:
             btn = page.locator(sel).first
             if btn.is_visible(timeout=1000):
-                btn.click()
-                time.sleep(0.5)
+                human_click(page, locator=btn)
+                micro_pause()
                 # Confirm discard popup if it appears
                 _click_if_visible(page, "button:has-text('Discard')", timeout=1500)
                 return
@@ -1085,9 +1087,9 @@ def _dismiss_post_apply_modal(page: Page):
         try:
             btn = page.locator(sel).first
             if btn.is_visible(timeout=2000):
-                btn.click()
+                human_click(page, locator=btn)
                 print("  [LINKEDIN] Dismissed post-apply modal")
-                time.sleep(1)
+                human_sleep(0.5, 1.5)
                 return
         except Exception:
             pass
@@ -1244,8 +1246,8 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                 try:
                     btn = page.locator(expand_sel).first
                     if btn.count() > 0:
-                        btn.click(timeout=2000)
-                        time.sleep(1)
+                        human_click(page, locator=btn, timeout=2000)
+                        micro_pause()
                         break
                 except Exception:
                     pass
