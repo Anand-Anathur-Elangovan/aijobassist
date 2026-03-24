@@ -46,11 +46,69 @@ const ENTRANCE_EXAMS = [
 ];
 
 const INTERESTS_LIST = [
-  "Computer Science / AI","Electronics / VLSI","Mechanical Engineering",
-  "Civil Engineering","Medicine / Healthcare","Pharmacy","Biotechnology",
-  "Data Science / Analytics","Finance / CA","Business / Management",
-  "Law","Architecture","Agriculture","Fashion Design","Film / Media",
-  "Psychology","Education / Teaching","Defence / Military",
+  // ── Tech & Computing ──
+  "AI / Machine Learning",
+  "Cybersecurity / Ethical Hacking",
+  "Cloud Computing & DevOps",
+  "Blockchain & Web3",
+  "Computer Science / Programming",
+  "Data Science / Analytics",
+  "Game Development",
+  "AR / VR / Metaverse",
+  "Quantum Computing",
+  "Embedded Systems / IoT",
+  // ── Engineering ──
+  "Electronics / VLSI",
+  "Mechanical Engineering",
+  "Civil / Structural Engineering",
+  "Aerospace / Aeronautical Eng.",
+  "Biomedical Engineering",
+  "Nanotechnology",
+  "Automotive / EV Engineering",
+  "Marine & Naval Engineering",
+  "Nuclear Engineering",
+  "Robotics & Automation",
+  // ── Science & Research ──
+  "Medicine / Healthcare (MBBS)",
+  "Pharmacy / Pharmaceutical Sci.",
+  "Biotechnology / Genetic Eng.",
+  "Astrophysics / Space Science",
+  "Forensic Science",
+  "Neuroscience",
+  "Marine Biology / Oceanography",
+  "Actuarial Science",
+  "Pure Mathematics / Statistics",
+  "Climate & Environmental Science",
+  // ── Business & Finance ──
+  "Finance / CA / Investment Banking",
+  "Business / MBA / Management",
+  "Digital Marketing & E-commerce",
+  "Supply Chain & Logistics",
+  "HR / Organisational Psychology",
+  "Development Economics",
+  // ── Law & Social Sciences ──
+  "Law / Legal Studies",
+  "Public Policy & Governance",
+  "Journalism & Mass Communication",
+  "Psychology / Counselling",
+  "Social Work",
+  // ── Creative & Design ──
+  "Architecture & Urban Design",
+  "Fashion / Textile Design",
+  "Animation & VFX",
+  "Film / Media Production",
+  "Interior Design",
+  "Music Technology",
+  // ── Emerging & Underrated ──
+  "Sustainable Energy / Renewables",
+  "Food Technology & Nutrition",
+  "Sports Science / Management",
+  "Aviation / Pilot Training",
+  "Hotel Management / Hospitality",
+  "Physiotherapy / Allied Health",
+  "Agriculture & AgriTech",
+  "Defence / Military Science",
+  "Education / Teaching",
 ];
 
 const QUOTA_OPTIONS = [
@@ -239,6 +297,8 @@ export default function CareerCopilotPage() {
   const [activeTab, setActiveTab] = useState<"courses" | "colleges" | "exams" | "strategy">("courses");
   const [error, setError] = useState<string | null>(null);
   const [interestInput, setInterestInput] = useState("");
+  const [showCutoff, setShowCutoff] = useState(false);
+  const [cutoffMarks, setCutoffMarks] = useState({ math: "", physics: "", chemistry: "", neet: "" });
   const resultRef = useRef<HTMLDivElement>(null);
 
   // Load saved profile on mount
@@ -354,7 +414,7 @@ export default function CareerCopilotPage() {
             </select>
           </div>
           <div>
-            <label className={labelCls}>Community / Category</label>
+            <label className={labelCls}>Community / Category <span className="text-slate-600 normal-case font-normal tracking-normal">(optional)</span></label>
             <select className={inputCls} value={form.community}
               onChange={(e) => setForm({ ...form, community: e.target.value })}>
               {["OC","BC","MBC","SC","ST","SEBC","EWS"].map((c) => (
@@ -364,7 +424,7 @@ export default function CareerCopilotPage() {
           </div>
         </div>
         <div>
-          <label className={labelCls}>Special Quota (select all that apply)</label>
+          <label className={labelCls}>Special Quota <span className="text-slate-600 normal-case font-normal tracking-normal">(optional — select all that apply)</span></label>
           <div className="flex flex-wrap gap-2">
             {QUOTA_OPTIONS.map((q) => (
               <button key={q} type="button"
@@ -382,6 +442,39 @@ export default function CareerCopilotPage() {
   }
 
   function StepAcademic() {
+    const isStateBoard = form.board === "State Board";
+    const maxMarks = isStateBoard ? 200 : 100;
+
+    const enggCutoff = (() => {
+      const m = parseFloat(cutoffMarks.math) || 0;
+      const p = parseFloat(cutoffMarks.physics) || 0;
+      const c = parseFloat(cutoffMarks.chemistry) || 0;
+      return isStateBoard ? m / 2 + p / 4 + c / 4 : m + p / 2 + c / 2;
+    })();
+
+    const enggTier = (co: number) => {
+      if (co >= 195) return "IIT / BITS Pilani / Top NIT tier";
+      if (co >= 180) return "NIT / Top Private (VIT, Manipal, BITS)";
+      if (co >= 165) return "Good Private / Anna University tier";
+      if (co >= 145) return "State Govt / Aided College";
+      return "Needs improvement — focus on exam prep";
+    };
+
+    const neetTier = (score: number) => {
+      if (score >= 680) return "AIIMS / JIPMER / Top Govt MBBS";
+      if (score >= 600) return "Govt Medical College (state merit)";
+      if (score >= 500) return "Private MBBS / BDS College";
+      if (score >= 400) return "BAMS / BHMS / BSMS / BPT";
+      return "Allied Health Sciences / Paramedical";
+    };
+
+    const showEngg = ["CS Group", "PCM", "PCMB"].includes(form.stream_12th);
+    const showNeet = ["PCB", "PCMB", "Pure Bio"].includes(form.stream_12th);
+    const showPct  = ["Commerce", "Arts / Humanities"].includes(form.stream_12th);
+    const neetScore = parseFloat(cutoffMarks.neet) || 0;
+    const hasEnggInput = !!(cutoffMarks.math || cutoffMarks.physics || cutoffMarks.chemistry);
+    const hasNeetInput = !!cutoffMarks.neet;
+
     return (
       <div className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -400,22 +493,172 @@ export default function CareerCopilotPage() {
               onChange={(e) => setForm({ ...form, marks_12th: e.target.value })} />
           </div>
         </div>
+
+        {/* 12th Stream */}
         <div>
           <label className={labelCls}>12th Stream (if applicable)</label>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            {["PCM","PCB","Commerce","Arts / Humanities"].map((s) => (
+            {["CS Group", "PCM", "PCB", "PCMB", "Pure Bio", "Commerce", "Arts / Humanities"].map((s) => (
               <button key={s} type="button"
                 onClick={() => setForm({ ...form, stream_12th: form.stream_12th === s ? "" : s })}
-                className={`px-3 py-2.5 rounded-lg text-sm font-medium border transition-all ${
+                className={`px-3 py-2 rounded-lg text-xs font-semibold border transition-all text-center ${
                   form.stream_12th === s
                     ? "bg-amber-400/15 border-amber-400/40 text-amber-400"
                     : "bg-slate-800/50 border-slate-700 text-slate-400 hover:border-slate-500"
                 }`}>{s}</button>
             ))}
           </div>
+          <p className="mt-1.5 text-[11px] text-slate-600 leading-relaxed">
+            CS Group = CS + Physics + Maths · PCM = Physics, Chem, Maths · PCB = Physics, Chem, Bio · PCMB = all 4 · Pure Bio = Biology + Zoology + Chem
+          </p>
         </div>
+
+        {/* ── Cutoff Calculator ────────────────── */}
+        <div className="border border-slate-700/60 rounded-xl overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setShowCutoff((v) => !v)}
+            className="w-full flex items-center justify-between px-4 py-3 bg-slate-900/60 hover:bg-slate-800/60 transition-colors"
+          >
+            <span className="font-semibold text-white text-sm flex items-center gap-2">
+              📐 Cutoff Calculator
+              <span className="px-1.5 py-0.5 bg-amber-400/10 border border-amber-400/30 text-amber-400 text-[10px] font-medium rounded-full">
+                TN TNEA · NEET · JEE
+              </span>
+            </span>
+            <span className="text-slate-500 text-xs">{showCutoff ? "▲ Collapse" : "▼ Expand"}</span>
+          </button>
+
+          {showCutoff && (
+            <div className="p-4 space-y-4 bg-slate-900/30 border-t border-slate-700/40">
+
+              {/* Formula explanation */}
+              <div className="text-xs leading-relaxed space-y-1.5 pb-3 border-b border-slate-800">
+                <p className="font-semibold text-slate-200 mb-2">How College Cutoffs Are Calculated in India</p>
+                <p>
+                  <span className="text-amber-400 font-semibold">TN TNEA (Engineering): </span>
+                  <span className="font-mono text-white text-[11px]">Cutoff = Maths÷2 + Physics÷4 + Chemistry÷4</span>
+                  <span className="text-slate-500"> — max 200. State Board marks are out of 200 each; CBSE marks out of 100 are scaled ×2 first. Reservation categories (BC/MBC/SC/ST) get separate merit lists.</span>
+                </p>
+                <p>
+                  <span className="text-rose-400 font-semibold">NEET (Medical): </span>
+                  <span className="text-slate-400">Raw NEET score out of 720. Central (AIQ) and state merit lists rank students by NEET score directly. AIIMS/JIPMER use NEET + counselling rounds.</span>
+                </p>
+                <p>
+                  <span className="text-blue-400 font-semibold">JEE Main (Engineering): </span>
+                  <span className="text-slate-400">Percentile score (not raw marks). NITs/IIITs require 95+ percentile. IIT JEE Advanced needs 99+ percentile overall. State quota seats have lower cutoffs.</span>
+                </p>
+                <p>
+                  <span className="text-purple-400 font-semibold">Other State Exams: </span>
+                  <span className="text-slate-400">KCET (Karnataka), MHT-CET (Maharashtra), EAMCET (AP/TS), KCET — each has its own rank + weightage formula. Cutoff varies by branch & category.</span>
+                </p>
+              </div>
+
+              {/* Engineering Cutoff (PCM / CS Group / PCMB or no stream selected) */}
+              {(showEngg || !form.stream_12th) && (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold text-slate-300 uppercase tracking-wider">🔧 Engineering Cutoff (TN TNEA / State Board Formula)</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {([
+                      { key: "math"      as const, label: "Maths",     color: "text-amber-400",  focus: "focus:border-amber-400/60" },
+                      { key: "physics"   as const, label: "Physics",   color: "text-blue-400",   focus: "focus:border-blue-400/60" },
+                      { key: "chemistry" as const, label: "Chemistry", color: "text-emerald-400", focus: "focus:border-emerald-400/60" },
+                    ]).map(({ key, label, color, focus }) => (
+                      <div key={key}>
+                        <label className={`block text-[10px] ${color} mb-1 uppercase tracking-wider`}>{label} (/{maxMarks})</label>
+                        <input
+                          type="number" min="0" max={maxMarks} step="0.5"
+                          placeholder={isStateBoard ? "175" : "92"}
+                          className={`w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-white text-xs focus:outline-none ${focus} transition-colors`}
+                          value={cutoffMarks[key]}
+                          onChange={(e) => setCutoffMarks((m) => ({ ...m, [key]: e.target.value }))}
+                        />
+                      </div>
+                    ))}
+                  </div>
+
+                  {hasEnggInput && (
+                    <div className="bg-slate-800/60 rounded-lg p-3 flex items-center justify-between">
+                      <div>
+                        <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">Your Engineering Cutoff</p>
+                        <p className="text-2xl font-bold text-amber-400 font-mono">
+                          {enggCutoff.toFixed(2)}<span className="text-sm text-slate-500"> / 200</span>
+                        </p>
+                        <p className="text-xs text-slate-400 mt-0.5">{enggTier(enggCutoff)}</p>
+                      </div>
+                      <div className="text-right text-xs text-slate-500 space-y-0.5">
+                        <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Breakdown</p>
+                        <p>Maths: <span className="text-amber-400 font-mono">
+                          {isStateBoard ? ((parseFloat(cutoffMarks.math)||0)/2).toFixed(2) : (parseFloat(cutoffMarks.math)||0).toFixed(2)}
+                        </span></p>
+                        <p>Physics: <span className="text-blue-400 font-mono">
+                          {isStateBoard ? ((parseFloat(cutoffMarks.physics)||0)/4).toFixed(2) : ((parseFloat(cutoffMarks.physics)||0)/2).toFixed(2)}
+                        </span></p>
+                        <p>Chem: <span className="text-emerald-400 font-mono">
+                          {isStateBoard ? ((parseFloat(cutoffMarks.chemistry)||0)/4).toFixed(2) : ((parseFloat(cutoffMarks.chemistry)||0)/2).toFixed(2)}
+                        </span></p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="text-[11px] text-slate-600 leading-relaxed">
+                    <p className="text-slate-500 font-semibold mb-0.5">Typical TN TNEA Cutoffs 2024 (General / OC):</p>
+                    <div className="grid grid-cols-2 gap-x-6">
+                      <p>Anna Univ. CSE: ~198–199</p>
+                      <p>PSG Tech CSE: ~193–196</p>
+                      <p>CIT / Govt Engg: ~160–185</p>
+                      <p>Private (aided): ~140–170</p>
+                    </div>
+                    <p className="mt-1 text-slate-700">BC/MBC cutoffs are typically 5–15 pts lower; SC/ST cutoffs 20–40 pts lower.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* NEET Calculator (PCB / PCMB / Pure Bio) */}
+              {(showNeet || !form.stream_12th) && (
+                <div className={`space-y-3 ${(showEngg || !form.stream_12th) ? "pt-3 border-t border-slate-800" : ""}`}>
+                  <p className="text-xs font-semibold text-slate-300 uppercase tracking-wider">🩺 NEET Score Tier (Medical Colleges)</p>
+                  <div>
+                    <label className="block text-[10px] text-rose-400 mb-1 uppercase tracking-wider">NEET Score (out of 720)</label>
+                    <input
+                      type="number" min="0" max="720"
+                      placeholder="e.g. 580"
+                      className="w-1/2 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-white text-xs focus:outline-none focus:border-rose-400/60 transition-colors"
+                      value={cutoffMarks.neet}
+                      onChange={(e) => setCutoffMarks((m) => ({ ...m, neet: e.target.value }))}
+                    />
+                  </div>
+                  {hasNeetInput && (
+                    <div className="bg-slate-800/60 rounded-lg p-3">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">Predicted College Tier</p>
+                      <p className="text-sm font-semibold text-rose-400">{neetTier(neetScore)}</p>
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        AIIMS ≥ 680 · Govt MBBS: 550–680 · Pvt MBBS: 400–550 · BDS/BAMS/BHMS: 300–450
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Commerce / Arts percentage guide */}
+              {showPct && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-slate-300 uppercase tracking-wider">🎓 Commerce / Arts College Admissions</p>
+                  <div className="text-xs text-slate-400 space-y-1">
+                    <p>Most colleges admit on the basis of 12th overall % or CUET score (accepted by 250+ central universities).</p>
+                    <p><span className="text-emerald-400 font-semibold">90%+ / CUET 200+:</span> SRCC, Lady Shri Ram, St. Xavier&apos;s (Delhi / Mumbai)</p>
+                    <p><span className="text-amber-400 font-semibold">80–90% / CUET 150+:</span> Good central / state university colleges</p>
+                    <p><span className="text-blue-400 font-semibold">70–80% / CUET 100+:</span> Private universities / deemed colleges</p>
+                    <p className="text-slate-500 mt-1">CA Foundation: 10+2 pass in any stream. LAW (CLAT): all streams eligible with 45-50% cutoff.</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3 text-sm text-blue-300">
-          ℹ️ If you're in 11th or 12th, enter your current % (or expected %). If in 10th, enter only 10th marks.
+          ℹ️ If you&apos;re in 11th or 12th, enter your current % (or expected %). If in 10th, enter only 10th marks.
         </div>
       </div>
     );
@@ -425,7 +668,7 @@ export default function CareerCopilotPage() {
     return (
       <div className="space-y-4">
         <div>
-          <label className={labelCls}>Entrance Exams you are / plan to appear for</label>
+          <label className={labelCls}>Entrance Exams <span className="text-slate-600 normal-case font-normal tracking-normal">(optional — select exams you plan to appear for)</span></label>
           <div className="flex flex-wrap gap-2">
             {ENTRANCE_EXAMS.map((ex) => (
               <button key={ex} type="button"
