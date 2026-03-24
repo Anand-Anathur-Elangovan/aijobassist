@@ -14,7 +14,7 @@ def run_task(task: dict) -> dict:
     Returns an output dict that gets saved to tasks.output in Supabase.
     Raises an exception on failure so main.py can mark it FAILED.
     """
-    from api_client import check_quota
+    from api_client import check_quota, fetch_user_email
 
     task_type  = task.get("type", "UNKNOWN")
     task_id    = task.get("id", "")
@@ -26,10 +26,13 @@ def run_task(task: dict) -> dict:
 
     print(f"  [RUNNER] type={task_type}  user_id={user_id}")
 
-    # ── Super admin bypass ────────────────────────────────────
-    SUPER_ADMIN_IDS = [
-        "7488cae8-328b-4ffc-8136-42a0c18ed06d",  # kaviyasaravanan01@gmail.com
+    # ── Super admin bypass (by email — matches lib/api-auth.ts) ──
+    SUPER_ADMIN_EMAILS = [
+        "kaviyasaravanan01@gmail.com",
+        "anandanathurelangovan94@gmail.com",
     ]
+    user_email = fetch_user_email(user_id) if user_id else ""
+    is_super_admin = user_email.lower() in SUPER_ADMIN_EMAILS
 
     # ── Quota gate ────────────────────────────────────────────
     quota_map = {
@@ -39,7 +42,7 @@ def run_task(task: dict) -> dict:
         "GMAIL_DAILY_CHECK":"gmail_scan",
     }
     action_type = quota_map.get(task_type)
-    if action_type and user_id and user_id not in SUPER_ADMIN_IDS:
+    if action_type and user_id and not is_super_admin:
         quota = check_quota(user_id, action_type)
         if not quota.get("allowed", True):
             raise ValueError(

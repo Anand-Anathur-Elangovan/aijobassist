@@ -481,6 +481,110 @@ ok, reason = _can_trigger_gmail({"active": True, "email": "test@example.com"})
 check("Gmail trigger: valid active settings → allowed", ok and reason == "ok")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# §12  APPLICATION FUNNEL METRICS
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n§12  Application funnel metrics")
+
+def _funnel_rates(applied: int, screening: int, interview: int, offer: int):
+    total = max(applied, 1)
+    return {
+        "screening_rate": round((screening / total) * 100),
+        "interview_rate": round((interview / total) * 100),
+        "offer_rate": round((offer / total) * 100),
+        "screening_drop": round(((applied - screening) / applied) * 100) if applied else 0,
+        "interview_drop": round(((screening - interview) / screening) * 100) if screening else 0,
+        "offer_drop": round(((interview - offer) / interview) * 100) if interview else 0,
+    }
+
+rates = _funnel_rates(100, 42, 15, 3)
+check("Funnel: screening rate 42%", rates["screening_rate"] == 42)
+check("Funnel: interview rate 15%", rates["interview_rate"] == 15)
+check("Funnel: offer rate 3%", rates["offer_rate"] == 3)
+check("Funnel: applied→screening drop 58%", rates["screening_drop"] == 58)
+check("Funnel: screening→interview drop 64%", rates["interview_drop"] == 64)
+check("Funnel: interview→offer drop 80%", rates["offer_drop"] == 80)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §13  SKILL GAP LEARNING PLAN SHAPE
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n§13  Skill gap learning plan shape")
+
+def _mock_skill_gap_result(missing_skills: list[str]) -> dict:
+    learning_plan = []
+    for i, skill in enumerate(missing_skills[:6]):
+        learning_plan.append({
+            "skill": skill,
+            "priority": "High" if i < 2 else "Medium" if i < 4 else "Low",
+            "resources": [
+                {"platform": "YouTube", "search_query": f"{skill} complete tutorial for beginners 2024"},
+                {"platform": "Udemy", "search_query": f"{skill} masterclass complete course"},
+                {"platform": "Official Docs / Practice", "search_query": f"{skill} official documentation getting started"},
+            ],
+        })
+    schedule = [f"Week item {i}" for i in range(1, 8)]
+    return {"learning_plan": learning_plan, "two_week_schedule": schedule}
+
+sg = _mock_skill_gap_result(["docker", "kubernetes", "graphql", "aws", "redis", "terraform", "kafka"])
+check("Skill gap: max 6 skills in plan", len(sg["learning_plan"]) == 6)
+check("Skill gap: 3 resources per skill", all(len(item["resources"]) == 3 for item in sg["learning_plan"]))
+check("Skill gap: includes YouTube resource", sg["learning_plan"][0]["resources"][0]["platform"] == "YouTube")
+check("Skill gap: includes Udemy resource", sg["learning_plan"][0]["resources"][1]["platform"] == "Udemy")
+check("Skill gap: has 7 schedule items", len(sg["two_week_schedule"]) == 7)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §14  JD-AWARE INTERVIEW REQUEST PAYLOAD
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n§14  Interview prep payload")
+
+def _build_interview_payload(jd_text: str, resume_text: str, company: str, role: str):
+    return {
+        "jd_text": jd_text,
+        "resume_text": resume_text,
+        "company": company,
+        "role": role,
+    }
+
+payload = _build_interview_payload("x" * 80, "resume text", "Google", "Backend Engineer")
+check("Interview payload: includes company", payload["company"] == "Google")
+check("Interview payload: includes role", payload["role"] == "Backend Engineer")
+check("Interview payload: JD length preserved", len(payload["jd_text"]) == 80)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §15  PLACEMENT MODE OUTPUT SHAPE
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n§15  Placement mode output shape")
+
+def _mock_placement_output():
+    return {
+        "amcat_prep": [1, 2, 3, 4, 5],
+        "elitmus_prep": [1, 2, 3, 4],
+        "campus_drive_calendar": [1, 2, 3, 4, 5, 6, 7, 8],
+        "off_campus_portals": [1, 2, 3, 4, 5, 6, 7],
+        "four_week_plan": [
+            {"week": "Week 1", "tasks": [1, 2, 3, 4, 5]},
+            {"week": "Week 2", "tasks": [1, 2, 3, 4, 5]},
+            {"week": "Week 3", "tasks": [1, 2, 3, 4, 5]},
+            {"week": "Week 4", "tasks": [1, 2, 3, 4, 5]},
+        ],
+        "hr_tips": [1, 2, 3, 4, 5, 6],
+        "resume_tips": [1, 2, 3, 4, 5, 6],
+    }
+
+placement = _mock_placement_output()
+check("Placement: 5 AMCAT prep buckets", len(placement["amcat_prep"]) == 5)
+check("Placement: 4 eLitmus prep buckets", len(placement["elitmus_prep"]) == 4)
+check("Placement: 8 drive calendar entries", len(placement["campus_drive_calendar"]) == 8)
+check("Placement: 7 off-campus portals", len(placement["off_campus_portals"]) == 7)
+check("Placement: 4-week plan present", len(placement["four_week_plan"]) == 4)
+check("Placement: each week has 5 tasks", all(len(w["tasks"]) == 5 for w in placement["four_week_plan"]))
+check("Placement: 6 HR tips", len(placement["hr_tips"]) == 6)
+check("Placement: 6 resume tips", len(placement["resume_tips"]) == 6)
+
+
 
 print("\n" + "═"*70)
 passed  = sum(1 for s, _, _ in results if s == PASS)

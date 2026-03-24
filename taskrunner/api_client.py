@@ -280,6 +280,20 @@ def save_notification(user_id: str, notif_type: str, title: str, message: str,
     )
 
 
+def fetch_user_email(user_id: str) -> str:
+    """Resolve a user's email from auth.users via the service-role key."""
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+            headers=HEADERS,
+        )
+        if resp.ok:
+            return resp.json().get("email", "")
+    except Exception:
+        pass
+    return ""
+
+
 def fetch_user_tier(user_id: str) -> str:
     """
     Return the user's subscription tier: 'free' | 'starter' | 'pro' | 'enterprise'.
