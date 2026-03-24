@@ -342,3 +342,345 @@ Best regards`;
 
   return { cover_letter, intro_message, linkedin_intro, email_subject };
 }
+
+
+// ═════════════════════════════════════════════════════════════════════════
+// 5. predictCareer  — School → College Engine
+// ═════════════════════════════════════════════════════════════════════════
+
+export interface StudentInput {
+  student_name:   string;
+  state:          string;
+  board:          string;  // 'CBSE' | 'ICSE' | 'State Board'
+  marks_10th?:    number;
+  marks_12th?:    number;
+  stream_12th?:   string;  // 'PCM' | 'PCB' | 'Commerce' | 'Arts'
+  entrance_exams: string[];
+  community:      string;  // 'OC' | 'BC' | 'MBC' | 'SC' | 'ST'
+  quota:          string[];
+  interests:      string[];
+}
+
+export interface CareerCourseResult {
+  name:              string;
+  probability:       "High" | "Medium" | "Low";
+  match_reason:      string;
+  future_scope:      string;
+  avg_salary_lpa:    string;
+  duration:          string;
+  top_institutes:    string[];
+}
+
+export interface CareerCollegeResult {
+  name:              string;
+  location:          string;
+  state:             string;
+  category:          "Dream" | "Moderate" | "Safe";
+  probability:       "High" | "Medium" | "Low";
+  cutoff_hint:       string;
+  fees_range:        string;
+  placement_avg_lpa: string;
+  college_type:      string;  // 'Govt' | 'Private' | 'Deemed' | 'Central'
+  courses_offered:   string[];
+}
+
+export interface CareerExamRoadmap {
+  exam:                  string;
+  importance:            "Critical" | "Important" | "Optional";
+  prep_duration:         string;
+  key_topics:            string[];
+  recommended_resources: string[];
+  exam_window:           string;
+}
+
+export interface CareerStrategy {
+  summary:          string;
+  dream_colleges:   string[];
+  safe_colleges:    string[];
+  action_timeline:  { month: string; action: string }[];
+  tips:             string[];
+}
+
+export interface CareerPredictionResult {
+  courses:      CareerCourseResult[];
+  colleges:     CareerCollegeResult[];
+  exam_roadmap: CareerExamRoadmap[];
+  strategy:     CareerStrategy;
+  message?:     string;
+  is_fallback?: boolean;
+}
+
+// ── Fallback mock data (returned when AI fails or no API key) ─────────────
+function careerFallback(input: StudentInput): CareerPredictionResult {
+  const has12th = (input.marks_12th ?? 0) > 0;
+  const pct     = input.marks_12th ?? input.marks_10th ?? 75;
+  const isPCM   = input.stream_12th === "PCM";
+  const isPCB   = input.stream_12th === "PCB";
+  const hasNEET = input.entrance_exams.includes("NEET");
+  const hasJEE  = input.entrance_exams.includes("JEE Main") || input.entrance_exams.includes("JEE Advanced");
+
+  const courses: CareerCourseResult[] = [
+    ...(isPCM || hasJEE ? [{
+      name: "B.E / B.Tech Computer Science Engineering",
+      probability: (pct >= 85 ? "High" : pct >= 70 ? "Medium" : "Low") as "High"|"Medium"|"Low",
+      match_reason: "Strong PCM background aligns with CSE curriculum",
+      future_scope: "Software engineering, AI/ML, product management, startups",
+      avg_salary_lpa: "6–25 LPA (fresher to 3 years)",
+      duration: "4 years",
+      top_institutes: ["IITs", "NITs", "BITS Pilani", "VIT", "SRM", "Anna University"],
+    }, {
+      name: "B.E Electronics & Communication Engineering",
+      probability: (pct >= 80 ? "High" : "Medium") as "High"|"Medium"|"Low",
+      match_reason: "Good choice for PCM students interested in hardware + software",
+      future_scope: "VLSI design, telecom, embedded systems, IoT",
+      avg_salary_lpa: "4–15 LPA",
+      duration: "4 years",
+      top_institutes: ["NITs", "IITs", "Anna University", "College of Engineering Guindy"],
+    }] : []),
+    ...(isPCB || hasNEET ? [{
+      name: "MBBS",
+      probability: (pct >= 90 ? "High" : pct >= 75 ? "Medium" : "Low") as "High"|"Medium"|"Low",
+      match_reason: "Biology background; NEET score determines admission",
+      future_scope: "Clinical practice, specialisation, research, public health",
+      avg_salary_lpa: "8–30 LPA (post PG)",
+      duration: "5.5 years (incl. internship)",
+      top_institutes: ["AIIMS", "JIPMER", "CMC Vellore", "Government Medical Colleges"],
+    }, {
+      name: "B.Pharm / Pharm.D",
+      probability: "Medium" as "Medium",
+      match_reason: "Great for PCB students who want healthcare without full MBBS commitment",
+      future_scope: "Pharmaceutical industry, hospitals, research",
+      avg_salary_lpa: "3–12 LPA",
+      duration: "4 years (B.Pharm) / 6 years (Pharm.D)",
+      top_institutes: ["JSS College of Pharmacy", "Manipal", "SRM", "Amrita"],
+    }] : []),
+    {
+      name: "BCA / B.Sc Computer Science",
+      probability: (pct >= 70 ? "High" : "Medium") as "High"|"Medium"|"Low",
+      match_reason: "Accessible route into IT regardless of stream",
+      future_scope: "Software development, data analysis, IT support",
+      avg_salary_lpa: "3–10 LPA",
+      duration: "3 years",
+      top_institutes: ["Loyola College", "Madras Christian College", "PSG College of Arts & Science"],
+    },
+    {
+      name: "B.Com / BBA",
+      probability: (!has12th || input.stream_12th === "Commerce" ? "High" : "Medium") as "High"|"Medium"|"Low",
+      match_reason: "Ideal for Commerce stream or business-oriented students",
+      future_scope: "Finance, CA, MBA, entrepreneurship, banking",
+      avg_salary_lpa: "3–12 LPA (with CA/MBA adds 20–50 LPA)",
+      duration: "3 years",
+      top_institutes: ["SRCC Delhi", "Loyola Chennai", "NM College Mumbai"],
+    },
+  ].slice(0, 5);
+
+  const colleges: CareerCollegeResult[] = [
+    {
+      name: "IIT Madras",
+      location: "Chennai",
+      state: "Tamil Nadu",
+      category: "Dream",
+      probability: (pct >= 95 ? "Medium" : "Low") as "Medium"|"Low",
+      cutoff_hint: "JEE Advanced rank < 500 for top branches",
+      fees_range: "₹2–3 L / year",
+      placement_avg_lpa: "20+ LPA",
+      college_type: "Central",
+      courses_offered: ["B.Tech CSE", "B.Tech ECE", "B.Tech Mechanical", "B.Tech EE"],
+    },
+    {
+      name: "NIT Trichy",
+      location: "Tiruchirappalli",
+      state: "Tamil Nadu",
+      category: "Moderate",
+      probability: (pct >= 85 ? "High" : "Medium") as "High"|"Medium",
+      cutoff_hint: "JEE Main rank 3000–15000 for Tamil Nadu home state",
+      fees_range: "₹1.7–2.5 L / year",
+      placement_avg_lpa: "14 LPA",
+      college_type: "Central",
+      courses_offered: ["B.Tech CSE", "B.Tech ECE", "B.Tech Civil", "B.Tech Chemical"],
+    },
+    {
+      name: "Anna University (CEG Campus)",
+      location: "Chennai",
+      state: "Tamil Nadu",
+      category: "Moderate",
+      probability: (pct >= 80 ? "High" : "Medium") as "High"|"Medium",
+      cutoff_hint: "TNEA cutoff 180–195 for CS/IT branches",
+      fees_range: "₹80K–1.5 L / year",
+      placement_avg_lpa: "8 LPA",
+      college_type: "Govt",
+      courses_offered: ["B.E CSE", "B.E ECE", "B.E IT", "B.E EEE"],
+    },
+    {
+      name: "VIT Vellore",
+      location: "Vellore",
+      state: "Tamil Nadu",
+      category: "Safe",
+      probability: (pct >= 70 ? "High" : "Medium") as "High"|"Medium",
+      cutoff_hint: "VITEEE rank based; ~1 lakh+ seats available",
+      fees_range: "₹1.9–2.5 L / year",
+      placement_avg_lpa: "7 LPA",
+      college_type: "Deemed",
+      courses_offered: ["B.Tech CSE", "B.Tech AIML", "B.Tech ECE", "B.Tech IT"],
+    },
+    {
+      name: "SRM Institute of Science and Technology",
+      location: "Kattankulathur, Chennai",
+      state: "Tamil Nadu",
+      category: "Safe",
+      probability: "High",
+      cutoff_hint: "SRMJEE or direct admission; broad intake",
+      fees_range: "₹2–3.5 L / year",
+      placement_avg_lpa: "6 LPA",
+      college_type: "Deemed",
+      courses_offered: ["B.Tech CSE", "B.Tech Data Science", "B.Tech ECE", "B.Tech AI"],
+    },
+  ];
+
+  const exam_roadmap: CareerExamRoadmap[] = [
+    ...(isPCM || hasJEE ? [{
+      exam: "JEE Main",
+      importance: "Critical" as "Critical",
+      prep_duration: "12–18 months",
+      key_topics: ["Physics: Mechanics, Electrostatics", "Chemistry: Organic, Inorganic", "Maths: Calculus, Algebra, Coordinate Geometry"],
+      recommended_resources: ["NCERT (mandatory foundation)", "HC Verma – Physics", "RD Sharma – Maths", "Allen / Resonance coaching material"],
+      exam_window: "January & April (two attempts per year)",
+    }, {
+      exam: "JEE Advanced",
+      importance: "Important" as "Important",
+      prep_duration: "6 months post JEE Main",
+      key_topics: ["Deep conceptual problems in Physics, Chemistry, Maths", "Previous year IIT papers"],
+      recommended_resources: ["Irodov – Problems in General Physics", "J.D. Lee – Inorganic Chemistry", "Cengage series"],
+      exam_window: "May–June (after JEE Main qualification)",
+    }] : []),
+    ...(isPCB || hasNEET ? [{
+      exam: "NEET UG",
+      importance: "Critical" as "Critical",
+      prep_duration: "12–24 months",
+      key_topics: ["Biology: Human Physiology, Genetics, Ecology", "Physics: Optics, Modern Physics", "Chemistry: Biomolecules, Equilibrium"],
+      recommended_resources: ["NCERT Bio (Classes 11 & 12)", "DC Pandey – Physics for NEET", "MTG Complete NEET Guide"],
+      exam_window: "May (annually)",
+    }] : []),
+    {
+      exam: `${input.state === "Tamil Nadu" ? "TNEA" : input.state === "Karnataka" ? "KCET" : input.state === "Maharashtra" ? "MHT-CET" : "State Counselling"}`,
+      importance: "Important" as "Important",
+      prep_duration: "3–6 months",
+      key_topics: ["State board syllabus review", "Previous year state exam papers", "Application and counselling process"],
+      recommended_resources: ["State board textbooks", "Previous year cut-off analysis", "Official state counselling website"],
+      exam_window: "June–July (post 12th results)",
+    },
+  ];
+
+  const strategy: CareerStrategy = {
+    summary: `Based on your ${pct}% marks in ${input.state}, ${input.community} community, and ${input.stream_12th || "chosen"} stream, here is a personalised strategy maximising your college admission chances.`,
+    dream_colleges: ["IIT Madras", "NIT Trichy", "BITS Pilani"],
+    safe_colleges: ["VIT Vellore", "SRM Chennai", "Amrita University", "Saveetha Engineering"],
+    action_timeline: [
+      { month: "Now → 3 months", action: "Focus on NCERT mastery + complete one full mock test per week" },
+      { month: "3 → 6 months", action: "Join test series; analyse mistakes; revise weak chapters" },
+      { month: "6 → 9 months", action: "Solve 10 years of previous question papers; finalise college shortlist" },
+      { month: "9 → 12 months", action: "Final revision; fill all exam forms; prepare documents for counselling" },
+      { month: "Post exam", action: "Participate in all counselling rounds (state + central); do not miss upgrade rounds" },
+    ],
+    tips: [
+      `Your ${input.community} category quota can give you 5–15% lower cutoff advantage — know all reserved quota seats`,
+      "Apply to 10+ colleges across Dream / Moderate / Safe categories — never rely on one",
+      "Register for TNEA / state counselling immediately after 12th results",
+      ...(input.quota.includes("Sports") ? ["Sports quota seats are limited — apply early and get the certificate authenticated by the District Sports Officer"] : []),
+      "Attend college open days and alumni talk to validate your choice before final commitment",
+      "If rank is below target: consider lateral entry after Diploma (direct 2nd year B.E admission)",
+    ],
+  };
+
+  return {
+    courses,
+    colleges,
+    exam_roadmap,
+    strategy,
+    message: "Showing sample predictions. Connect your AI key for personalised analysis.",
+    is_fallback: true,
+  };
+}
+
+export async function predictCareer(input: StudentInput): Promise<CareerPredictionResult> {
+  if (!hasApiKey()) {
+    return careerFallback(input);
+  }
+
+  const prompt = `You are an expert Indian education counsellor with deep knowledge of all Indian state boards, central boards (CBSE/ICSE), college entrance exams (JEE, NEET, VITEEE, BITSAT, KCET, TNEA, MHT-CET, etc.), college cutoffs, placement statistics, and reservation policies (OC/BC/MBC/SC/ST, sports quota, management quota).
+
+A student has provided the following profile:
+- Name: ${input.student_name}
+- State: ${input.state}
+- Board: ${input.board}
+- 10th Marks: ${input.marks_10th ? input.marks_10th + "%" : "Not provided"}
+- 12th Marks: ${input.marks_12th ? input.marks_12th + "%" : "Not provided"}
+- 12th Stream: ${input.stream_12th || "Not specified"}
+- Entrance Exams appearing: ${input.entrance_exams.join(", ") || "None specified"}
+- Community: ${input.community}
+- Special Quota: ${input.quota.join(", ") || "None"}
+- Interests / Preferred fields: ${input.interests.join(", ") || "Open to all"}
+
+Return ONLY valid JSON (no markdown, no explanation):
+{
+  "courses": [
+    {
+      "name": string,
+      "probability": "High"|"Medium"|"Low",
+      "match_reason": string,
+      "future_scope": string,
+      "avg_salary_lpa": string,
+      "duration": string,
+      "top_institutes": string[]
+    }
+  ],
+  "colleges": [
+    {
+      "name": string,
+      "location": string,
+      "state": string,
+      "category": "Dream"|"Moderate"|"Safe",
+      "probability": "High"|"Medium"|"Low",
+      "cutoff_hint": string,
+      "fees_range": string,
+      "placement_avg_lpa": string,
+      "college_type": "Govt"|"Private"|"Deemed"|"Central",
+      "courses_offered": string[]
+    }
+  ],
+  "exam_roadmap": [
+    {
+      "exam": string,
+      "importance": "Critical"|"Important"|"Optional",
+      "prep_duration": string,
+      "key_topics": string[],
+      "recommended_resources": string[],
+      "exam_window": string
+    }
+  ],
+  "strategy": {
+    "summary": string,
+    "dream_colleges": string[],
+    "safe_colleges": string[],
+    "action_timeline": [{"month": string, "action": string}],
+    "tips": string[]
+  }
+}
+
+Rules:
+- Provide 4–6 courses, 5–8 colleges (mix of state + national), 2–4 exam roadmaps
+- Colleges MUST be realistic given the student's marks and state
+- Probability must reflect actual cutoff data and community reservation benefits
+- Tips must be specific to the student's state, community, and quota
+- Include at least 2 "Safe" colleges the student can definitely get into
+`;
+
+  try {
+    const raw = await callClaude(prompt, 3000);
+    const result = parseJSON<Omit<CareerPredictionResult, "is_fallback">>(raw);
+    return { ...result, is_fallback: false };
+  } catch (err) {
+    console.error("[predictCareer] AI parse error:", err);
+    return careerFallback(input);
+  }
+}
