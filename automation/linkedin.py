@@ -697,9 +697,9 @@ def _fill_additional_questions(page: Page, task_input: dict):
         pass
 
     # ── Textarea fields ────────────────────────────────────────
-    # Use AI-generated cover note if resume text + JD text are available
+    # Use AI-generated cover note if auto_cover_letter is enabled (default True)
     cover_note = task_input.get("cover_note", "")
-    if not cover_note:
+    if not cover_note and task_input.get("auto_cover_letter", True):
         resume_text_for_cover = task_input.get("resume_text", "")
         jd_text_for_cover     = task_input.get("_current_jd_text", "")
         company               = task_input.get("company", "")
@@ -710,7 +710,20 @@ def _fill_additional_questions(page: Page, task_input: dict):
                 cl_result  = generate_cover_letter(resume_text_for_cover, jd_text_for_cover, company, role)
                 cover_note = cl_result.get("intro_message") or cl_result.get("cover_letter", "")
                 if cover_note:
-                    print("  [LINKEDIN] AI cover note generated")
+                    print("  [LINKEDIN] ✍️  AI cover letter generated")
+                    # Save to cover_letters table (best-effort)
+                    try:
+                        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+                        from api_client import save_cover_letter
+                        save_cover_letter(
+                            user_id=task_input.get("user_id", ""),
+                            job_id=task_input.get("_current_job_id"),
+                            cover_letter=cover_note,
+                            cover_type="intro_message",
+                            metadata={"company": company, "role": role},
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
     if not cover_note:

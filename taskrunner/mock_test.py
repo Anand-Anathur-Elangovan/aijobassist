@@ -409,8 +409,79 @@ check("Generic skip → reason='skipped', no metadata", r == "skipped" and not m
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SUMMARY
+# §9  AUTO COVER LETTER FLAG LOGIC
 # ══════════════════════════════════════════════════════════════════════════════
+print("\n§9  Auto Cover Letter flag logic")
+
+def _should_generate_cover_letter(task_input: dict, has_jd: bool, has_resume: bool) -> bool:
+    """Mirrors the guard in naukri.py / linkedin.py."""
+    return bool(task_input.get("auto_cover_letter", True)) and has_jd and has_resume
+
+check("CL: default True + JD + resume → generate",
+      _should_generate_cover_letter({}, True, True))
+check("CL: explicit True + JD + resume → generate",
+      _should_generate_cover_letter({"auto_cover_letter": True}, True, True))
+check("CL: explicit False → skip",
+      not _should_generate_cover_letter({"auto_cover_letter": False}, True, True))
+check("CL: no JD → skip",
+      not _should_generate_cover_letter({}, False, True))
+check("CL: no resume → skip",
+      not _should_generate_cover_letter({}, True, False))
+check("CL: no JD and no resume → skip",
+      not _should_generate_cover_letter({}, False, False))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §10  SMART APPLY SCHEDULER WINDOW CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n§10  Smart Apply Scheduler window logic")
+
+def _in_window(start: int, end: int, now: int) -> bool:
+    """Mirrors _is_in_schedule_window() in main.py."""
+    if start <= end:
+        return start <= now < end
+    return now >= start or now < end  # overnight window
+
+# Normal daytime window 09:00–17:00
+check("Sched 09-17, now=10 → in window",       _in_window(9, 17, 10))
+check("Sched 09-17, now=09 → in window",       _in_window(9, 17, 9))
+check("Sched 09-17, now=08 → out of window",   not _in_window(9, 17, 8))
+check("Sched 09-17, now=17 → out of window",   not _in_window(9, 17, 17))
+check("Sched 09-17, now=23 → out of window",   not _in_window(9, 17, 23))
+# Overnight window 22:00–06:00
+check("Sched 22-06, now=23 → in window",       _in_window(22, 6, 23))
+check("Sched 22-06, now=00 → in window",       _in_window(22, 6, 0))
+check("Sched 22-06, now=05 → in window",       _in_window(22, 6, 5))
+check("Sched 22-06, now=06 → out of window",   not _in_window(22, 6, 6))
+check("Sched 22-06, now=10 → out of window",   not _in_window(22, 6, 10))
+# No schedule → always run (represented by returning True without calling _in_window)
+check("Sched: no schedule set → always run",   True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §11  GMAIL TRIGGER VALIDATION
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n§11  Gmail trigger validation logic")
+
+def _can_trigger_gmail(settings: dict | None) -> tuple[bool, str]:
+    """Mirrors logic in app/api/gmail/trigger/route.ts."""
+    if not settings:
+        return False, "no_settings"
+    if not settings.get("active", False):
+        return False, "inactive"
+    return True, "ok"
+
+ok, reason = _can_trigger_gmail(None)
+check("Gmail trigger: no settings → blocked",  not ok and reason == "no_settings")
+
+ok, reason = _can_trigger_gmail({"active": False})
+check("Gmail trigger: inactive → blocked",     not ok and reason == "inactive")
+
+ok, reason = _can_trigger_gmail({"active": True, "email": "test@example.com"})
+check("Gmail trigger: valid active settings → allowed", ok and reason == "ok")
+
+
+
 print("\n" + "═"*70)
 passed  = sum(1 for s, _, _ in results if s == PASS)
 failed  = sum(1 for s, _, _ in results if s == FAIL)

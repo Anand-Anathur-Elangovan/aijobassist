@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
+import Link from "next/link";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 const STAGES = ["APPLIED", "SCREENING", "INTERVIEW", "OFFER", "REJECTED"] as const;
@@ -41,11 +42,13 @@ function daysSince(iso: string) {
 export default function ApplicationsPage() {
   const { user } = useAuth();
 
-  const [apps,       setApps      ] = useState<ApplicationRow[]>([]);
-  const [loading,    setLoading   ] = useState(true);
-  const [filter,     setFilter    ] = useState<Stage | "ALL">("ALL");
-  const [updating,   setUpdating  ] = useState<string | null>(null);
-  const [editNotes,  setEditNotes ] = useState<{ id: string; text: string } | null>(null);
+  const [apps,           setApps          ] = useState<ApplicationRow[]>([]);
+  const [loading,        setLoading       ] = useState(true);
+  const [filter,         setFilter        ] = useState<Stage | "ALL">("ALL");
+  const [updating,       setUpdating      ] = useState<string | null>(null);
+  const [editNotes,      setEditNotes     ] = useState<{ id: string; text: string } | null>(null);
+  const [gmailChecking,  setGmailChecking ] = useState(false);
+  const [gmailMsg,       setGmailMsg      ] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
     if (!user) return;
@@ -80,6 +83,31 @@ export default function ApplicationsPage() {
     setApps((prev) => prev.filter((a) => a.id !== id));
   };
 
+  const checkGmailNow = async () => {
+    setGmailChecking(true);
+    setGmailMsg(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) { setGmailMsg({ ok: false, text: "Not logged in" }); return; }
+      const res = await fetch("/api/gmail/trigger", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const json = await res.json();
+      if (res.ok) {
+        setGmailMsg({ ok: true, text: json.already_running ? json.message : `✓ ${json.message}` });
+        // Reload apps after a short delay so new stages show up
+        if (!json.already_running) setTimeout(() => load(), 5000);
+      } else {
+        setGmailMsg({ ok: false, text: json.error ?? "Failed to trigger" });
+      }
+    } catch (e) {
+      setGmailMsg({ ok: false, text: String(e) });
+    } finally {
+      setGmailChecking(false);
+    }
+  };
+
   const filtered = filter === "ALL" ? apps : apps.filter((a) => a.stage === filter);
 
   // Stage counts for summary
@@ -92,12 +120,35 @@ export default function ApplicationsPage() {
   return (
     <div className="max-w-6xl mx-auto px-6 py-10">
       {/* Header */}
-      <div className="mb-8">
-        <p className="font-mono text-xs text-slate-500 tracking-widest uppercase mb-1">Tracking</p>
-        <h1 className="font-display font-bold text-3xl text-white">Applications</h1>
-        <p className="text-slate-400 font-body text-sm mt-1">
-          Track every application, update status, and manage follow-ups.
-        </p>
+      <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="font-mono text-xs text-slate-500 tracking-widest uppercase mb-1">Tracking</p>
+          <h1 className="font-display font-bold text-3xl text-white">Applications</h1>
+          <p className="text-slate-400 font-body text-sm mt-1">
+            Track every application, update status, and manage follow-ups.
+          </p>
+        </div>
+        {/* Gmail Check Now */}
+        <div className="flex flex-col items-end gap-2">
+          <button
+            onClick={checkGmailNow}
+            disabled={gmailChecking}
+            className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-slate-700 text-white font-mono text-xs px-4 py-2 rounded-lg transition-colors"
+          >
+            {gmailChecking
+              ? <span className="inline-block w-3 h-3 border border-white border-t-transparent rounded-full animate-spin" />
+              : "📧"}
+            Check Gmail Now
+          </button>
+          {gmailMsg && (
+            <p className={`text-xs font-mono ${gmailMsg.ok ? "text-emerald-400" : "text-red-400"}`}>
+              {gmailMsg.text}
+            </p>
+          )}
+          <Link href="/settings" className="text-xs text-slate-500 hover:text-slate-300 font-mono">
+            ⚙ Gmail settings
+          </Link>
+        </div>
       </div>
 
       {/* Stage summary bar */}

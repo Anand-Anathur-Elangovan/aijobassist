@@ -612,8 +612,10 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         except Exception:
             pass
 
-        # ── Extract JD text (needed for smart match and/or resume tailoring) ─
-        needs_jd        = task_input.get("smart_match", False) or task_input.get("tailor_resume", False)
+        # ── Extract JD text (needed for smart match, resume tailoring, and cover letter) ─
+        needs_jd        = (task_input.get("smart_match", False)
+                           or task_input.get("tailor_resume", False)
+                           or task_input.get("auto_cover_letter", True))
         smart_match     = task_input.get("smart_match", False)
         match_threshold = int(task_input.get("match_threshold", 70))
         jd_text         = ""
@@ -688,6 +690,11 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                         task_input["_tailored_pdf"] = result.tailored_pdf_path
                 except Exception as _te:
                     print(f"  [NAUKRI] ⚠️  Tailoring failed ({_te}) — applying with original resume")
+
+        # ── Store JD text + company/role for cover letter generation ────────────
+        if jd_text:
+            task_input = dict(task_input)
+            task_input["_current_jd_text"] = jd_text
 
         # ── Handle "Apply on company site" ──────────────────────
         try:
@@ -833,6 +840,38 @@ def _fill_naukri_fields(page: Page, task_input: dict):
         "cover_note",
         "I am very interested in this role and believe my skills and experience align well with the requirements.",
     )
+
+    # ── AI cover letter per JD (auto_cover_letter is True by default) ─────
+    if task_input.get("auto_cover_letter", True):
+        jd_text_for_cl    = task_input.get("_current_jd_text", "")
+        resume_text_for_cl = task_input.get("resume_text", "")
+        if jd_text_for_cl and resume_text_for_cl:
+            try:
+                from automation.ai_client import generate_cover_letter
+                company  = task_input.get("company", "")
+                role     = task_input.get("keywords", "")
+                cl_result = generate_cover_letter(resume_text_for_cl, jd_text_for_cl, company, role)
+                ai_note   = cl_result.get("intro_message") or cl_result.get("cover_letter", "")
+                if ai_note:
+                    cover_note = ai_note
+                    print("  [NAUKRI] ✍️  AI cover letter generated")
+                    # Save to cover_letters table (best-effort)
+                    try:
+                        import sys, os as _os
+                        sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "taskrunner"))
+                        from api_client import save_cover_letter
+                        save_cover_letter(
+                            user_id=task_input.get("user_id", ""),
+                            job_id=task_input.get("_current_job_id"),
+                            cover_letter=cover_note,
+                            cover_type="intro_message",
+                            metadata={"company": company, "role": role},
+                        )
+                    except Exception:
+                        pass
+            except Exception as _ce:
+                print(f"  [NAUKRI] ⚠️  Cover letter generation failed ({_ce}) — using default")
+
 
     # ── Resume upload ─────────────────────────────────────────
     _upload_resume(page, task_input)

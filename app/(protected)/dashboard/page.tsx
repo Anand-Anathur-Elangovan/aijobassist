@@ -67,6 +67,12 @@ export default function DashboardPage() {
   // Smart Match — AI resume vs JD scoring gate
   const [smartMatch, setSmartMatch] = useState(false);
   const [matchThreshold, setMatchThreshold] = useState(70);
+  // Auto Cover Letter — generate AI cover letter per application
+  const [autoCoverLetter, setAutoCoverLetter] = useState(true);
+  // Smart Apply Scheduler — only apply within a time window
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleStartHour, setScheduleStartHour] = useState(9);
+  const [scheduleEndHour, setScheduleEndHour] = useState(23);
   // Platform login credentials (optional — stored client-side only, passed to bot)
   const [linkedinEmail, setLinkedinEmail] = useState("");
   const [linkedinPassword, setLinkedinPassword] = useState("");
@@ -262,6 +268,11 @@ export default function DashboardPage() {
           ...(linkedinJobType !== "all" && { linkedin_job_type: linkedinJobType }),
         }),
         ...(smartMatch && { smart_match: true, match_threshold: matchThreshold }),
+        auto_cover_letter: autoCoverLetter,
+        ...(scheduleEnabled && {
+          schedule_start_hour: scheduleStartHour,
+          schedule_end_hour:   scheduleEndHour,
+        }),
       },
     }]);
 
@@ -966,6 +977,81 @@ export default function DashboardPage() {
                   <span>30% — Apply to almost all</span>
                   <span>95% — Very selective</span>
                 </div>
+              </div>
+            )}
+          </div>
+
+          {/* Auto Cover Letter */}
+          <div className="flex items-start gap-3 p-3 rounded-lg border border-slate-700 bg-slate-800/50">
+            <input
+              id="auto-cover-letter-toggle"
+              type="checkbox"
+              checked={autoCoverLetter}
+              onChange={(e) => setAutoCoverLetter(e.target.checked)}
+              className="mt-0.5 accent-violet-500 w-4 h-4 cursor-pointer"
+            />
+            <label htmlFor="auto-cover-letter-toggle" className="cursor-pointer">
+              <p className="font-body font-semibold text-white text-sm">
+                Auto Cover Letter {autoCoverLetter && <span className="ml-1 text-xs bg-violet-500/15 text-violet-400 px-2 py-0.5 rounded">ON</span>}
+              </p>
+              <p className="font-body text-xs text-slate-400 mt-0.5">
+                Claude AI writes a personalised cover letter / intro message for every application using your resume and the job description.
+                Disable to skip AI generation and send a plain default note.
+              </p>
+            </label>
+          </div>
+
+          {/* Smart Apply Scheduler */}
+          <div className="p-3 rounded-lg border border-slate-700 bg-slate-800/50 space-y-3">
+            <div className="flex items-start gap-3">
+              <input
+                id="schedule-toggle"
+                type="checkbox"
+                checked={scheduleEnabled}
+                onChange={(e) => setScheduleEnabled(e.target.checked)}
+                className="mt-0.5 accent-cyan-400 w-4 h-4 cursor-pointer"
+              />
+              <label htmlFor="schedule-toggle" className="cursor-pointer">
+                <p className="font-body font-semibold text-white text-sm">
+                  Smart Apply Scheduler {scheduleEnabled && <span className="ml-1 text-xs bg-cyan-400/15 text-cyan-400 px-2 py-0.5 rounded">ON</span>}
+                </p>
+                <p className="font-body text-xs text-slate-400 mt-0.5">
+                  Restrict the bot to apply only within a specific time window. Applications sent during business hours look more human.
+                </p>
+              </label>
+            </div>
+            {scheduleEnabled && (
+              <div className="pl-7 flex gap-4 items-center">
+                <div className="flex flex-col gap-1">
+                  <label className="font-mono text-xs text-slate-400">Start hour (24h)</label>
+                  <select
+                    value={scheduleStartHour}
+                    onChange={(e) => setScheduleStartHour(Number(e.target.value))}
+                    className="bg-slate-700 border border-slate-600 text-white font-mono text-sm rounded px-2 py-1"
+                  >
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
+                    ))}
+                  </select>
+                </div>
+                <span className="font-mono text-slate-400 mt-4">→</span>
+                <div className="flex flex-col gap-1">
+                  <label className="font-mono text-xs text-slate-400">End hour (24h)</label>
+                  <select
+                    value={scheduleEndHour}
+                    onChange={(e) => setScheduleEndHour(Number(e.target.value))}
+                    className="bg-slate-700 border border-slate-600 text-white font-mono text-sm rounded px-2 py-1"
+                  >
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="font-mono text-xs text-slate-500 mt-4 ml-2">
+                  {scheduleStartHour <= scheduleEndHour
+                    ? `Applies ${String(scheduleStartHour).padStart(2,"0")}:00–${String(scheduleEndHour).padStart(2,"0")}:00`
+                    : `Overnight: ${String(scheduleStartHour).padStart(2,"0")}:00–${String(scheduleEndHour).padStart(2,"0")}:00`}
+                </p>
               </div>
             )}
           </div>

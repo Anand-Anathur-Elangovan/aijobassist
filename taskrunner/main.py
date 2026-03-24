@@ -19,6 +19,22 @@ POLL_INTERVAL  = 10   # seconds between task polls
 GMAIL_INTERVAL = 86400  # 24 hours in seconds
 
 
+def _is_in_schedule_window(task: dict) -> bool:
+    """Return True if current hour falls within task's schedule window (if any)."""
+    task_input = task.get("input") or {}
+    start_hour = task_input.get("schedule_start_hour")
+    end_hour   = task_input.get("schedule_end_hour")
+    if start_hour is None and end_hour is None:
+        return True  # no schedule configured → run any time
+    now_hour   = datetime.now().hour
+    start_hour = int(start_hour) if start_hour is not None else 0
+    end_hour   = int(end_hour)   if end_hour   is not None else 23
+    if start_hour <= end_hour:
+        return start_hour <= now_hour < end_hour
+    # Overnight window e.g. 22–06
+    return now_hour >= start_hour or now_hour < end_hour
+
+
 def _trigger_gmail_daily_checks():
     """Create a GMAIL_DAILY_CHECK task for every user who has gmail_settings configured."""
     resp = requests.get(f"{SUPABASE_URL}/rest/v1/gmail_settings?active=eq.true&select=user_id", headers=HEADERS)
@@ -57,6 +73,13 @@ def main():
             task = tasks[0]
             task_id = task["id"]
             print(f"[FOUND] Task {task_id}  type={task['type']}")
+
+            # ── Schedule window gate ───────────────────────────
+            if task.get("type") in ("AUTO_APPLY", "TAILOR_AND_APPLY"):
+                if not _is_in_schedule_window(task):
+                    print(f"[SCHED] Task {task_id} outside schedule window — will retry next poll")
+                    time.sleep(POLL_INTERVAL)
+                    continue  # Leave task as PENDING; try again next poll
 
             update_task(task_id, "RUNNING")
             print(f"[STATUS] {task_id} → RUNNING")

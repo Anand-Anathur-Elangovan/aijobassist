@@ -400,3 +400,32 @@ def reset_seen_jobs(user_id: str, platform: str = None,
         url += f"&skip_reason=eq.{skip_reason}"
     requests.delete(url, headers=HEADERS)
 
+
+def save_cover_letter(user_id: str, job_id: str | None,
+                       cover_letter: str,
+                       cover_type: str = "cover_letter",
+                       metadata: dict = None) -> str | None:
+    """
+    Insert a row into cover_letters table.
+    cover_type: 'cover_letter' | 'intro_message' | 'linkedin_intro' | 'email_followup'
+    Returns the new row id on success, or None on failure.
+    """
+    if not user_id or not cover_letter.strip():
+        return None
+    payload = {
+        "user_id":  user_id,
+        "type":     cover_type,
+        "content":  cover_letter,
+        "metadata": metadata or {},
+    }
+    if job_id:
+        payload["job_id"] = job_id
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/cover_letters",
+        headers=HEADERS,
+        json=payload,
+    )
+    if resp.ok and resp.json():
+        return resp.json()[0].get("id")
+    return None
+
