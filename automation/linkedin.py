@@ -2350,7 +2350,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                 except Exception as _me:
                     _log(task_input, f"Match scoring failed ({_me}) — applying anyway", "warning", "ai_decision")
             else:
-_log(task_input, "Smart match skipped — no resume text available", "warning", "ai_decision")
+                _log(task_input, "Smart match skipped — no resume text available", "warning", "ai_decision")
 
         # Store jd_text in task_input so _fill_additional_questions can use it for AI cover note
         if jd_text:
