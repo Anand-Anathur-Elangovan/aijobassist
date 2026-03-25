@@ -23,7 +23,18 @@ type TaskRow = {
   paused?: boolean;
   stop_requested?: boolean;
   custom_prompt_override?: string;
-  output?: { applied_count?: number; message?: string } | null;
+  output?: {
+    applied_count?: number;
+    message?: string;
+    report?: Array<{
+      company: string;
+      job_title: string;
+      url: string;
+      score?: number | null;
+      status: string;
+      skip_reason?: string;
+    }>;
+  } | null;
 };
 
 type EmploymentEntry = {
@@ -186,6 +197,7 @@ export default function DashboardPage() {
   const [railwayLogs, setRailwayLogs] = useState<Array<{ message: string; level?: string; ts?: string }>>([]);
   const [railwayStopping, setRailwayStopping] = useState(false);
   const [showScreenshot, setShowScreenshot] = useState(true);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const cloudPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cloudStoppedRef = useRef(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -2535,14 +2547,46 @@ export default function DashboardPage() {
 
             {/* Final result */}
             {liveTask.status === "DONE" && liveTask.output && (
-              <div className="flex items-center gap-3 p-3 rounded-lg bg-emerald-400/10 border border-emerald-400/20">
-                <span className="text-2xl">🎉</span>
-                <div>
-                  <p className="font-body font-semibold text-emerald-400">
-                    Applied to {liveTask.output.applied_count ?? 0} jobs
-                  </p>
-                  <p className="font-body text-xs text-slate-400 mt-0.5">{liveTask.output.message}</p>
+              <div>
+                <div className="flex items-center gap-3 p-3 rounded-lg bg-emerald-400/10 border border-emerald-400/20">
+                  <span className="text-2xl">🎉</span>
+                  <div>
+                    <p className="font-body font-semibold text-emerald-400">
+                      Applied to {liveTask.output.applied_count ?? 0} jobs
+                    </p>
+                    <p className="font-body text-xs text-slate-400 mt-0.5">{liveTask.output.message}</p>
+                  </div>
                 </div>
+                {/* Per-job completion report */}
+                {liveTask.output.report && liveTask.output.report.length > 0 && (
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-700 text-slate-500">
+                          <th className="text-left py-2 px-2 font-mono">#</th>
+                          <th className="text-left py-2 px-2 font-mono">Company</th>
+                          <th className="text-left py-2 px-2 font-mono">Position</th>
+                          <th className="text-left py-2 px-2 font-mono">Score</th>
+                          <th className="text-left py-2 px-2 font-mono">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {liveTask.output.report.map((r, i) => (
+                          <tr key={i} className="border-b border-slate-800">
+                            <td className="py-1.5 px-2 text-slate-600">{i + 1}</td>
+                            <td className="py-1.5 px-2 text-slate-300">{r.company || "—"}</td>
+                            <td className="py-1.5 px-2 text-slate-300">{r.job_title || "—"}</td>
+                            <td className="py-1.5 px-2 text-slate-400">{r.score != null ? `${r.score}%` : "—"}</td>
+                            <td className={`py-1.5 px-2 ${r.status === "applied" ? "text-emerald-400" : "text-amber-400"}`}>
+                              {r.status === "applied" ? "✅ Applied" : "⏭ Skipped"}
+                              {r.skip_reason ? ` (${r.skip_reason})` : ""}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -2561,42 +2605,92 @@ export default function DashboardPage() {
         ) : (
           <div className="space-y-2">
             {tasks.map((t) => (
-              <div
-                key={t.id}
-                onClick={() => (t.status === "RUNNING" || t.status === "DONE") && setLiveTask(t)}
-                className={`card py-3 flex items-center justify-between ${
-                  t.status === "RUNNING" || t.status === "DONE" ? "cursor-pointer hover:border-blue-400/30" : ""
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <span className="text-lg">
-                    {t.status === "PENDING" ? "🟡" : t.status === "RUNNING" ? "🔵" : t.status === "DONE" ? "🟢" : "🔴"}
-                  </span>
-                  <div>
-                    <span className="font-mono text-sm text-white">{t.type}</span>
-                    {t.status === "RUNNING" && (
-                      <p className="font-mono text-xs text-blue-400 mt-0.5 animate-pulse">
-                        Running… {t.progress ?? 0}% — click to view live log
-                      </p>
-                    )}
-                    {t.status === "DONE" && t.output?.applied_count !== undefined && (
-                      <p className="font-mono text-xs text-emerald-400 mt-0.5">
-                        ✅ {t.output.applied_count} applied — click to view log
+              <div key={t.id} className="card overflow-hidden">
+                {/* ── Row header ── */}
+                <div
+                  onClick={() => {
+                    if (t.status === "RUNNING") { setLiveTask(t); return; }
+                    if (t.status === "DONE") {
+                      setExpandedTaskId((prev) => (prev === t.id ? null : t.id));
+                    }
+                  }}
+                  className={`py-3 flex items-center justify-between ${
+                    t.status === "RUNNING" || t.status === "DONE" ? "cursor-pointer hover:bg-slate-800/40" : ""
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-lg">
+                      {t.status === "PENDING" ? "🟡" : t.status === "RUNNING" ? "🔵" : t.status === "DONE" ? "🟢" : "🔴"}
+                    </span>
+                    <div>
+                      <span className="font-mono text-sm text-white">{t.type}</span>
+                      {t.status === "RUNNING" && (
+                        <p className="font-mono text-xs text-blue-400 mt-0.5 animate-pulse">
+                          Running… {t.progress ?? 0}% — click to view live log
+                        </p>
+                      )}
+                      {t.status === "DONE" && t.output?.applied_count !== undefined && (
+                        <p className="font-mono text-xs text-emerald-400 mt-0.5">
+                          ✅ {t.output.applied_count} applied — {expandedTaskId === t.id ? "▲ collapse" : "▼ view report"}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className={`font-mono text-xs px-2 py-0.5 rounded ${
+                      t.status === "PENDING" ? "bg-yellow-400/15 text-yellow-400" :
+                      t.status === "RUNNING" ? "bg-blue-400/15 text-blue-400" :
+                      t.status === "DONE" ? "bg-emerald-400/15 text-emerald-400" :
+                      "bg-red-400/15 text-red-400"
+                    }`}>{t.status}</span>
+                    <span className="font-mono text-xs text-slate-500">
+                      {new Date(t.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* ── Expanded report ── */}
+                {expandedTaskId === t.id && t.output && (
+                  <div className="border-t border-slate-800 px-3 pb-3 pt-2">
+                    <p className="font-mono text-xs text-slate-500 uppercase tracking-widest mb-2">
+                      Completion Report
+                    </p>
+                    {t.output.report && t.output.report.length > 0 ? (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-700 text-slate-500">
+                              <th className="text-left py-2 px-2 font-mono">#</th>
+                              <th className="text-left py-2 px-2 font-mono">Company</th>
+                              <th className="text-left py-2 px-2 font-mono">Position</th>
+                              <th className="text-left py-2 px-2 font-mono">Score</th>
+                              <th className="text-left py-2 px-2 font-mono">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {t.output.report.map((r, i) => (
+                              <tr key={i} className="border-b border-slate-800">
+                                <td className="py-1.5 px-2 text-slate-600">{i + 1}</td>
+                                <td className="py-1.5 px-2 text-slate-300">{r.company || "—"}</td>
+                                <td className="py-1.5 px-2 text-slate-300">{r.job_title || "—"}</td>
+                                <td className="py-1.5 px-2 text-slate-400">{r.score != null ? `${r.score}%` : "—"}</td>
+                                <td className={`py-1.5 px-2 ${r.status === "applied" ? "text-emerald-400" : "text-amber-400"}`}>
+                                  {r.status === "applied" ? "✅ Applied" : "⏭ Skipped"}
+                                  {r.skip_reason ? ` (${r.skip_reason})` : ""}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="font-body text-xs text-slate-500">
+                        {t.output.message || `${t.output.applied_count ?? 0} jobs applied`}
+                        {" — detailed report not available for older runs."}
                       </p>
                     )}
                   </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  <span className={`font-mono text-xs px-2 py-0.5 rounded ${
-                    t.status === "PENDING" ? "bg-yellow-400/15 text-yellow-400" :
-                    t.status === "RUNNING" ? "bg-blue-400/15 text-blue-400" :
-                    t.status === "DONE" ? "bg-emerald-400/15 text-emerald-400" :
-                    "bg-red-400/15 text-red-400"
-                  }`}>{t.status}</span>
-                  <span className="font-mono text-xs text-slate-500">
-                    {new Date(t.created_at).toLocaleString()}
-                  </span>
-                </div>
+                )}
               </div>
             ))}
           </div>

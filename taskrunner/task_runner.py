@@ -132,6 +132,7 @@ def _handle_url_apply(task_input: dict) -> dict:
     total_applied = 0
     total_skipped = 0
     messages: list[str] = []
+    full_report: list[dict] = []
 
     if linkedin_urls:
         li_input = dict(task_input)
@@ -141,6 +142,7 @@ def _handle_url_apply(task_input: dict) -> dict:
         result = apply_linkedin_jobs(li_input)
         total_applied += result.get("applied_count", 0)
         total_skipped += result.get("skipped_count", 0)
+        full_report.extend(result.get("report", []))
         messages.append(f"LinkedIn: {result.get('applied_count', 0)} applied")
 
     if naukri_urls:
@@ -151,12 +153,14 @@ def _handle_url_apply(task_input: dict) -> dict:
         result = apply_naukri_jobs(nk_input)
         total_applied += result.get("applied_count", 0)
         total_skipped += result.get("skipped_count", 0)
+        full_report.extend(result.get("report", []))
         messages.append(f"Naukri: {result.get('applied_count', 0)} applied")
 
     return {
         "applied_count": total_applied,
         "skipped_count": total_skipped,
         "message": " | ".join(messages) if messages else "No URLs processed",
+        "report": full_report,
     }
 
 

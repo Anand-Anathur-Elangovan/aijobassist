@@ -434,6 +434,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             skipped  = 0
             total    = len(unique_jobs)
             _exhausted_pool = False   # flag: pool ran out before hitting max_apply
+            _report: list[dict] = []  # per-job completion report
             for idx, (job_url, company_hint) in enumerate(unique_jobs):
                 if applied >= max_apply:
                     break
@@ -481,9 +482,25 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     applied += 1
                     _log(task_input, f"✅ Applied — {company_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": company_hint, "url": job_url, "job_title": task_input.get("_page_job_title", "")})
                     _record_application(task_input, job_url, company_hint)
+                    _report.append({
+                        "company":     task_input.get("company") or company_hint or "—",
+                        "job_title":   task_input.get("_page_job_title") or "—",
+                        "url":         job_url,
+                        "score":       task_input.get("_last_match_score"),
+                        "status":      "applied",
+                        "skip_reason": "",
+                    })
                 else:
                     skipped += 1
                     _log(task_input, f"⏭ Skipped — {company_hint or 'job'} ({skipped} total)", "skip", "skip", {"company": company_hint, "url": job_url, "job_title": task_input.get("_page_job_title", "")})
+                    _report.append({
+                        "company":     task_input.get("company") or company_hint or "—",
+                        "job_title":   task_input.get("_page_job_title") or "—",
+                        "url":         job_url,
+                        "score":       task_input.get("_last_match_score"),
+                        "status":      "skipped",
+                        "skip_reason": task_input.get("_last_skip_reason", ""),
+                    })
             else:
                 # The for loop finished without break → pool exhausted
                 if applied < max_apply:
@@ -533,16 +550,33 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                 applied += 1
                                 _log(task_input, f"✅ Applied — {ej_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": ej_hint, "url": ej_url, "job_title": task_input.get("_page_job_title", "")})
                                 _record_application(task_input, ej_url, ej_hint)
+                                _report.append({
+                                    "company":     task_input.get("company") or ej_hint or "—",
+                                    "job_title":   task_input.get("_page_job_title") or "—",
+                                    "url":         ej_url,
+                                    "score":       task_input.get("_last_match_score"),
+                                    "status":      "applied",
+                                    "skip_reason": "",
+                                })
                             else:
                                 skipped += 1
                                 _log(task_input, f"⏭ Skipped — {ej_hint or 'job'} ({skipped} total)", "skip", "skip", {"url": ej_url, "job_title": task_input.get("_page_job_title", "")})
+                                _report.append({
+                                    "company":     task_input.get("company") or ej_hint or "—",
+                                    "job_title":   task_input.get("_page_job_title") or "—",
+                                    "url":         ej_url,
+                                    "score":       task_input.get("_last_match_score"),
+                                    "status":      "skipped",
+                                    "skip_reason": task_input.get("_last_skip_reason", ""),
+                                })
 
             _set_progress(task_input, 100)
             _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success", "system", {"applied": applied, "skipped": skipped})
             return {
                 "applied_count": applied,
                 "skipped_count": skipped,
-                "message": f"Applied to {applied} jobs on LinkedIn"
+                "message": f"Applied to {applied} jobs on LinkedIn",
+                "report": _report,
             }
 
         except Exception as e:

@@ -246,6 +246,7 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
 
             applied = 0
             skipped = 0
+            _report: list[dict] = []  # per-job completion report
             for job_url in _all_jobs:
                 if applied >= max_apply:
                     print(f"  [NAUKRI] Reached limit of {max_apply}. Run again to continue from the next batch.")
@@ -278,10 +279,26 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                     _record_application(task_input, job_url, _company_from_url(job_url))
                     _jt = task_input.get("_page_job_title", "")
                     _log(task_input, f"✅ Applied — {_company_from_url(job_url)} ({applied}/{max_apply})", "success", "submit", {"company": _company_from_url(job_url), "url": job_url, "job_title": _jt})
+                    _report.append({
+                        "company":     task_input.get("_page_company") or _company_from_url(job_url) or "—",
+                        "job_title":   _jt or "—",
+                        "url":         job_url,
+                        "score":       task_input.get("_last_match_score"),
+                        "status":      "applied",
+                        "skip_reason": "",
+                    })
                 else:
                     skipped += 1
                     _jt = task_input.get("_page_job_title", "")
                     _log(task_input, f"⏭ Skipped — {_company_from_url(job_url)} [{_skip_reason}] ({skipped} total)", "skip", "skip", {"url": job_url, "skip_reason": _skip_reason, "company": _company_from_url(job_url), "job_title": _jt})
+                    _report.append({
+                        "company":     task_input.get("_page_company") or _company_from_url(job_url) or "—",
+                        "job_title":   _jt or "—",
+                        "url":         job_url,
+                        "score":       task_input.get("_last_match_score"),
+                        "status":      "skipped",
+                        "skip_reason": _skip_reason,
+                    })
 
             if applied < max_apply and skipped > 0:
                 print(f"  [NAUKRI] Pool exhausted (applied {applied}/{max_apply}, skipped {skipped}) — try broader keywords or lower match threshold")
@@ -292,6 +309,7 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                 "applied_count": applied,
                 "skipped_count": skipped,
                 "message": f"Applied to {applied} jobs on Naukri",
+                "report": _report,
             }
 
         except Exception as e:
@@ -688,6 +706,9 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         if _page_job_title:
             task_input = dict(task_input)
             task_input["_page_job_title"] = _page_job_title
+        if _page_company:
+            task_input = dict(task_input)
+            task_input["_page_company"] = _page_company
         _log(task_input, f"Reviewing: {_page_job_title or 'untitled'} at {_page_company or 'unknown'}",
              "info", "navigation", {"job_title": _page_job_title, "company": _page_company, "url": job_url})
         # ── Skip if already applied ───────────────────────────────
