@@ -20,8 +20,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers (Chromium only — smallest footprint)
+# Note: system deps already installed via apt-get above; skip install-deps
+# to avoid failures on Debian Trixie (missing ttf-ubuntu-font-family etc.)
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
 # Copy the full project
 COPY . .
