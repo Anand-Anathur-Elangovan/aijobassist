@@ -33,5 +33,5 @@ ENV PYTHONPATH=/app:/app/taskrunner
 # Railway injects all env vars — no .env file needed at runtime
 ENV PYTHONUNBUFFERED=1
 
-# Start the task runner 
-CMD ["python", "taskrunner/main.py"]
+# Start the HTTP server (also boots the polling loop in a background thread)
+CMD ["python", "taskrunner/server.py"]
