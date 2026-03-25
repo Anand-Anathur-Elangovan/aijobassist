@@ -44,8 +44,9 @@ export default function AgentPage() {
   const [railwayStopping,    setRailwayStopping]     = useState(false);
   const [stoppingTask,       setStoppingTask]        = useState(false);
   const [showScreenshot,     setShowScreenshot]      = useState(true);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-  const evtSourceRef = useRef<EventSource | null>(null);
+  const logsEndRef        = useRef<HTMLDivElement>(null);
+  const cloudPollRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cloudStoppedRef   = useRef(false);
 
   // ── Supabase task polling (for approval flow + structured logs) ──
   const [approvalPayload, setApprovalPayload] = useState<{
@@ -318,51 +319,76 @@ export default function AgentPage() {
     // Refresh quota
     await fetchRailwayInfo();
 
-    // Start SSE screenshot stream (pass token — EventSource can't set headers)
-    startScreenshotStream(data.session_id, token);
+    // Start direct Supabase polling for screenshots + logs (no SSE — works indefinitely)
+    startCloudPoll(data.session_id, newTask.id);
   }
 
-  function startScreenshotStream(sessionId: string, token: string) {
-    // Close any existing stream
-    evtSourceRef.current?.close();
+  function stopCloudPoll() {
+    cloudStoppedRef.current = true;
+    if (cloudPollRef.current) { clearTimeout(cloudPollRef.current); cloudPollRef.current = null; }
+  }
 
-    // EventSource can't send Authorization headers — pass token as query param
-    const evtSource = new EventSource(`/api/railway/stream?session_id=${sessionId}&token=${encodeURIComponent(token)}`);
-    evtSourceRef.current = evtSource;
+  function startCloudPoll(sessionId: string, taskId: string) {
+    // Stop any existing cloud poll
+    stopCloudPoll();
+    cloudStoppedRef.current = false;
+    let lastLogCount = 0;
 
-    evtSource.addEventListener("screenshot", (e) => {
-      const payload = JSON.parse(e.data);
-      setLiveScreenshot(`data:image/jpeg;base64,${payload.data}`);
-    });
+    async function pollCloud() {
+      if (cloudStoppedRef.current) return;
 
-    evtSource.addEventListener("log", (e) => {
-      const entry = JSON.parse(e.data);
-      setRailwayLogs((prev) => [...prev, entry]);
-    });
+      // Fetch session (screenshot + status)
+      const { data: sess } = await supabase
+        .from("railway_sessions")
+        .select("status, latest_screenshot")
+        .eq("id", sessionId)
+        .single();
 
-    evtSource.addEventListener("progress", (e) => {
-      const payload = JSON.parse(e.data);
-      setRailwayProgress(payload.progress ?? 0);
-      setRailwayCurrentJob(payload.current_job ?? null);
-    });
+      if (sess?.latest_screenshot) {
+        setLiveScreenshot(`data:image/jpeg;base64,${sess.latest_screenshot}`);
+      }
 
-    evtSource.addEventListener("done", (e) => {
-      const payload = JSON.parse(e.data);
-      setRailwayStatus("done");
-      setRailwayLogs((prev) => [
-        ...prev,
-        { message: `Session ended — status: ${payload.status}`, level: "info", ts: new Date().toISOString() },
-      ]);
-      evtSource.close();
-      evtSourceRef.current = null;
-      fetchRailwayInfo(); // refresh quota
-    });
+      // Fetch task (logs + progress)
+      const { data: task } = await supabase
+        .from("tasks")
+        .select("status, progress, current_job, logs")
+        .eq("id", taskId)
+        .single();
 
-    evtSource.onerror = () => {
-      setRailwayStatus("done");
-      evtSource.close();
-      evtSourceRef.current = null;
-    };
+      if (task) {
+        const logs = Array.isArray(task.logs) ? task.logs : [];
+        if (logs.length > lastLogCount) {
+          const newEntries = logs.slice(lastLogCount).map((e: unknown) =>
+            typeof e === "string" ? { message: e, level: "info", ts: new Date().toISOString() }
+              : (e as { message?: string; msg?: string; level?: string; ts?: string })
+          );
+          // Normalise msg→message so the log panel always has .message
+          const normalised = newEntries.map((e) => ({ ...e, message: (e as { message?: string; msg?: string }).message ?? (e as { msg?: string }).msg ?? "" }));
+          setRailwayLogs((prev) => [...prev, ...normalised]);
+          lastLogCount = logs.length;
+        }
+        if ((task.progress ?? 0) !== undefined) setRailwayProgress(task.progress ?? 0);
+        if (task.current_job)                   setRailwayCurrentJob(task.current_job);
+      }
+
+      // Stop polling when session ends
+      const ended = ["completed", "failed", "stopped"].includes(sess?.status ?? "") ||
+                    ["DONE", "FAILED"].includes(task?.status ?? "");
+      if (ended) {
+        setRailwayStatus("done");
+        setRailwayLogs((prev) => [
+          ...prev,
+          { message: `Session ended — ${sess?.status ?? task?.status ?? "done"}`, level: "info", ts: new Date().toISOString() },
+        ]);
+        fetchRailwayInfo();
+        return; // stop polling
+      }
+
+      // Still running — poll every 2s
+      cloudPollRef.current = setTimeout(pollCloud, 2000);
+    }
+
+    cloudPollRef.current = setTimeout(pollCloud, 2000); // first poll after 2s
   }
 
   async function stopRailwaySession() {
@@ -384,7 +410,7 @@ export default function AgentPage() {
       body: JSON.stringify({ session_id: railwaySessionId, task_id: railwayTaskId }),
     });
 
-    evtSourceRef.current?.close();
+    stopCloudPoll();
     setRailwayStatus("done");
     setRailwayStopping(false);
     fetchRailwayInfo();
@@ -860,7 +886,7 @@ export default function AgentPage() {
                 </button>
               ) : (
                 <button
-                  onClick={() => { setRailwayStatus("idle"); setRailwaySessionId(null); setRailwayTaskId(null); setLiveScreenshot(null); setRailwayLogs([]); }}
+                  onClick={() => { stopCloudPoll(); setRailwayStatus("idle"); setRailwaySessionId(null); setRailwayTaskId(null); setLiveScreenshot(null); setRailwayLogs([]); }}
                   className="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 rounded-lg transition-colors"
                 >
                   Close
