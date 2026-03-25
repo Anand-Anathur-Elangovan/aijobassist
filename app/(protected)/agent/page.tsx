@@ -41,6 +41,8 @@ export default function AgentPage() {
   const [railwayCurrentJob,  setRailwayCurrentJob]   = useState<string | null>(null);
   const [railwayLogs,        setRailwayLogs]         = useState<Array<{ message: string; level?: string; ts?: string }>>([]);
   const [railwayStopping,    setRailwayStopping]     = useState(false);
+  const [stoppingTask,       setStoppingTask]        = useState(false);
+  const [showScreenshot,     setShowScreenshot]      = useState(true);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const evtSourceRef = useRef<EventSource | null>(null);
 
@@ -65,8 +67,21 @@ export default function AgentPage() {
     if (typeof window !== "undefined") {
       const dismissed = localStorage.getItem("railway_banner_dismissed");
       if (dismissed === "1") setShowBanner(false);
+      // Restore screenshot preference
+      const screenshotPref = localStorage.getItem("show_live_screenshot");
+      if (screenshotPref === "0") setShowScreenshot(false);
     }
   }, [user]);
+
+  function toggleScreenshot() {
+    setShowScreenshot((prev) => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        localStorage.setItem("show_live_screenshot", next ? "1" : "0");
+      }
+      return next;
+    });
+  }
 
   // ── Poll Supabase for active task (approval + live logs) ─────
   useEffect(() => {
@@ -338,6 +353,25 @@ export default function AgentPage() {
     setRailwayStatus("done");
     setRailwayStopping(false);
     fetchRailwayInfo();
+  }
+
+  async function stopActiveTask() {
+    if (!activeTaskId || stoppingTask) return;
+    setStoppingTask(true);
+    await supabase
+      .from("tasks")
+      .update({ stop_requested: true })
+      .eq("id", activeTaskId);
+    setStoppingTask(false);
+    // taskStatus will auto-update via Supabase polling once the agent exits
+  }
+
+  async function switchMode(mode: ExecutionMode) {
+    setPreferredMode(mode);
+    await supabase
+      .from("user_profiles")
+      .update({ preferred_execution_mode: mode })
+      .eq("user_id", user?.id ?? "");
   }
 
   function dismissBanner() {
@@ -628,48 +662,106 @@ export default function AgentPage() {
         </div>
       )}
 
-      {/* ── Cloud Quick Launch (shown once Railway is configured) ── */}
+      {/* ── Mode Switcher + Quick Launch (shown once Railway is configured) ── */}
       {railwayConfigured && railwayStatus === "idle" && (
         <div className="mb-6 bg-slate-900/60 border border-violet-500/20 rounded-xl p-5">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="font-bold text-white flex items-center gap-2">
-                <span className="text-violet-400">☁️</span> Cloud Quick Launch
-              </h2>
-              <p className="text-xs text-slate-400 mt-0.5">
-                Run directly from browser — no .exe needed
-              </p>
+          {/* Mode toggle row */}
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-bold text-white flex items-center gap-2">
+              {preferredMode === "railway"
+                ? <><span className="text-violet-400">☁️</span> Cloud Quick Launch</>
+                : <><span className="text-amber-400">💻</span> Local Machine</>}
+            </h2>
+            <div className="flex items-center gap-1 bg-slate-800 border border-slate-700 rounded-lg p-1">
+              <button
+                onClick={() => switchMode("railway")}
+                className={`px-3 py-1.5 text-xs font-semibold rounded transition-all ${
+                  preferredMode === "railway"
+                    ? "bg-violet-600 text-white shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                ☁️ Cloud
+              </button>
+              <button
+                onClick={() => switchMode("own_machine")}
+                className={`px-3 py-1.5 text-xs font-semibold rounded transition-all ${
+                  preferredMode === "own_machine"
+                    ? "bg-amber-400 text-slate-950 shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                💻 Local
+              </button>
             </div>
-            <div className="text-right text-xs text-slate-500">
-              <p>{railwayQuota.used.toFixed(1)} / {railwayQuota.limit} min used today</p>
-              <div className="w-28 h-1 bg-slate-700 rounded-full mt-1 overflow-hidden">
-                <div
-                  className="h-full bg-violet-500 rounded-full transition-all"
-                  style={{ width: `${Math.min(100, (railwayQuota.used / railwayQuota.limit) * 100)}%` }}
-                />
+          </div>
+
+          {preferredMode === "railway" ? (
+            /* ── Cloud launch ── */
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs text-slate-400">Run directly from browser — no .exe needed</p>
+                <div className="text-right text-xs text-slate-500">
+                  <p>{railwayQuota.used.toFixed(1)} / {railwayQuota.limit} min used today</p>
+                  <div className="w-28 h-1 bg-slate-700 rounded-full mt-1 overflow-hidden">
+                    <div
+                      className="h-full bg-violet-500 rounded-full transition-all"
+                      style={{ width: `${Math.min(100, (railwayQuota.used / railwayQuota.limit) * 100)}%` }}
+                    />
+                  </div>
+                </div>
               </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => openExecutionModal("AUTO_APPLY")}
+                  disabled={railwayQuota.remaining <= 0}
+                  className="flex-1 py-2.5 text-sm font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  🤖 Start Auto Apply
+                </button>
+                <button
+                  onClick={() => openExecutionModal("TAILOR_AND_APPLY")}
+                  disabled={railwayQuota.remaining <= 0}
+                  className="flex-1 py-2.5 text-sm font-semibold rounded-lg bg-violet-600/30 hover:bg-violet-600/50 border border-violet-500/40 text-violet-200 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  ✏️ Start Tailor &amp; Apply
+                </button>
+              </div>
+              {railwayQuota.remaining <= 0 && (
+                <p className="text-xs text-red-400 mt-2 text-center">
+                  Daily limit reached. Upgrade your plan for more cloud minutes.
+                </p>
+              )}
+            </>
+          ) : (
+            /* ── Local machine info ── */
+            <div className="space-y-3">
+              <p className="text-sm text-slate-300">
+                Tasks will run on <strong className="text-white">your machine</strong> via the VantaHire desktop agent.
+                Make sure it&apos;s running before starting a task.
+              </p>
+              <div className="flex items-center gap-2 bg-amber-400/5 border border-amber-400/20 rounded-lg px-4 py-3 text-sm">
+                <span className="text-amber-400 text-base">💡</span>
+                <span className="text-slate-300">
+                  Go to <strong className="text-white">Dashboard</strong> and click <strong className="text-white">Apply</strong> — the agent picks it up automatically.
+                </span>
+              </div>
+              {(taskStatus === "RUNNING" || taskStatus === "PENDING" || taskStatus === "WAITING_APPROVAL") && activeTaskId && (
+                <div className="flex items-center justify-between bg-emerald-500/5 border border-emerald-500/20 rounded-lg px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+                    <span className="text-sm text-emerald-300 font-medium">Task running on local machine</span>
+                  </div>
+                  <button
+                    onClick={stopActiveTask}
+                    disabled={stoppingTask}
+                    className="px-3 py-1.5 text-xs font-semibold bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded-lg transition-all disabled:opacity-50"
+                  >
+                    {stoppingTask ? "Stopping…" : "⏹ Stop"}
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
-          <div className="flex gap-3">
-            <button
-              onClick={() => openExecutionModal("AUTO_APPLY")}
-              disabled={railwayQuota.remaining <= 0}
-              className="flex-1 py-2.5 text-sm font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              🤖 Start Auto Apply
-            </button>
-            <button
-              onClick={() => openExecutionModal("TAILOR_AND_APPLY")}
-              disabled={railwayQuota.remaining <= 0}
-              className="flex-1 py-2.5 text-sm font-semibold rounded-lg bg-violet-600/30 hover:bg-violet-600/50 border border-violet-500/40 text-violet-200 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              ✏️ Start Tailor &amp; Apply
-            </button>
-          </div>
-          {railwayQuota.remaining <= 0 && (
-            <p className="text-xs text-red-400 mt-2 text-center">
-              Daily limit reached. Upgrade your plan for more cloud minutes.
-            </p>
           )}
         </div>
       )}
@@ -705,6 +797,14 @@ export default function AgentPage() {
                   <span className="text-xs text-slate-400">{railwayProgress}%</span>
                 </div>
               )}
+              {/* Screenshot toggle */}
+              <button
+                onClick={toggleScreenshot}
+                title={showScreenshot ? "Hide screenshot" : "Show screenshot"}
+                className="px-3 py-1.5 text-xs font-medium border border-slate-700 rounded-lg transition-colors text-slate-400 hover:text-white hover:border-slate-500"
+              >
+                {showScreenshot ? "🖥 Hide Feed" : "🖥 Show Feed"}
+              </button>
               {/* Stop / Close */}
               {railwayStatus === "running" ? (
                 <button
@@ -726,35 +826,37 @@ export default function AgentPage() {
           </div>
 
           {/* Screenshot + logs side-by-side */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
-            {/* Live screenshot */}
-            <div className="relative bg-slate-950 flex items-center justify-center" style={{ minHeight: "280px" }}>
-              {liveScreenshot ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={liveScreenshot}
-                  alt="Live automation screenshot"
-                  className="w-full object-contain"
-                />
-              ) : (
-                <div className="flex flex-col items-center gap-3 text-slate-600">
-                  {railwayStatus === "running" ? (
-                    <>
-                      <span className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
-                      <p className="text-xs">Waiting for first screenshot…</p>
-                    </>
-                  ) : (
-                    <p className="text-xs">No screenshot available</p>
-                  )}
-                </div>
-              )}
-              {/* Timestamp overlay */}
-              {liveScreenshot && (
-                <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-slate-400 px-2 py-0.5 rounded">
-                  Live
-                </div>
-              )}
-            </div>
+          <div className={`grid gap-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-800 ${showScreenshot ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+            {/* Live screenshot — only shown when toggle is on */}
+            {showScreenshot && (
+              <div className="relative bg-slate-950 flex items-center justify-center" style={{ minHeight: "280px" }}>
+                {liveScreenshot ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={liveScreenshot}
+                    alt="Live automation screenshot"
+                    className="w-full object-contain"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-3 text-slate-600">
+                    {railwayStatus === "running" ? (
+                      <>
+                        <span className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                        <p className="text-xs">Waiting for first screenshot…</p>
+                      </>
+                    ) : (
+                      <p className="text-xs">No screenshot available</p>
+                    )}
+                  </div>
+                )}
+                {/* Timestamp overlay */}
+                {liveScreenshot && (
+                  <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-slate-400 px-2 py-0.5 rounded">
+                    Live
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Logs panel */}
             <div style={{ minHeight: "280px", maxHeight: "320px" }}>
@@ -910,11 +1012,37 @@ export default function AgentPage() {
 
       {/* Standalone log panel for own-machine tasks (shown when Railway panel is idle) */}
       {taskLogs.length > 0 && railwayStatus === "idle" && (
-        <div className="mt-6 h-96">
-          <LogPanel
-            logs={taskLogs}
-            isRunning={taskStatus === "RUNNING" || taskStatus === "WAITING_APPROVAL"}
-          />
+        <div className="mt-6 bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+          {/* Panel header with stop button */}
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800">
+            <div className="flex items-center gap-2">
+              {(taskStatus === "RUNNING" || taskStatus === "WAITING_APPROVAL") && (
+                <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+              )}
+              <span className="text-sm font-semibold text-white">💻 Local Agent Logs</span>
+              {taskStatus && taskStatus !== "DONE" && !stoppingTask && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400">{taskStatus}</span>
+              )}
+              {stoppingTask && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-400/10 text-amber-400">Stopping…</span>
+              )}
+            </div>
+            {(taskStatus === "RUNNING" || taskStatus === "PENDING" || taskStatus === "WAITING_APPROVAL") && activeTaskId && (
+              <button
+                onClick={stopActiveTask}
+                disabled={stoppingTask}
+                className="px-3 py-1.5 text-xs font-semibold bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded-lg transition-all disabled:opacity-50"
+              >
+                {stoppingTask ? "Stopping…" : "⏹ Stop"}
+              </button>
+            )}
+          </div>
+          <div className="h-80">
+            <LogPanel
+              logs={taskLogs}
+              isRunning={taskStatus === "RUNNING" || taskStatus === "WAITING_APPROVAL"}
+            />
+          </div>
         </div>
       )}
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/context/AuthContext'
 import { supabase } from '@/lib/supabase'
@@ -12,6 +12,12 @@ interface ConnectionTestResult {
   message: string
 }
 
+interface QuotaInfo {
+  used: number
+  limit: number
+  remaining: number
+}
+
 export default function AgentSetupPage() {
   const { user } = useAuth()
   const router   = useRouter()
@@ -19,6 +25,25 @@ export default function AgentSetupPage() {
   const [step,    setStep]    = useState<Step>(1)
   const [connTest, setConnTest] = useState<ConnectionTestResult>({ status: 'idle', message: '' })
   const [saving,  setSaving]  = useState(false)
+  const [quota,   setQuota]   = useState<QuotaInfo | null>(null)
+
+  // Fetch live quota on mount so the user sees their real usage
+  useEffect(() => {
+    if (!user) return
+    async function fetchQuota() {
+      const session = await supabase.auth.getSession()
+      const token   = session.data.session?.access_token
+      if (!token) return
+      try {
+        const res  = await fetch('/api/railway/status', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (data.quota) setQuota(data.quota)
+      } catch { /* non-critical */ }
+    }
+    fetchQuota()
+  }, [user])
 
   // ── Step 2: Test Railway connection ──────────────────────────
   async function testConnection() {
@@ -169,17 +194,41 @@ export default function AgentSetupPage() {
             <p className="text-sm font-medium text-white">Daily cloud usage limits by plan:</p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
               {[
-                { plan: 'Trial / Free', mins: '5 min' },
-                { plan: 'Pro',          mins: '15 min' },
-                { plan: 'Premium',      mins: '30 min' },
-                { plan: 'Admin',        mins: '120 min' },
+                { plan: 'Trial / Free', mins: 5,   slug: 'free' },
+                { plan: 'Pro',          mins: 15,  slug: 'normal' },
+                { plan: 'Premium',      mins: 30,  slug: 'premium' },
+                { plan: 'Admin',        mins: 120, slug: 'admin' },
               ].map((item) => (
                 <div key={item.plan} className="bg-slate-900 rounded-lg p-2">
                   <p className="text-slate-400">{item.plan}</p>
-                  <p className="text-white font-bold mt-0.5">{item.mins}/day</p>
+                  <p className="text-white font-bold mt-0.5">{item.mins} min/day</p>
                 </div>
               ))}
             </div>
+            {/* Live quota bar for this user */}
+            {quota && (
+              <div className="mt-3 pt-3 border-t border-slate-700">
+                <div className="flex justify-between text-xs text-slate-400 mb-1">
+                  <span>Your usage today</span>
+                  <span className={quota.remaining <= 0 ? 'text-red-400 font-semibold' : 'text-slate-300'}>
+                    {quota.used.toFixed(1)} / {quota.limit} min used
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${
+                      quota.remaining <= 0 ? 'bg-red-500' : quota.used / quota.limit > 0.75 ? 'bg-amber-500' : 'bg-violet-500'
+                    }`}
+                    style={{ width: `${Math.min(100, (quota.used / quota.limit) * 100)}%` }}
+                  />
+                </div>
+                {quota.remaining <= 0 && (
+                  <p className="text-xs text-red-400 mt-1.5">
+                    Daily limit reached. Resets at midnight UTC. <a href="/pricing" className="underline">Upgrade for more.</a>
+                  </p>
+                )}
+              </div>
+            )}
             <p className="text-xs text-slate-500">
               Upgrade to Pro or Premium for more daily cloud minutes.
             </p>
