@@ -11,7 +11,6 @@ import type { LogEntry } from "@/lib/types";
 
 type ResumeRow = { id: string; title: string; created_at: string; parsed_text?: string };
 type JobRow = { id: string; company: string; role: string; status: string };
-type LogEntry = { ts: string; level: "info" | "warn" | "error" | "success"; msg: string };
 type TaskRow = {
   id: string;
   type: string;
