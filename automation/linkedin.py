@@ -81,6 +81,19 @@ def _log(task_input: dict, msg: str, level: str = "info", category: str = "syste
         pass
 
 
+def _push_screenshot(task_input: dict, page) -> None:
+    """Push a live screenshot to railway_sessions (cloud mode only, best-effort)."""
+    session_id = task_input.get("session_id", "")
+    if not session_id:
+        return
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+        from api_client import push_screenshot
+        push_screenshot(session_id, page)
+    except Exception:
+        pass
+
+
 def _check_control(task_input: dict) -> dict:
     """
     Fetch pause / stop / custom_prompt_override from Supabase.
@@ -319,6 +332,9 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 _log(task_input, "Login failed or cancelled", "error")
                 return {"applied_count": 0, "skipped_count": 0, "message": "Login failed or cancelled"}
 
+            # Screenshot after login so user sees the starting state
+            _push_screenshot(task_input, page)
+
             # ── STEP 2: Search jobs ────────────────────────────
             # Build keyword list (up to 3 sequential keywords)
             _li_kw_list = [
@@ -443,6 +459,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 _log(task_input, f"Opening job page", "info", "navigation", {"company": company_hint, "url": job_url})
 
                 success = _apply_to_job(page, job_url, task_input)
+                # Push screenshot after each application attempt (cloud mode)
+                _push_screenshot(task_input, page)
                 # Record to job history DB (won't revisit for 30 days)
                 if _li_user_id:
                     try:

@@ -66,10 +66,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to create Railway session' }, { status: 500 })
   }
 
-  // ── Update task: set execution_mode = 'railway', status = 'RUNNING' ────
+  // ── Update task: set execution_mode = 'railway', inject session_id into input ────
+  // Keep status as PENDING so the Railway polling loop picks it up cleanly.
   await supabase
     .from('tasks')
-    .update({ execution_mode: 'railway', status: 'RUNNING' })
+    .update({
+      execution_mode: 'railway',
+      input: { ...(task.input as object ?? {}), ...(task_input ?? {}), session_id: session.id },
+    })
     .eq('id', task_id)
 
   // ── Trigger Railway service ────────────────────────────────

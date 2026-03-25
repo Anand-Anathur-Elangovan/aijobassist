@@ -113,12 +113,15 @@ def main():
 
         else:
             # No pending tasks
-            if ran_any_task:
-                # We've completed at least one task — exit cleanly
+            if ran_any_task and os.environ.get("TASK_RUNNER_ENV") != "railway":
+                # Local agent exits after completing all tasks
                 print("\n" + "=" * 50)
                 print("  All tasks completed. Exiting.")
                 print("=" * 50)
                 break
+            elif ran_any_task:
+                # On Railway: reset flag and keep polling for more tasks
+                ran_any_task = False
             print("[IDLE]  No pending tasks. Sleeping...")
 
         time.sleep(POLL_INTERVAL)

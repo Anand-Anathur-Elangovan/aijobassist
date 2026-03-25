@@ -14,10 +14,9 @@ def run_task(task: dict) -> dict:
     Returns an output dict that gets saved to tasks.output in Supabase.
     Raises an exception on failure so main.py can mark it FAILED.
     """
-    # ── Railway guard: skip tasks meant for cloud execution ───
-    # Tasks with execution_mode='railway' are handled by the Railway
-    # service directly; the local taskrunner must never pick them up.
-    if task.get("execution_mode") == "railway":
+    # ── Railway guard: local agent must never pick up cloud tasks ───
+    # On the Railway container (TASK_RUNNER_ENV=railway) we intentionally DO run them.
+    if task.get("execution_mode") == "railway" and os.environ.get("TASK_RUNNER_ENV") != "railway":
         print(f"  [RUNNER] Skipping task {task.get('id', '')} — execution_mode=railway (handled by cloud)")
         return {"skipped": True, "reason": "railway_execution_mode"}
 

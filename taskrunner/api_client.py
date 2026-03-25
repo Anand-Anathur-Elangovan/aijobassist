@@ -19,8 +19,18 @@ HEADERS = {
 
 
 def fetch_pending_tasks():
-    """Fetch all PENDING tasks from Supabase."""
-    url = f"{SUPABASE_URL}/rest/v1/tasks?status=eq.PENDING&order=created_at.asc"
+    """
+    Fetch PENDING tasks from Supabase.
+    On Railway (TASK_RUNNER_ENV=railway): only fetch execution_mode=railway tasks.
+    Locally: skip execution_mode=railway tasks so the cloud never double-runs.
+    """
+    is_railway = os.environ.get("TASK_RUNNER_ENV") == "railway"
+    if is_railway:
+        # Railway poller only runs tasks explicitly assigned to cloud
+        url = f"{SUPABASE_URL}/rest/v1/tasks?status=eq.PENDING&execution_mode=eq.railway&order=created_at.asc"
+    else:
+        # Local agent never touches cloud-assigned tasks
+        url = f"{SUPABASE_URL}/rest/v1/tasks?status=eq.PENDING&execution_mode=neq.railway&order=created_at.asc"
     response = requests.get(url, headers=HEADERS)
     if response.status_code == 200:
         return response.json()
@@ -55,6 +65,27 @@ def update_task(task_id: str, status: str, output: dict = None, error: str = Non
     response = requests.patch(url, headers=HEADERS, json=data)
     if response.status_code not in (200, 204):
         print(f"[ERROR] update_task: {response.status_code} {response.text}")
+
+
+def push_screenshot(session_id: str, page_or_bytes) -> None:
+    """
+    Upload a live screenshot to railway_sessions.latest_screenshot.
+    Accepts either a Playwright Page object (will call .screenshot()) or raw bytes.
+    No-ops silently if session_id is empty or the call fails.
+    """
+    if not session_id:
+        return
+    try:
+        import base64 as _b64
+        if hasattr(page_or_bytes, "screenshot"):
+            img_bytes = page_or_bytes.screenshot(type="jpeg", quality=50)
+        else:
+            img_bytes = page_or_bytes
+        b64 = _b64.b64encode(img_bytes).decode()
+        url = f"{SUPABASE_URL}/rest/v1/railway_sessions?id=eq.{session_id}"
+        requests.patch(url, headers=HEADERS, json={"latest_screenshot": b64})
+    except Exception as e:
+        print(f"[WARN] push_screenshot: {e}")
 
 
 def push_log(task_id: str, msg: str, level: str = "info", category: str = "system", meta: dict = None) -> None:

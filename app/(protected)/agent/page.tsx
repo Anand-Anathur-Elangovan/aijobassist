@@ -59,6 +59,8 @@ export default function AgentPage() {
   const [taskStatus,      setTaskStatus]      = useState<string | null>(null);
   const [activeTaskId,    setActiveTaskId]    = useState<string | null>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Prevents poll from re-populating state immediately after a manual stop
+  const stoppedRef = useRef(false);
 
   useEffect(() => {
     fetchKey();
@@ -88,6 +90,9 @@ export default function AgentPage() {
     if (!user) return;
 
     async function pollActiveTask() {
+      // Skip one poll cycle after a manual stop so the cleared state isn't overwritten
+      if (stoppedRef.current) return;
+
       const { data: tasks } = await supabase
         .from("tasks")
         .select("id, status, logs, approval_payload")
@@ -98,8 +103,11 @@ export default function AgentPage() {
 
       const task = tasks?.[0];
       if (!task) {
+        // No active task — clear all task state so the log panel hides itself
         setTaskStatus(null);
         setApprovalPayload(null);
+        setTaskLogs([]);
+        setActiveTaskId(null);
         return;
       }
 
@@ -168,8 +176,28 @@ export default function AgentPage() {
       .single();
 
     if (profile) {
-      setRailwayConfigured(!!profile.railway_configured);
       setPreferredMode((profile.preferred_execution_mode as ExecutionMode) ?? "own_machine");
+      if (profile.railway_configured) {
+        setRailwayConfigured(true);
+      } else {
+        // Auto-detect: ping Railway — if it responds, treat it as configured
+        try {
+          const ping = await fetch("/api/railway/status?ping=true", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (ping.ok) {
+            const pj = await ping.json();
+            if (pj.reachable) {
+              setRailwayConfigured(true);
+              // Persist so next load is instant
+              await supabase
+                .from("user_profiles")
+                .update({ railway_configured: true })
+                .eq("user_id", user!.id);
+            }
+          }
+        } catch { /* Railway unreachable — stay false */ }
+      }
     }
 
     // Fetch today's Railway quota
@@ -358,12 +386,21 @@ export default function AgentPage() {
   async function stopActiveTask() {
     if (!activeTaskId || stoppingTask) return;
     setStoppingTask(true);
+    // Block the poll from overwriting state while the DB update propagates
+    stoppedRef.current = true;
+    // Clear UI immediately so panel vanishes at once
+    setTaskStatus(null);
+    setActiveTaskId(null);
+    setTaskLogs([]);
+    setApprovalPayload(null);
+    // Persist to DB (stop_requested signals a running agent to exit cleanly)
     await supabase
       .from("tasks")
-      .update({ stop_requested: true })
+      .update({ stop_requested: true, status: "DONE" })
       .eq("id", activeTaskId);
     setStoppingTask(false);
-    // taskStatus will auto-update via Supabase polling once the agent exits
+    // Re-enable polling after 4s (enough time for DB consistency)
+    setTimeout(() => { stoppedRef.current = false; }, 4000);
   }
 
   async function switchMode(mode: ExecutionMode) {
