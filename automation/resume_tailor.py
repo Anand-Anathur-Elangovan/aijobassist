@@ -194,18 +194,23 @@ def _tailor_with_claude(
     """
     extra = f"\n\nExtra user instruction: {custom_prompt}" if custom_prompt.strip() else ""
 
-    prompt = f"""You are an expert ATS resume optimizer and career coach.
+    prompt = f"""You are helping a job applicant make targeted improvements to their resume so it better matches a specific job description.
+Your goal is to produce changes that look like the applicant themselves spent 30-45 minutes carefully editing their own resume — NOT like AI rewrote it.
 
-TASK: Rewrite the candidate's resume to maximise match with the job description.
+TASK: Make precise, minimal edits to the resume to improve its match with the job description.
 
-RULES:
-- Keep ALL real experience — do NOT invent companies, roles, or projects
-- Naturally inject JD keywords into existing bullet points
-- Rewrite weak bullets with strong action verbs + quantified impact
-- Add a 2-3 sentence professional summary at the top aligned with the JD
-- Preserve overall structure: Summary, Experience, Skills, Education
-- Output must be ATS-friendly plain text (no tables, no columns)
-- Keep original employment dates and company names exactly
+RULES (read all carefully before writing anything):
+1. NEVER invent facts. Keep ALL companies, job titles, project names, dates, and metrics EXACTLY as written.
+2. ADD relevant keywords and phrases from the JD naturally into existing bullet points — weave them in, do not append lists.
+3. Only REWRITE bullets that are genuinely weak (vague, passive, no impact). Leave strong bullets alone.
+4. Strengthen improved bullets with a concrete action verb + quantified result WHERE the original already implies it.
+5. Write a concise 2–3 sentence professional summary at the top of the resume, directly aligned with this JD.
+6. Keep the SAME section order and section headings as the original resume. Do not add or remove sections.
+7. Keep every date, company name, and job title 100% identical to the original.
+8. Use the same bullet style as the original (•, -, ▪, etc.) — do not switch or mix.
+9. Preserve the candidate's own writing voice and sentence rhythm. Avoid overly formal or corporate language that sounds robotic.
+10. ATS-safe plain text only — no tables, columns, special characters, or markdown.
+11. The final result must read as a polished, genuinely human-authored resume.
 {extra}
 
 JOB DESCRIPTION:
@@ -214,15 +219,15 @@ JOB DESCRIPTION:
 CANDIDATE'S CURRENT RESUME:
 {resume_text}
 
-Return ONLY valid JSON (no markdown, no extra text) with these exact keys:
+Return ONLY valid JSON (no markdown fences, no extra text) with these exact keys:
 {{
-  "tailored_text": "<full rewritten resume as plain text>",
-  "tailored_summary": "<2-3 sentence summary paragraph>",
-  "tailored_bullets": ["<bullet 1>", "<bullet 2>", ...],
+  "tailored_text": "<full improved resume as plain text — preserve original structure>",
+  "tailored_summary": "<2-3 sentence summary paragraph written for this specific JD>",
+  "tailored_bullets": ["<only the bullets that were changed>"],
   "ats_score": <integer 0-100 estimated ATS match after tailoring>,
-  "improvements": ["<what was improved>", ...],
-  "added_keywords": ["<keyword injected>", ...],
-  "missing_skills": ["<skill in JD but not in resume>", ...]
+  "improvements": ["<brief description of each change made>"],
+  "added_keywords": ["<each JD keyword that was injected>"],
+  "missing_skills": ["<skills in the JD that are absent from the resume and could not be added honestly>"]
 }}"""
 
     raw = _call_claude(prompt, max_tokens=4096)
@@ -265,11 +270,141 @@ def _tailor_mock(resume_text: str, jd_text: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Text → PDF using reportlab
+# PDF style detection — reads the source PDF to reproduce its visual look
 # ──────────────────────────────────────────────────────────────────────────
-def text_to_pdf(text: str, output_path: str | None = None) -> str:
+def detect_pdf_style(pdf_path: str) -> dict:
+    """
+    Analyse an existing PDF resume and extract its visual style parameters.
+    Returns a dict suitable for passing to text_to_pdf(source_style=...).
+    Falls back to sensible defaults on any error.
+    """
+    style: dict = {
+        "font_family":      "Helvetica",
+        "name_font_size":   16.0,
+        "heading_font_size": 12.0,
+        "body_font_size":   10.0,
+        "accent_hex":       "#0a0e1a",
+        "body_hex":         "#1a1a1a",
+        "left_margin_mm":   20.0,
+        "right_margin_mm":  20.0,
+        "top_margin_mm":    16.0,
+        "bottom_margin_mm": 16.0,
+        "use_section_rule": True,   # draw a light rule under section headers
+    }
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            if not pdf.pages:
+                return style
+            page = pdf.pages[0]
+            chars = page.chars
+            if not chars:
+                return style
+
+            # ── Font sizes ───────────────────────────────────────────────
+            size_counts: dict[float, int] = {}
+            for ch in chars:
+                sz = round(float(ch.get("size") or 10.0), 1)
+                size_counts[sz] = size_counts.get(sz, 0) + 1
+
+            all_sizes_desc = sorted(size_counts.keys(), reverse=True)
+            body_sz = max(size_counts, key=size_counts.get)  # most-frequent = body text
+
+            # Heading: next size tier above body
+            heading_sz = next(
+                (s for s in all_sizes_desc if s > body_sz + 0.5), body_sz + 2.0
+            )
+            # Name: next size tier above heading
+            name_sz = next(
+                (s for s in all_sizes_desc if s > heading_sz + 0.5), heading_sz + 4.0
+            )
+
+            style["body_font_size"]    = max(8.0, min(12.0, body_sz))
+            style["heading_font_size"] = max(10.0, min(16.0, heading_sz))
+            style["name_font_size"]    = max(14.0, min(26.0, name_sz))
+
+            # ── Font family ──────────────────────────────────────────────
+            font_names_raw: set[str] = {
+                (ch.get("fontname") or "").lower() for ch in chars[:200]
+            }
+            font_str = " ".join(font_names_raw)
+            if any(x in font_str for x in ("times", "georgia", "palatino", "garamond", "serif")):
+                style["font_family"] = "Times-Roman"
+            elif any(x in font_str for x in ("courier", "mono", "consolata", "inconsolata")):
+                style["font_family"] = "Courier"
+            else:
+                style["font_family"] = "Helvetica"
+
+            # ── Left margin ──────────────────────────────────────────────
+            # 5th-percentile x0 of body-size characters is a reliable margin estimate
+            body_xs = [
+                float(ch["x0"])
+                for ch in chars
+                if ch.get("x0") is not None
+                and round(float(ch.get("size") or 10.0), 1) <= body_sz + 1.0
+            ]
+            if body_xs:
+                body_xs.sort()
+                left_px = body_xs[max(0, int(len(body_xs) * 0.05))]
+                detected_mm = round(left_px / 2.8346, 1)
+                style["left_margin_mm"]  = max(10.0, min(30.0, detected_mm))
+                style["right_margin_mm"] = style["left_margin_mm"]
+
+            # ── Accent colour (dominant colour on large / bold text) ─────
+            for ch in chars:
+                sz = float(ch.get("size") or 0.0)
+                if sz < style["heading_font_size"]:
+                    continue
+                color = ch.get("non_stroking_color") or ch.get("stroking_color")
+                if color is None:
+                    continue
+                if isinstance(color, (list, tuple)) and len(color) == 3:
+                    r, g, b = (float(c) for c in color)
+                    # Skip near-black
+                    if r + g + b < 0.1:
+                        continue
+                    style["accent_hex"] = (
+                        f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+                    )
+                    break
+                elif isinstance(color, (int, float)):
+                    gv = float(color)
+                    if 0.05 < gv < 0.95:   # not pure black / pure white
+                        gi = int(gv * 255)
+                        style["accent_hex"] = f"#{gi:02x}{gi:02x}{gi:02x}"
+                        break
+
+            # ── Detect section rules (horizontal lines) ──────────────────
+            # pdfplumber exposes page.lines; a full-width line = section divider
+            try:
+                page_w = page.width
+                h_lines = [
+                    ln for ln in (page.lines or [])
+                    if abs(ln.get("y0", 0) - ln.get("y1", 0)) < 2
+                    and (ln.get("x1", 0) - ln.get("x0", 0)) > page_w * 0.4
+                ]
+                style["use_section_rule"] = len(h_lines) > 0
+            except Exception:
+                style["use_section_rule"] = True   # default: include rules
+
+    except Exception as e:
+        print(f"  [TAILOR] PDF style detection skipped ({e}) — using defaults")
+
+    return style
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Text → PDF using reportlab (style-aware)
+# ──────────────────────────────────────────────────────────────────────────
+def text_to_pdf(
+    text: str,
+    output_path: str | None = None,
+    source_style: dict | None = None,
+) -> str:
     """
     Convert plain text to a clean, ATS-friendly PDF.
+    Pass source_style (from detect_pdf_style) to reproduce the look of the
+    original resume — same fonts, sizes, colours, and margins.
     Returns the path to the generated PDF.
     Requires:  pip install reportlab
     """
@@ -277,59 +412,96 @@ def text_to_pdf(text: str, output_path: str | None = None) -> str:
         fd, output_path = tempfile.mkstemp(suffix=".pdf", prefix="tailored_resume_")
         os.close(fd)
 
+    # ── Resolve style params (source overrides defaults) ─────────────────
+    st = source_style or {}
+    _font_base   = st.get("font_family", "Helvetica")
+    _name_sz     = float(st.get("name_font_size",    16))
+    _head_sz     = float(st.get("heading_font_size", 12))
+    _body_sz     = float(st.get("body_font_size",    10))
+    _accent_hex  = str(st.get("accent_hex",  "#0a0e1a"))
+    _body_hex    = str(st.get("body_hex",    "#1a1a1a"))
+    _left_mm     = float(st.get("left_margin_mm",    20))
+    _right_mm    = float(st.get("right_margin_mm",   20))
+    _top_mm      = float(st.get("top_margin_mm",     16))
+    _bot_mm      = float(st.get("bottom_margin_mm",  16))
+    _use_rule    = bool(st.get("use_section_rule",   True))
+
+    # Map to reportlab-registered font names
+    _BOLD_MAP = {
+        "Helvetica":  "Helvetica-Bold",
+        "Times-Roman": "Times-Bold",
+        "Courier":    "Courier-Bold",
+    }
+    _ITALIC_MAP = {
+        "Helvetica":  "Helvetica-Oblique",
+        "Times-Roman": "Times-Italic",
+        "Courier":    "Courier-Oblique",
+    }
+    _font_bold   = _BOLD_MAP.get(_font_base, "Helvetica-Bold")
+    _font_italic = _ITALIC_MAP.get(_font_base, "Helvetica-Oblique")
+
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import mm
         from reportlab.lib import colors
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
         from reportlab.lib.enums import TA_LEFT
 
         doc = SimpleDocTemplate(
             output_path,
             pagesize=A4,
-            leftMargin=20 * mm,
-            rightMargin=20 * mm,
-            topMargin=16 * mm,
-            bottomMargin=16 * mm,
+            leftMargin=_left_mm * mm,
+            rightMargin=_right_mm * mm,
+            topMargin=_top_mm * mm,
+            bottomMargin=_bot_mm * mm,
         )
 
         styles = getSampleStyleSheet()
         normal_style = ParagraphStyle(
             "ResumeNormal",
             parent=styles["Normal"],
-            fontSize=10,
-            leading=14,
+            fontName=_font_base,
+            fontSize=_body_sz,
+            leading=_body_sz * 1.4,
             alignment=TA_LEFT,
-            textColor=colors.HexColor("#1a1a1a"),
+            textColor=colors.HexColor(_body_hex),
         )
         heading_style = ParagraphStyle(
             "ResumeHeading",
             parent=styles["Heading2"],
-            fontSize=12,
-            leading=16,
-            spaceBefore=8,
-            spaceAfter=2,
-            textColor=colors.HexColor("#0a0e1a"),
-            fontName="Helvetica-Bold",
+            fontName=_font_bold,
+            fontSize=_head_sz,
+            leading=_head_sz * 1.35,
+            spaceBefore=6,
+            spaceAfter=1,
+            textColor=colors.HexColor(_accent_hex),
         )
         name_style = ParagraphStyle(
             "ResumeName",
             parent=styles["Title"],
-            fontSize=16,
-            leading=20,
+            fontName=_font_bold,
+            fontSize=_name_sz,
+            leading=_name_sz * 1.25,
             spaceBefore=0,
+            spaceAfter=3,
+            textColor=colors.HexColor(_accent_hex),
+        )
+        contact_style = ParagraphStyle(
+            "ResumeContact",
+            parent=normal_style,
+            fontName=_font_italic,
+            fontSize=max(8.0, _body_sz - 1.0),
+            leading=(_body_sz - 1.0) * 1.4,
             spaceAfter=4,
-            textColor=colors.HexColor("#0a0e1a"),
-            fontName="Helvetica-Bold",
+            textColor=colors.HexColor(_body_hex),
         )
         bullet_style = ParagraphStyle(
             "ResumeBullet",
             parent=normal_style,
-            leftIndent=12,
-            firstLineIndent=-12,
-            bulletIndent=0,
-            spaceAfter=2,
+            leftIndent=14,
+            firstLineIndent=-14,
+            spaceAfter=1,
         )
 
         _SECTION_HEADERS = {
@@ -337,40 +509,65 @@ def text_to_pdf(text: str, output_path: str | None = None) -> str:
             "education", "skills", "technical skills", "projects",
             "certifications", "summary", "professional summary",
             "objective", "achievements", "publications", "awards",
+            "languages", "interests", "volunteer", "references",
         }
+
+        def _is_section_header(s: str) -> bool:
+            sl = s.lower().rstrip(":").strip()
+            if sl in _SECTION_HEADERS:
+                return True
+            # Short all-caps line with no bullet = section header
+            if len(s) < 50 and s.isupper() and not s.startswith(("•", "-", "–", "*")):
+                return True
+            return False
 
         story = []
         lines = text.split("\n")
         first_line = True
+        second_line = True   # second non-empty line = contact info
 
         for line in lines:
             stripped = line.strip()
             if not stripped:
-                story.append(Spacer(1, 3))
+                story.append(Spacer(1, 2))
                 continue
 
-            line_lower = stripped.lower().rstrip(":").strip()
+            # Escape XML special chars
+            safe = stripped.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
             if first_line:
                 # First non-empty line = candidate name
-                story.append(Paragraph(stripped.replace("&", "&amp;"), name_style))
+                story.append(Paragraph(safe, name_style))
                 first_line = False
-            elif line_lower in _SECTION_HEADERS or (
-                len(stripped) < 50
-                and stripped.isupper()
-                and not stripped.startswith("•")
-            ):
-                story.append(Paragraph(stripped.replace("&", "&amp;"), heading_style))
-            elif stripped.startswith(("•", "-", "–", "*", "▪")):
-                bullet_text = re.sub(r"^[•\-–*▪]\s*", "", stripped)
-                story.append(
-                    Paragraph(
-                        f"• {bullet_text.replace('&', '&amp;')}",
-                        bullet_style,
+            elif second_line and not _is_section_header(stripped):
+                # Second non-empty line = contact / location info
+                story.append(Paragraph(safe, contact_style))
+                second_line = False
+            elif _is_section_header(stripped):
+                second_line = False  # past the header area
+                story.append(Spacer(1, 4))
+                story.append(Paragraph(safe, heading_style))
+                if _use_rule:
+                    story.append(
+                        HRFlowable(
+                            width="100%",
+                            thickness=0.5,
+                            color=colors.HexColor(_accent_hex),
+                            spaceAfter=2,
+                        )
                     )
+            elif stripped.startswith(("•", "-", "–", "*", "▪", "·")):
+                second_line = False
+                bullet_text = re.sub(r"^[•\-–*▪·]\s*", "", stripped)
+                safe_bullet = (
+                    bullet_text.replace("&", "&amp;")
+                               .replace("<", "&lt;")
+                               .replace(">", "&gt;")
                 )
+                story.append(Paragraph(f"• {safe_bullet}", bullet_style))
             else:
-                story.append(Paragraph(stripped.replace("&", "&amp;"), normal_style))
+                second_line = False
+                story.append(Paragraph(safe, normal_style))
 
         doc.build(story)
         return output_path
@@ -385,6 +582,7 @@ def text_to_pdf(text: str, output_path: str | None = None) -> str:
             "  Run:  pip install reportlab"
         )
         return txt_path
+
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -419,7 +617,8 @@ def tailor_resume_for_job(
         TailorResult dataclass
     """
     # ── 1. Get original text ──────────────────────────────────
-    if os.path.isfile(resume_source):
+    source_pdf_path = resume_source if os.path.isfile(resume_source) else ""
+    if source_pdf_path:
         original_text = file_to_text(resume_source)
         print(f"  [TAILOR] Extracted {len(original_text)} chars from {resume_source}")
     else:
@@ -450,7 +649,22 @@ def tailor_resume_for_job(
     # ── 5. Generate PDF ───────────────────────────────────────
     pdf_path = ""
     if save_pdf:
-        pdf_path = text_to_pdf(tailored_text)
+        # Detect source style for faithful reproduction of the original layout
+        source_style: dict | None = None
+        if source_pdf_path and source_pdf_path.lower().endswith(".pdf"):
+            try:
+                source_style = detect_pdf_style(source_pdf_path)
+                print(
+                    f"  [TAILOR] Source style detected — "
+                    f"font={source_style['font_family']}, "
+                    f"sizes={source_style['name_font_size']:.0f}/"
+                    f"{source_style['heading_font_size']:.0f}/"
+                    f"{source_style['body_font_size']:.0f}, "
+                    f"accent={source_style['accent_hex']}"
+                )
+            except Exception as _se:
+                print(f"  [TAILOR] Style detection failed ({_se}) — using defaults")
+        pdf_path = text_to_pdf(tailored_text, source_style=source_style)
         print(f"  [TAILOR] PDF saved: {pdf_path}")
 
     # ── 6. Build version name ─────────────────────────────────

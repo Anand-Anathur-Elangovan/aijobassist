@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import base64
 import random
 import tempfile
 import requests as http_req
@@ -66,8 +67,8 @@ def _retry_click(page: Page, selector: str, max_retries: int = 3) -> bool:
 # ──────────────────────────────────────────────────────────────
 # Live-logging helper — no-ops gracefully if task_id absent
 # ──────────────────────────────────────────────────────────────
-def _log(task_input: dict, msg: str, level: str = "info") -> None:
-    """Push a log line to Supabase tasks.logs (best-effort, never raises)."""
+def _log(task_input: dict, msg: str, level: str = "info", category: str = "system", meta: dict = None) -> None:
+    """Push a structured log line to Supabase tasks.logs (best-effort, never raises)."""
     task_id = task_input.get("task_id", "")
     print(f"  [LINKEDIN] {msg}")
     if not task_id:
@@ -75,7 +76,7 @@ def _log(task_input: dict, msg: str, level: str = "info") -> None:
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
         from api_client import push_log
-        push_log(task_id, msg, level)
+        push_log(task_id, msg, level, category, meta)
     except Exception:
         pass
 
@@ -111,6 +112,73 @@ def _set_progress(task_input: dict, progress: int, current_job: str = None) -> N
         update_task_progress(task_id, progress, current_job)
     except Exception:
         pass
+
+
+def _request_approval(task_input: dict, page: Page, job_title: str, company: str, job_url: str) -> bool:
+    """
+    For TAILOR_AND_APPLY (semi_auto) mode: pause and wait for Supabase-based user approval
+    before the bot clicks the final Submit button.
+    Returns True  → proceed with submit.
+    Returns False → skip this job.
+    For AUTO_APPLY (semi_auto=False): always returns True immediately.
+    """
+    if not task_input.get("semi_auto", False):
+        return True   # Auto mode — submit without pausing
+
+    task_id = task_input.get("task_id", "")
+    if not task_id:
+        return True   # No task tracking — just submit
+
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+        from api_client import set_waiting_approval, poll_approval_decision
+
+        _log(task_input,
+             f"⏸ Waiting for your approval — {company} — {job_title}",
+             "warning", "approval",
+             {"company": company, "job_title": job_title, "url": job_url})
+
+        # Screenshot the filled form
+        try:
+            screenshot_bytes = page.screenshot(type="jpeg", quality=60)
+            screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
+        except Exception:
+            screenshot_b64 = None
+
+        import datetime as _dt
+        payload = {
+            "job_title":      job_title,
+            "company":        company,
+            "url":            job_url,
+            "screenshot_b64": screenshot_b64,
+            "waiting_since":  _dt.datetime.utcnow().isoformat(),
+        }
+        set_waiting_approval(task_id, payload)
+
+        decision = poll_approval_decision(task_id, timeout_seconds=300)
+
+        if decision == "approved":
+            _log(task_input,
+                 f"✅ Approved — submitting {company} — {job_title}",
+                 "success", "approval",
+                 {"company": company, "job_title": job_title})
+            return True
+        elif decision == "timeout":
+            _log(task_input,
+                 f"⏭ Auto-skipped (no response in 5 min) — {company} — {job_title}",
+                 "skip", "approval",
+                 {"company": company, "job_title": job_title, "skip_reason": "approval_timeout"})
+            return False
+        else:
+            _log(task_input,
+                 f"⏭ Skipped by user — {company} — {job_title}",
+                 "skip", "approval",
+                 {"company": company, "job_title": job_title, "skip_reason": "user_skipped"})
+            return False
+
+    except Exception as _e:
+        _log(task_input, f"⚠️ Approval flow error ({_e}) — submitting anyway", "warning", "approval")
+        return True
 
 
 def _clean_jd_text(raw_text: str) -> str:
@@ -281,26 +349,29 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 l.strip() for l in task_input.get("location", "").split(",") if l.strip()
             ] or [""]
 
-            if favorite_companies:
-                _log(task_input, f"🏢 Targeting {len(favorite_companies)} favourite companies: {', '.join(favorite_companies)}")
+            # ── Direct URL mode: skip keyword search if specific_urls provided ──
+            _li_specific_urls_mode = bool(task_input.get("specific_urls", []))
+
+            if favorite_companies and not _li_specific_urls_mode:
+                _log(task_input, f"🏢 Targeting {len(favorite_companies)} favourite companies: {', '.join(favorite_companies)}", "info", "search", {"count": len(favorite_companies)})
                 for company in favorite_companies:
                     for _kw in _li_kw_list:
                         for _li_loc in _li_loc_list:
                             _loc_tag = f" in '{_li_loc}'" if _li_loc else ""
-                            _log(task_input, f"🔍 Searching '{_kw}' at {company}{_loc_tag}…")
+                            _log(task_input, f"Searching '{_kw}' at {company}{_loc_tag}…", "info", "search", {"job_title": _kw, "company": company})
                             company_jobs = _search_jobs(page, f"{_kw} {company}", _li_loc, task_input)
-                            _log(task_input, f"  Found {len(company_jobs)} jobs at {company}{_loc_tag}", "success")
+                            _log(task_input, f"Found {len(company_jobs)} jobs at {company}{_loc_tag}", "success", "search", {"company": company, "count": len(company_jobs)})
                             for url in company_jobs:
                                 all_jobs.append((url, company))
                     if len(all_jobs) >= max_apply * 5:
                         break
-            else:
+            elif not _li_specific_urls_mode:
                 for _kw in _li_kw_list:
                     for _li_loc in _li_loc_list:
                         _loc_tag = f" in '{_li_loc}'" if _li_loc else " (anywhere)"
-                        _log(task_input, f"Searching for '{_kw}'{_loc_tag}…")
+                        _log(task_input, f"Searching for '{_kw}'{_loc_tag}…", "info", "search", {"job_title": _kw})
                         general_jobs = _search_jobs(page, _kw, _li_loc, task_input)
-                        _log(task_input, f"Found {len(general_jobs)} Easy Apply jobs for '{_kw}'{_loc_tag}", "success")
+                        _log(task_input, f"Found {len(general_jobs)} Easy Apply jobs for '{_kw}'{_loc_tag}", "success", "search", {"job_title": _kw, "count": len(general_jobs)})
                         all_jobs.extend([(url, "") for url in general_jobs])
 
             # Deduplicate URLs while preserving company order
@@ -327,10 +398,17 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     )
                     _li_already_seen = sum(1 for url, _ in unique_jobs if url in _li_seen_urls)
                     if _li_already_seen:
-                        _log(task_input, f"Skipping {_li_already_seen} previously-seen job(s) (30-day history)", "warn")
+                        _log(task_input, f"Skipping {_li_already_seen} previously-seen job(s) (30-day history)", "warning", "skip", {"count": _li_already_seen, "skip_reason": "already_seen"})
                 except Exception as _li_se:
-                    _log(task_input, f"Job history unavailable ({_li_se})", "warn")
+                    _log(task_input, f"Job history unavailable ({_li_se})", "warning", "system")
             unique_jobs = [(url, hint) for url, hint in unique_jobs if url not in _li_seen_urls]
+
+            # ── Direct URL mode: replace search results with specific_urls ──────
+            if _li_specific_urls_mode:
+                _raw_urls = task_input.get("specific_urls", [])
+                _log(task_input, f"🔗 Manual URL mode — {len(_raw_urls)} URL(s) to process directly", "info", "system", {"count": len(_raw_urls)})
+                seen_urls = set()
+                unique_jobs = [(u.strip(), "") for u in _raw_urls if u.strip()]
 
             _set_progress(task_input, 5)
 
@@ -345,7 +423,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 # ── Check pause / stop / live custom prompt ────
                 ctrl = _check_control(task_input)
                 if ctrl.get("stop_requested"):
-                    _log(task_input, "Stop requested by user — halting run", "warn")
+                    _log(task_input, "Stop requested by user — halting run", "warning", "system")
                     break
                 # Allow user to update the custom prompt mid-run
                 live_prompt = ctrl.get("custom_prompt_override")
@@ -362,7 +440,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 progress = 5 + int((applied / max_apply) * 90) if max_apply else 5
                 company_tag = f" [{company_hint}]" if company_hint else ""
                 _set_progress(task_input, progress, job_url)
-                _log(task_input, f"[{applied+1}/{max_apply}]{company_tag} Opening {job_url}")
+                _log(task_input, f"Opening job page", "info", "navigation", {"company": company_hint, "url": job_url})
 
                 success = _apply_to_job(page, job_url, task_input)
                 # Record to job history DB (won't revisit for 30 days)
@@ -382,11 +460,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         pass
                 if success:
                     applied += 1
-                    _log(task_input, f"✅ Applied ({applied}/{max_apply})", "success")
+                    _log(task_input, f"Applied — {company_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": company_hint, "url": job_url})
                     _record_application(task_input, job_url, company_hint)
                 else:
                     skipped += 1
-                    _log(task_input, f"⏭  Skipped ({skipped} total) — trying next job", "warn")
+                    _log(task_input, f"Skipped job ({skipped} total) — trying next", "skip", "skip", {"company": company_hint, "url": job_url})
             else:
                 # The for loop finished without break → pool exhausted
                 if applied < max_apply:
@@ -394,13 +472,13 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
 
             # ── If pool exhausted, search for more jobs and continue ──
             if _exhausted_pool and applied < max_apply:
-                _log(task_input, f"Pool of {total} jobs exhausted (applied {applied}/{max_apply}) — searching for more…", "warn")
+                _log(task_input, f"Pool of {total} jobs exhausted (applied {applied}/{max_apply}) — searching for more…", "warning", "search")
                 # Search next pages with larger offset
                 extra_jobs: list[tuple[str, str]] = []
                 for _kw in _li_kw_list:
                     for _li_loc in _li_loc_list:
                         _loc_tag = f" in '{_li_loc}'" if _li_loc else " (anywhere)"
-                        _log(task_input, f"🔍 Extended search '{_kw}'{_loc_tag}…")
+                        _log(task_input, f"Extended search '{_kw}'{_loc_tag}…", "info", "search", {"job_title": _kw})
                         extra_links = _search_jobs(page, _kw, _li_loc, task_input)
                         extra_jobs.extend([(url, "") for url in extra_links])
                 # Deduplicate and remove already-seen
@@ -434,14 +512,14 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                     pass
                             if success:
                                 applied += 1
-                                _log(task_input, f"✅ Applied ({applied}/{max_apply})", "success")
+                                _log(task_input, f"Applied — {ej_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": ej_hint, "url": ej_url})
                                 _record_application(task_input, ej_url, ej_hint)
                             else:
                                 skipped += 1
-                                _log(task_input, f"⏭  Skipped ({skipped} total) — trying next", "warn")
+                                _log(task_input, f"Skipped job ({skipped} total) — trying next", "skip", "skip", {"url": ej_url})
 
             _set_progress(task_input, 100)
-            _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success")
+            _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success", "system", {"applied": applied, "skipped": skipped})
             return {
                 "applied_count": applied,
                 "skipped_count": skipped,
@@ -2258,19 +2336,21 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     _log(task_input,
                          f"🎯 Match score: {score}% (threshold: {match_threshold}%) "
                          f"| Missing: {', '.join(missing[:4]) or 'none'}",
-                         "info")
+                         "info", "ai_decision",
+                         {"score": score, "threshold": match_threshold, "skip_reason": "below_score_threshold" if score < match_threshold else None})
                     if score < match_threshold:
                         _log(task_input,
-                             f"⏭  Skipped (score {score}% < {match_threshold}%) — {job_url}",
-                             "warn")
+                             f"Skipped — score {score}% below threshold {match_threshold}%",
+                             "skip", "skip",
+                             {"score": score, "threshold": match_threshold, "url": job_url, "skip_reason": "below_score_threshold"})
                         return False
-                    _log(task_input, f"✅ Match score {score}% passed — proceeding to apply", "success")
+                    _log(task_input, f"Match score {score}% passed — proceeding to apply", "success", "ai_decision", {"score": score})
                     task_input = dict(task_input)
                     task_input["_last_match_score"] = score
                 except Exception as _me:
-                    _log(task_input, f"⚠️  Match scoring failed ({_me}) — applying anyway", "warn")
+                    _log(task_input, f"Match scoring failed ({_me}) — applying anyway", "warning", "ai_decision")
             else:
-                _log(task_input, "⚠️  Smart match skipped — no resume text available", "warn")
+_log(task_input, "Smart match skipped — no resume text available", "warning", "ai_decision")
 
         # Store jd_text in task_input so _fill_additional_questions can use it for AI cover note
         if jd_text:
@@ -2288,7 +2368,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                         company       = task_input.get("company", "")
                         role          = task_input.get("role", task_input.get("keywords", ""))
                         custom_prompt = task_input.get("tailor_custom_prompt", "")
-                        _log(task_input, f"✨ Tailoring resume for {role or 'this role'} at {company or 'this company'}…")
+                        _log(task_input, f"Tailoring resume for {role or 'this role'} at {company or 'this company'}…", "info", "tailor", {"company": company, "job_title": role})
                         result = tailor_resume_for_job(
                             resume_source=resume_path,
                             jd_text=jd_text,
@@ -2299,17 +2379,18 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                         )
                         _log(
                             task_input,
-                            f"Match score: {result.score_before:.0f}% → {result.score_after:.0f}%  ATS: {result.ats_score}",
-                            "success",
+                            f"Resume tailored — ATS score {result.score_before:.0f}%→{result.score_after:.0f}%",
+                            "success", "tailor",
+                            {"company": company, "job_title": role, "score": result.score_after},
                         )
                         if result.tailored_pdf_path and os.path.isfile(result.tailored_pdf_path):
                             task_input = dict(task_input)
                             task_input["resume_path"]   = result.tailored_pdf_path
                             task_input["_tailored_pdf"] = result.tailored_pdf_path
                     except Exception as _te:
-                        _log(task_input, f"⚠️  Tailoring failed ({_te}) — applying with original resume", "warn")
+                        _log(task_input, f"Tailoring failed ({_te}) — applying with original resume", "warning", "tailor")
             else:
-                _log(task_input, "⚠️  Could not extract JD text — applying with original resume", "warn")
+                _log(task_input, "Could not extract JD text — applying with original resume", "warning", "tailor")
 
         # ── Find Easy Apply link/button ───────────────────────────
         easy_apply_btn = None
@@ -2408,6 +2489,13 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                         _close_modal(page)
                         return False
                 else:
+                    # ── Approval gate for TAILOR_AND_APPLY ─────────
+                    job_title_str = task_input.get("role", task_input.get("keywords", "this role"))
+                    company_str   = task_input.get("company", "this company")
+                    if not _request_approval(task_input, page, job_title_str, company_str, job_url):
+                        _close_modal(page)
+                        return False
+                    # ───────────────────────────────────────────────
                     submit_btn = page.locator(_SUBMIT_SEL).first
                     human_sleep(0.5, 1.5)  # last-second hesitation before submit
                     human_click(page, locator=submit_btn)

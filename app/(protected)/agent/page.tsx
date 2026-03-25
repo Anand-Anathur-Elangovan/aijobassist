@@ -1,8 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
+import ExecutionModeModal, { type ExecutionMode, type RailwayQuotaInfo } from "@/components/ExecutionModeModal";
+import ApprovalPanel from "@/components/ApprovalPanel";
+import LogPanel from "@/components/LogPanel";
+import type { LogEntry } from "@/lib/types";
 
 type KeyInfo = {
   id: string;
@@ -22,9 +27,100 @@ export default function AgentPage() {
   const [copied, setCopied] = useState(false);
   const [step, setStep] = useState(1);
 
+  // ── Railway Cloud state ──────────────────────────────────────
+  const [railwayConfigured,  setRailwayConfigured]  = useState(false);
+  const [railwayQuota,       setRailwayQuota]        = useState<RailwayQuotaInfo>({ used: 0, limit: 5, remaining: 5 });
+  const [preferredMode,      setPreferredMode]       = useState<ExecutionMode>("own_machine");
+  const [showBanner,         setShowBanner]          = useState(true);
+  const [showExecModal,      setShowExecModal]       = useState(false);
+  const [pendingTaskType,    setPendingTaskType]      = useState<"AUTO_APPLY" | "TAILOR_AND_APPLY">("AUTO_APPLY");
+  const [railwaySessionId,   setRailwaySessionId]    = useState<string | null>(null);
+  const [liveScreenshot,     setLiveScreenshot]      = useState<string | null>(null);
+  const [railwayStatus,      setRailwayStatus]       = useState<"idle" | "running" | "done">("idle");
+  const [railwayProgress,    setRailwayProgress]     = useState(0);
+  const [railwayCurrentJob,  setRailwayCurrentJob]   = useState<string | null>(null);
+  const [railwayLogs,        setRailwayLogs]         = useState<Array<{ message: string; level?: string; ts?: string }>>([]);
+  const [railwayStopping,    setRailwayStopping]     = useState(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+  const evtSourceRef = useRef<EventSource | null>(null);
+
+  // ── Supabase task polling (for approval flow + structured logs) ──
+  const [approvalPayload, setApprovalPayload] = useState<{
+    task_id: string
+    job_title: string
+    company: string
+    url: string
+    screenshot_b64: string | null
+    waiting_since: string
+  } | null>(null);
+  const [taskLogs,        setTaskLogs]        = useState<LogEntry[]>([]);
+  const [taskStatus,      setTaskStatus]      = useState<string | null>(null);
+  const [activeTaskId,    setActiveTaskId]    = useState<string | null>(null);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   useEffect(() => {
     fetchKey();
+    fetchRailwayInfo();
+    // Check if banner was dismissed
+    if (typeof window !== "undefined") {
+      const dismissed = localStorage.getItem("railway_banner_dismissed");
+      if (dismissed === "1") setShowBanner(false);
+    }
   }, [user]);
+
+  // ── Poll Supabase for active task (approval + live logs) ─────
+  useEffect(() => {
+    if (!user) return;
+
+    async function pollActiveTask() {
+      const { data: tasks } = await supabase
+        .from("tasks")
+        .select("id, status, logs, approval_payload")
+        .eq("user_id", user!.id)
+        .in("status", ["PENDING", "RUNNING", "WAITING_APPROVAL"])
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      const task = tasks?.[0];
+      if (!task) {
+        setTaskStatus(null);
+        setApprovalPayload(null);
+        return;
+      }
+
+      setActiveTaskId(task.id);
+      setTaskStatus(task.status);
+
+      // Parse structured logs (handle old plain-string entries for backward compat)
+      const raw: unknown[] = Array.isArray(task.logs) ? task.logs : [];
+      const parsed: LogEntry[] = raw.map((entry) => {
+        if (typeof entry === "string") {
+          return { ts: new Date().toISOString(), level: "info" as const, category: "system" as const, msg: entry, meta: {} };
+        }
+        return entry as LogEntry;
+      });
+      setTaskLogs(parsed);
+
+      // Approval panel
+      if (task.status === "WAITING_APPROVAL" && task.approval_payload) {
+        setApprovalPayload({ ...task.approval_payload, task_id: task.id });
+      } else {
+        setApprovalPayload(null);
+      }
+    }
+
+    // Poll every 2 seconds
+    pollActiveTask();
+    pollIntervalRef.current = setInterval(pollActiveTask, 2000);
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    };
+  }, [user]);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [railwayLogs]);
 
   async function fetchKey() {
     if (!user) return;
@@ -39,6 +135,216 @@ export default function AgentPage() {
     const data = await res.json();
     setKeyInfo(data.key ?? null);
     setLoading(false);
+  }
+
+  // ── Railway helpers ──────────────────────────────────────────
+
+  async function fetchRailwayInfo() {
+    if (!user) return;
+    const session = await supabase.auth.getSession();
+    const token   = session.data.session?.access_token;
+    if (!token) return;
+
+    // Fetch user profile for railway_configured + preferred_execution_mode
+    const { data: profile } = await supabase
+      .from("user_profiles")
+      .select("railway_configured, preferred_execution_mode")
+      .eq("user_id", user.id)
+      .single();
+
+    if (profile) {
+      setRailwayConfigured(!!profile.railway_configured);
+      setPreferredMode((profile.preferred_execution_mode as ExecutionMode) ?? "own_machine");
+    }
+
+    // Fetch today's Railway quota
+    const res = await fetch("/api/railway/status?ping=false", {
+      headers: { Authorization: `Bearer ${token}` },
+    }).catch(() => null);
+    // Quota is fetched via billing endpoint — use Supabase directly
+    const today = new Date().toISOString().split("T")[0];
+    const { data: usageRow } = await supabase
+      .from("railway_daily_usage")
+      .select("minutes_used")
+      .eq("user_id", user.id)
+      .eq("usage_date", today)
+      .single();
+    const used = Number(usageRow?.minutes_used ?? 0);
+    // Get plan limit
+    const { data: sub } = await supabase
+      .from("subscriptions")
+      .select("plan_id")
+      .eq("user_id", user.id)
+      .in("status", ["active", "past_due"])
+      .single();
+    let limit = 5;
+    if (sub?.plan_id) {
+      const { data: pl } = await supabase
+        .from("plan_limits")
+        .select("daily_limit")
+        .eq("plan_id", sub.plan_id)
+        .eq("action_type", "railway_minutes")
+        .single();
+      if (pl) limit = pl.daily_limit;
+    }
+    setRailwayQuota({ used, limit, remaining: Math.max(0, limit - used) });
+    void res; // stop lint warning
+  }
+
+  function openExecutionModal(taskType: "AUTO_APPLY" | "TAILOR_AND_APPLY") {
+    setPendingTaskType(taskType);
+    setShowExecModal(true);
+  }
+
+  async function handleExecutionConfirm(mode: ExecutionMode, remember: boolean) {
+    setShowExecModal(false);
+
+    if (remember) {
+      await supabase
+        .from("user_profiles")
+        .update({ preferred_execution_mode: mode })
+        .eq("user_id", user?.id ?? "");
+      setPreferredMode(mode);
+    }
+
+    if (mode === "own_machine") {
+      // Direct user to the dashboard to start via .exe — existing flow
+      alert("Make sure the VantaHire.exe desktop agent is running, then go to Dashboard and click Apply.");
+      return;
+    }
+
+    // Railway cloud flow
+    await triggerRailwayCloud(pendingTaskType);
+  }
+
+  async function triggerRailwayCloud(taskType: string) {
+    if (!user) return;
+    const session = await supabase.auth.getSession();
+    const token   = session.data.session?.access_token;
+    if (!token) return;
+
+    // Create a task row first, then trigger Railway
+    const { data: newTask, error: taskErr } = await supabase
+      .from("tasks")
+      .insert({
+        user_id:        user.id,
+        type:           taskType,
+        status:         "PENDING",
+        execution_mode: "railway",
+        input:          {},
+      })
+      .select("id")
+      .single();
+
+    if (taskErr || !newTask) {
+      alert("Failed to create task. Please try again.");
+      return;
+    }
+
+    const res = await fetch("/api/railway/trigger", {
+      method:  "POST",
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        task_id:    newTask.id,
+        task_type:  taskType,
+        task_input: {},
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Failed to start Railway job: ${err.error ?? res.statusText}`);
+      return;
+    }
+
+    const data = await res.json();
+    setRailwaySessionId(data.session_id);
+    setRailwayStatus("running");
+    setRailwayLogs([]);
+    setLiveScreenshot(null);
+    setRailwayProgress(0);
+    setRailwayCurrentJob(null);
+
+    // Refresh quota
+    await fetchRailwayInfo();
+
+    // Start SSE screenshot stream
+    startScreenshotStream(data.session_id);
+  }
+
+  function startScreenshotStream(sessionId: string) {
+    // Close any existing stream
+    evtSourceRef.current?.close();
+
+    const evtSource = new EventSource(`/api/railway/stream?session_id=${sessionId}`);
+    evtSourceRef.current = evtSource;
+
+    evtSource.addEventListener("screenshot", (e) => {
+      const payload = JSON.parse(e.data);
+      setLiveScreenshot(`data:image/jpeg;base64,${payload.data}`);
+    });
+
+    evtSource.addEventListener("log", (e) => {
+      const entry = JSON.parse(e.data);
+      setRailwayLogs((prev) => [...prev, entry]);
+    });
+
+    evtSource.addEventListener("progress", (e) => {
+      const payload = JSON.parse(e.data);
+      setRailwayProgress(payload.progress ?? 0);
+      setRailwayCurrentJob(payload.current_job ?? null);
+    });
+
+    evtSource.addEventListener("done", (e) => {
+      const payload = JSON.parse(e.data);
+      setRailwayStatus("done");
+      setRailwayLogs((prev) => [
+        ...prev,
+        { message: `Session ended — status: ${payload.status}`, level: "info", ts: new Date().toISOString() },
+      ]);
+      evtSource.close();
+      evtSourceRef.current = null;
+      fetchRailwayInfo(); // refresh quota
+    });
+
+    evtSource.onerror = () => {
+      setRailwayStatus("done");
+      evtSource.close();
+      evtSourceRef.current = null;
+    };
+  }
+
+  async function stopRailwaySession() {
+    if (!railwaySessionId || railwayStopping) return;
+    setRailwayStopping(true);
+
+    const session = await supabase.auth.getSession();
+    const token   = session.data.session?.access_token;
+    if (!token) { setRailwayStopping(false); return; }
+
+    await fetch("/api/railway/stop", {
+      method:  "POST",
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({ session_id: railwaySessionId }),
+    });
+
+    evtSourceRef.current?.close();
+    setRailwayStatus("done");
+    setRailwayStopping(false);
+    fetchRailwayInfo();
+  }
+
+  function dismissBanner() {
+    setShowBanner(false);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("railway_banner_dismissed", "1");
+    }
   }
 
   async function generateKey() {
@@ -281,6 +587,200 @@ export default function AgentPage() {
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
+
+      {/* ── ExecutionModeModal (global, hidden by default) ───── */}
+      <ExecutionModeModal
+        isOpen={showExecModal}
+        onClose={() => setShowExecModal(false)}
+        onConfirm={handleExecutionConfirm}
+        railwayConfigured={railwayConfigured}
+        quota={railwayQuota}
+        taskType={pendingTaskType}
+        defaultMode={preferredMode}
+      />
+
+      {/* ── Railway setup banner (shown if not yet configured) ── */}
+      {!railwayConfigured && showBanner && (
+        <div className="mb-6 flex items-start gap-3 bg-violet-500/5 border border-violet-500/25 rounded-xl px-4 py-3">
+          <span className="text-violet-400 text-xl shrink-0 mt-0.5">☁️</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-white font-medium">
+              Run automation in the cloud — no install needed
+            </p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Set up Railway Cloud once and launch jobs directly from your browser. Takes about 1 minute.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <Link
+              href="/agent/setup"
+              className="text-xs px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition-all font-medium"
+            >
+              Set up →
+            </Link>
+            <button
+              onClick={dismissBanner}
+              className="text-slate-500 hover:text-slate-300 text-xl leading-none"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Cloud Quick Launch (shown once Railway is configured) ── */}
+      {railwayConfigured && railwayStatus === "idle" && (
+        <div className="mb-6 bg-slate-900/60 border border-violet-500/20 rounded-xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h2 className="font-bold text-white flex items-center gap-2">
+                <span className="text-violet-400">☁️</span> Cloud Quick Launch
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Run directly from browser — no .exe needed
+              </p>
+            </div>
+            <div className="text-right text-xs text-slate-500">
+              <p>{railwayQuota.used.toFixed(1)} / {railwayQuota.limit} min used today</p>
+              <div className="w-28 h-1 bg-slate-700 rounded-full mt-1 overflow-hidden">
+                <div
+                  className="h-full bg-violet-500 rounded-full transition-all"
+                  style={{ width: `${Math.min(100, (railwayQuota.used / railwayQuota.limit) * 100)}%` }}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={() => openExecutionModal("AUTO_APPLY")}
+              disabled={railwayQuota.remaining <= 0}
+              className="flex-1 py-2.5 text-sm font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              🤖 Start Auto Apply
+            </button>
+            <button
+              onClick={() => openExecutionModal("TAILOR_AND_APPLY")}
+              disabled={railwayQuota.remaining <= 0}
+              className="flex-1 py-2.5 text-sm font-semibold rounded-lg bg-violet-600/30 hover:bg-violet-600/50 border border-violet-500/40 text-violet-200 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              ✏️ Start Tailor &amp; Apply
+            </button>
+          </div>
+          {railwayQuota.remaining <= 0 && (
+            <p className="text-xs text-red-400 mt-2 text-center">
+              Daily limit reached. Upgrade your plan for more cloud minutes.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ── Live Railway screenshot panel ───────────────────── */}
+      {railwayStatus !== "idle" && (
+        <div className="mb-6 bg-slate-900/60 border border-violet-500/30 rounded-xl overflow-hidden">
+          {/* Panel header */}
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+            <div className="flex items-center gap-3">
+              {railwayStatus === "running" && (
+                <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />
+              )}
+              <div>
+                <p className="text-sm font-bold text-white">
+                  {railwayStatus === "running" ? "☁️ Cloud Automation Running" : "☁️ Session Ended"}
+                </p>
+                {railwayCurrentJob && (
+                  <p className="text-xs text-slate-400 mt-0.5 truncate max-w-64">{railwayCurrentJob}</p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {/* Progress */}
+              {railwayStatus === "running" && (
+                <div className="flex items-center gap-2">
+                  <div className="w-24 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-violet-500 rounded-full transition-all"
+                      style={{ width: `${railwayProgress}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-400">{railwayProgress}%</span>
+                </div>
+              )}
+              {/* Stop / Close */}
+              {railwayStatus === "running" ? (
+                <button
+                  onClick={stopRailwaySession}
+                  disabled={railwayStopping}
+                  className="px-3 py-1.5 text-xs font-semibold bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded-lg transition-all disabled:opacity-50"
+                >
+                  {railwayStopping ? "Stopping…" : "⏹ Stop"}
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setRailwayStatus("idle"); setRailwaySessionId(null); setLiveScreenshot(null); setRailwayLogs([]); }}
+                  className="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 rounded-lg transition-colors"
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Screenshot + logs side-by-side */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
+            {/* Live screenshot */}
+            <div className="relative bg-slate-950 flex items-center justify-center" style={{ minHeight: "280px" }}>
+              {liveScreenshot ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={liveScreenshot}
+                  alt="Live automation screenshot"
+                  className="w-full object-contain"
+                />
+              ) : (
+                <div className="flex flex-col items-center gap-3 text-slate-600">
+                  {railwayStatus === "running" ? (
+                    <>
+                      <span className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                      <p className="text-xs">Waiting for first screenshot…</p>
+                    </>
+                  ) : (
+                    <p className="text-xs">No screenshot available</p>
+                  )}
+                </div>
+              )}
+              {/* Timestamp overlay */}
+              {liveScreenshot && (
+                <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-slate-400 px-2 py-0.5 rounded">
+                  Live
+                </div>
+              )}
+            </div>
+
+            {/* Logs panel */}
+            <div style={{ minHeight: "280px", maxHeight: "320px" }}>
+              <LogPanel
+                logs={
+                  taskLogs.length > 0
+                    ? taskLogs
+                    : railwayLogs.map((l) => ({
+                        ts: l.ts ?? new Date().toISOString(),
+                        level: (l.level ?? "info") as LogEntry["level"],
+                        category: "system" as const,
+                        msg: l.message,
+                        meta: {},
+                      }))
+                }
+                isRunning={
+                  taskStatus === "RUNNING" ||
+                  taskStatus === "WAITING_APPROVAL" ||
+                  railwayStatus === "running"
+                }
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="mb-10">
         <h1 className="text-3xl font-display font-bold text-white flex items-center gap-3">
@@ -407,6 +907,40 @@ export default function AgentPage() {
           ))}
         </div>
       </div>
+
+      {/* Standalone log panel for own-machine tasks (shown when Railway panel is idle) */}
+      {taskLogs.length > 0 && railwayStatus === "idle" && (
+        <div className="mt-6 h-96">
+          <LogPanel
+            logs={taskLogs}
+            isRunning={taskStatus === "RUNNING" || taskStatus === "WAITING_APPROVAL"}
+          />
+        </div>
+      )}
+
+      {/* Approval modal overlay */}
+      {approvalPayload && (
+        <ApprovalPanel
+          taskId={approvalPayload.task_id}
+          payload={approvalPayload}
+          onDecision={(decision) => {
+            setApprovalPayload(null);
+            setTaskLogs((prev) => [
+              ...prev,
+              {
+                ts: new Date().toISOString(),
+                level: decision === "approved" ? ("success" as const) : ("skip" as const),
+                category: "approval" as const,
+                msg:
+                  decision === "approved"
+                    ? "✅ You approved — bot is submitting…"
+                    : "⏭ You skipped this job",
+                meta: {},
+              },
+            ]);
+          }}
+        />
+      )}
     </div>
   );
 }

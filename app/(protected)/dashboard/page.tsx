@@ -110,7 +110,9 @@ export default function DashboardPage() {
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [platform, setPlatform] = useState<"linkedin" | "naukri">("linkedin");
   const [semiAuto, setSemiAuto] = useState(false);
-  const [applyMode, setApplyMode] = useState<"auto" | "tailor">("auto");
+  const [applyMode, setApplyMode] = useState<"auto" | "tailor" | "url">("auto");
+  const [manualUrls, setManualUrls] = useState("");
+  const [urlTailor, setUrlTailor] = useState(true);
   const [resumeAutoLoaded, setResumeAutoLoaded] = useState(false);
   // Tailor & Apply extra state
   const [tailorPrompt, setTailorPrompt] = useState("");
@@ -238,7 +240,7 @@ export default function DashboardPage() {
         if (p.skill_rating) setSkillRating(String(p.skill_rating));
         if (p.platform) setPlatform(p.platform as "linkedin" | "naukri");
         if (p.semi_auto !== undefined) setSemiAuto(p.semi_auto as boolean);
-        if (p.apply_mode) setApplyMode(p.apply_mode as "auto" | "tailor");
+        if (p.apply_mode) setApplyMode(p.apply_mode as "auto" | "tailor" | "url");
         if (p.auto_cover_letter !== undefined) setAutoCoverLetter(p.auto_cover_letter as boolean);
         if (p.smart_match !== undefined) setSmartMatch(p.smart_match as boolean);
         if (p.match_threshold) setMatchThreshold(p.match_threshold as number);
@@ -363,7 +365,7 @@ export default function DashboardPage() {
       skill_rating: Number(skillRating) || 8,
       platform,
       semi_auto: semiAuto,
-      apply_mode: applyMode,
+      apply_mode: applyMode === "url" ? "auto" : applyMode,  // persist underlying mode, not URL tab
       auto_cover_letter: autoCoverLetter,
       smart_match: smartMatch,
       match_threshold: matchThreshold,
@@ -401,6 +403,60 @@ export default function DashboardPage() {
     await saveProfile(true);
 
     setTaskLoading(true);
+
+    // ── URL Apply mode: validate and create URL_APPLY task ──────────
+    if (applyMode === "url") {
+      const urls = manualUrls
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && (line.includes("linkedin.com") || line.includes("naukri.com")));
+      if (urls.length === 0) {
+        alert("Please enter at least one valid LinkedIn or Naukri job URL (one per line).");
+        setTaskLoading(false);
+        return;
+      }
+      const { error } = await supabase.from("tasks").insert([{
+        user_id: u.id,
+        type: "URL_APPLY",
+        status: "PENDING",
+        input: {
+          manual_urls: urls,
+          tailor_resume: urlTailor,
+          ...(urlTailor && tailorPrompt.trim() && { tailor_custom_prompt: tailorPrompt.trim() }),
+          ...(smartMatch && { smart_match: true, match_threshold: matchThreshold }),
+          // Profile / form-fill fields
+          phone,
+          phone_country: phoneCountry,
+          years_experience: Number(yearsExp),
+          skill_rating: Number(skillRating),
+          notice_period: Number(noticePeriod),
+          ...(currentCity.trim() && { current_city: currentCity.trim() }),
+          ...(linkedinUrl.trim() && { linkedin_url: linkedinUrl.trim() }),
+          ...(githubUrl.trim() && { github_url: githubUrl.trim() }),
+          ...(portfolioUrl.trim() && { portfolio_url: portfolioUrl.trim() }),
+          ...(highestEducation.trim() && { highest_education: highestEducation.trim() }),
+          ...(employments.length > 0 && { employments }),
+          ...(educations.length > 0 && { educations }),
+          ...(projects.length > 0 && { projects }),
+          full_name: u.user_metadata?.full_name || u.email?.split("@")[0] || "",
+          email: u.email || "",
+          ...(linkedinEmail && { linkedin_email: linkedinEmail }),
+          ...(linkedinPassword && { linkedin_password: linkedinPassword }),
+          semi_auto: semiAuto,
+          auto_cover_letter: autoCoverLetter,
+          ...(scheduleEnabled && { schedule_start_hour: scheduleStartHour, schedule_end_hour: scheduleEndHour }),
+        },
+      }]);
+      if (error) {
+        console.error(error);
+        alert("Error creating task: " + error.message);
+      } else {
+        fetchTasks();
+      }
+      setTaskLoading(false);
+      return;
+    }
+
     const taskType = applyMode === "tailor" ? "TAILOR_AND_APPLY" : "AUTO_APPLY";
     const { error } = await supabase.from("tasks").insert([{
       user_id: u.id,
@@ -664,8 +720,12 @@ export default function DashboardPage() {
         </h2>
         <div className="card space-y-4">
           {/* Mode sub-tabs */}
-          <div className="flex gap-2 border-b border-slate-700 pb-3">
-            {([["auto", "🚀 Auto Apply"], ["tailor", "✨ Tailor & Apply"]] as const).map(([mode, label]) => (
+          <div className="flex flex-wrap gap-2 border-b border-slate-700 pb-3">
+            {([
+              ["auto",   "🚀 Auto Apply"],
+              ["tailor", "✨ Tailor & Apply"],
+              ["url",    "🔗 URL Apply"],
+            ] as const).map(([mode, label]) => (
               <button
                 key={mode}
                 onClick={() => setApplyMode(mode)}
@@ -679,6 +739,83 @@ export default function DashboardPage() {
               </button>
             ))}
           </div>
+
+          {/* ── URL Apply mode ──────────────────────────────────────────── */}
+          {applyMode === "url" && (
+            <div className="space-y-3 p-3 rounded-lg border border-sky-400/20 bg-sky-400/5">
+              <p className="font-mono text-xs text-sky-400 uppercase tracking-widest">
+                Apply to specific job URLs directly
+              </p>
+              <p className="font-body text-xs text-slate-400">
+                Paste LinkedIn or Naukri job page URLs (one per line). The bot will open each URL, extract the job
+                description, optionally tailor your resume, and apply — without doing a keyword search.
+              </p>
+              <div>
+                <label className="block font-mono text-xs text-slate-400 mb-1">
+                  Job URLs <span className="text-slate-500">(one per line — LinkedIn or Naukri only)</span>
+                </label>
+                <textarea
+                  rows={6}
+                  placeholder={
+                    "https://www.linkedin.com/jobs/view/3887654321/\nhttps://www.linkedin.com/jobs/view/3991234567/\nhttps://www.naukri.com/job-listings/software-engineer-xyz-123456"
+                  }
+                  value={manualUrls}
+                  onChange={(e) => setManualUrls(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-sky-500 resize-y font-mono"
+                  spellCheck={false}
+                />
+                {/* Platform detection summary */}
+                {manualUrls.trim() && (() => {
+                  const lines = manualUrls.split("\n").map(l => l.trim()).filter(Boolean);
+                  const li = lines.filter(l => l.includes("linkedin.com")).length;
+                  const nk = lines.filter(l => l.includes("naukri.com")).length;
+                  const other = lines.length - li - nk;
+                  return (
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {li > 0 && <span className="text-xs font-mono text-blue-400 bg-blue-500/10 border border-blue-500/30 px-2 py-0.5 rounded">🔵 {li} LinkedIn</span>}
+                      {nk > 0 && <span className="text-xs font-mono text-orange-400 bg-orange-500/10 border border-orange-500/30 px-2 py-0.5 rounded">🟠 {nk} Naukri</span>}
+                      {other > 0 && <span className="text-xs font-mono text-red-400 bg-red-500/10 border border-red-500/30 px-2 py-0.5 rounded">⚠️ {other} unsupported (will be skipped)</span>}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Tailor toggle */}
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-slate-700 bg-slate-800/40">
+                <input
+                  id="url-tailor-toggle"
+                  type="checkbox"
+                  checked={urlTailor}
+                  onChange={(e) => setUrlTailor(e.target.checked)}
+                  className="mt-0.5 accent-amber-400 w-4 h-4 cursor-pointer"
+                />
+                <label htmlFor="url-tailor-toggle" className="cursor-pointer">
+                  <p className="font-body font-semibold text-white text-sm">
+                    ✨ Tailor resume before applying
+                    {urlTailor && <span className="ml-1 text-xs bg-amber-400/15 text-amber-400 px-2 py-0.5 rounded">ON</span>}
+                  </p>
+                  <p className="font-body text-xs text-slate-400 mt-0.5">
+                    For each job, the bot scores your resume against the JD. If the score is below the Smart Match
+                    threshold, it tailors your resume — preserving your original PDF&apos;s look — before applying.
+                  </p>
+                </label>
+              </div>
+
+              {/* Custom tailoring instruction */}
+              {urlTailor && (
+                <div>
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Custom Tailoring Instruction <span className="text-slate-500">(optional)</span></label>
+                  <input
+                    type="text"
+                    placeholder='e.g. "Emphasise React and system design experience"'
+                    value={tailorPrompt}
+                    onChange={(e) => setTailorPrompt(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {applyMode === "tailor" && (
             <div className="space-y-3 p-3 rounded-lg border border-amber-400/20 bg-amber-400/5">
@@ -1816,12 +1953,17 @@ export default function DashboardPage() {
           <div className="flex justify-end">
             <button
               onClick={() => {
-                if (!phone.trim()) { alert("Please enter your phone number first."); return; }
+                if (applyMode !== "url" && !phone.trim()) {
+                  alert("Please enter your phone number first.");
+                  return;
+                }
                 createTask();
               }}
               disabled={taskLoading}
               className={`disabled:opacity-50 text-white font-bold px-5 py-2.5 rounded-lg transition-colors ${
-                applyMode === "tailor"
+                applyMode === "url"
+                  ? "bg-sky-500 hover:bg-sky-400"
+                  : applyMode === "tailor"
                   ? "bg-amber-500 hover:bg-amber-400"
                   : semiAuto
                   ? "bg-amber-500 hover:bg-amber-400"
@@ -1830,6 +1972,8 @@ export default function DashboardPage() {
             >
               {taskLoading
                 ? "Creating…"
+                : applyMode === "url"
+                ? "🔗 Apply to These URLs"
                 : applyMode === "tailor"
                 ? "✨ Start Tailor & Apply"
                 : semiAuto

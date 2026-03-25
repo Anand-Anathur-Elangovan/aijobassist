@@ -6,6 +6,7 @@ Supports full-auto and semi-auto modes.
 
 import os
 import re
+import sys
 import time
 import random
 import tempfile
@@ -26,6 +27,23 @@ NAUKRI_URL       = "https://www.naukri.com"
 NAUKRI_LOGIN_URL = "https://www.naukri.com"   # login is a drawer on homepage now
 NAV_WAIT         = 3
 MAX_APPLY        = 5
+
+
+# ──────────────────────────────────────────────────────────────
+# Live-logging helper — no-ops gracefully if task_id absent
+# ──────────────────────────────────────────────────────────────
+def _log(task_input: dict, msg: str, level: str = "info", category: str = "system", meta: dict = None) -> None:
+    """Push a structured log line to Supabase tasks.logs (best-effort, never raises)."""
+    task_id = task_input.get("task_id", "") if task_input else ""
+    print(f"  [NAUKRI] {msg}")
+    if not task_id:
+        return
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+        from api_client import push_log
+        push_log(task_id, msg, level, category, meta)
+    except Exception:
+        pass
 
 
 # ──────────────────────────────────────────────────────────────
@@ -185,16 +203,22 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
 
             # ── Search each keyword × location, collect fresh (unseen) URLs ─
             _all_jobs: list = []
-            _dedup: set = set(_seen_urls)      # dedup across keywords + locations
-            for _kw in _kw_list:
-                for _loc in _loc_list:
-                    _loc_tag = f" | 📍{_loc}" if _loc else ""
-                    print(f"  [NAUKRI] 🔑 Keyword: '{_kw}'{_loc_tag}")
-                    _kw_jobs = _search_jobs(page, _kw, _loc, task_input)
-                    _fresh   = [u for u in _kw_jobs if u not in _dedup]
-                    _dedup.update(_fresh)
-                    _all_jobs.extend(_fresh)
-                    print(f"  [NAUKRI]   → {len(_fresh)} fresh job(s) found")
+            _naukri_specific_urls = task_input.get("specific_urls", [])
+            if _naukri_specific_urls:
+                # ── Direct URL mode: skip keyword search ─────────────────
+                _log(task_input, f"Manual URL mode — {len(_naukri_specific_urls)} URL(s) provided", "info", "system", {"count": len(_naukri_specific_urls)})
+                _all_jobs = [u.strip() for u in _naukri_specific_urls if u.strip()]
+            else:
+                _dedup: set = set(_seen_urls)      # dedup across keywords + locations
+                for _kw in _kw_list:
+                    for _loc in _loc_list:
+                        _loc_tag = f" | 📍{_loc}" if _loc else ""
+                        print(f"  [NAUKRI] 🔑 Keyword: '{_kw}'{_loc_tag}")
+                        _kw_jobs = _search_jobs(page, _kw, _loc, task_input)
+                        _fresh   = [u for u in _kw_jobs if u not in _dedup]
+                        _dedup.update(_fresh)
+                        _all_jobs.extend(_fresh)
+                        print(f"  [NAUKRI]   → {len(_fresh)} fresh job(s) found")
 
             if not _all_jobs:
                 return {"applied_count": 0, "skipped_count": 0,
@@ -233,15 +257,16 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                 if success:
                     applied += 1
                     _record_application(task_input, job_url, _company_from_url(job_url))
-                    print(f"  [NAUKRI] ✅ Applied ({applied}/{max_apply})")
+                    _log(task_input, f"Applied — {_company_from_url(job_url)} ({applied}/{max_apply})", "success", "submit", {"company": _company_from_url(job_url), "url": job_url})
                 else:
                     skipped += 1
-                    print(f"  [NAUKRI] ⏭  Skipped [{_skip_reason}] ({skipped} total) — trying next job")
+                    _log(task_input, f"Skipped job [{_skip_reason}] ({skipped} total)", "skip", "skip", {"url": job_url, "skip_reason": _skip_reason})
 
             if applied < max_apply and skipped > 0:
                 print(f"  [NAUKRI] Pool exhausted (applied {applied}/{max_apply}, skipped {skipped}) — try broader keywords or lower match threshold")
 
             print(f"  [NAUKRI] Run complete — applied: {applied}, skipped: {skipped}")
+            _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success", "system", {"applied": applied, "skipped": skipped})
             return {
                 "applied_count": applied,
                 "skipped_count": skipped,

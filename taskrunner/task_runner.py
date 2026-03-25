@@ -14,6 +14,13 @@ def run_task(task: dict) -> dict:
     Returns an output dict that gets saved to tasks.output in Supabase.
     Raises an exception on failure so main.py can mark it FAILED.
     """
+    # ── Railway guard: skip tasks meant for cloud execution ───
+    # Tasks with execution_mode='railway' are handled by the Railway
+    # service directly; the local taskrunner must never pick them up.
+    if task.get("execution_mode") == "railway":
+        print(f"  [RUNNER] Skipping task {task.get('id', '')} — execution_mode=railway (handled by cloud)")
+        return {"skipped": True, "reason": "railway_execution_mode"}
+
     from api_client import check_quota, fetch_user_email
 
     task_type  = task.get("type", "UNKNOWN")
@@ -38,6 +45,7 @@ def run_task(task: dict) -> dict:
     quota_map = {
         "AUTO_APPLY":       "auto_apply",
         "TAILOR_AND_APPLY": "semi_auto",
+        "URL_APPLY":        "url_apply",
         "TAILOR_RESUME":    "ai_tailor",
         "GMAIL_DAILY_CHECK":"gmail_scan",
     }
@@ -54,6 +62,8 @@ def run_task(task: dict) -> dict:
         return _handle_auto_apply(task_input)
     elif task_type == "TAILOR_AND_APPLY":
         return _handle_tailor_and_apply(task_input)
+    elif task_type == "URL_APPLY":
+        return _handle_url_apply(task_input)
     elif task_type == "TAILOR_RESUME":
         return _handle_tailor_resume(task_input)
     elif task_type == "GMAIL_DAILY_CHECK":
@@ -70,6 +80,85 @@ def _handle_tailor_and_apply(task_input: dict) -> dict:
     enriched = dict(task_input)
     enriched["tailor_resume"] = True
     return _handle_auto_apply(enriched)
+
+
+def _handle_url_apply(task_input: dict) -> dict:
+    """
+    URL_APPLY: user provides specific LinkedIn / Naukri job URLs.
+    For each URL the bot:
+      1. Opens the job page and extracts the JD
+      2. If tailor_resume=True AND score < match_threshold (default 70), tailors
+         the resume to match the JD (preserving source PDF style)
+      3. Applies using the (tailored) resume
+
+    task_input extra keys:
+        manual_urls   list[str]  explicit job page URLs (LinkedIn or Naukri)
+        tailor_resume bool       if True, tailor resume per-JD before applying
+        match_threshold int      score below which tailoring is triggered (default 70)
+    """
+    from api_client import fetch_latest_resume, fetch_user_tier
+
+    manual_urls = task_input.get("manual_urls", [])
+    if not manual_urls:
+        return {"applied_count": 0, "skipped_count": 0,
+                "message": "No URLs provided for URL_APPLY task"}
+
+    # ── Attach resume URL / text (same as AUTO_APPLY) ─────────────────
+    user_id = task_input.get("user_id", "")
+    if user_id and not task_input.get("resume_url"):
+        resume = fetch_latest_resume(user_id)
+        if resume:
+            content = resume.get("content") or {}
+            task_input = dict(task_input)
+            task_input["resume_url"]      = content.get("file_url", "")
+            task_input["resume_filename"] = content.get("file_name", resume.get("title", "resume.pdf"))
+            if resume.get("parsed_text") and not task_input.get("resume_text"):
+                task_input["resume_text"] = resume["parsed_text"]
+            print(f"  [URL_APPLY] Resume: {task_input['resume_filename']}")
+
+    # ── AI company-site quota ──────────────────────────────────────────
+    if user_id and "_ai_company_site_limit" not in task_input:
+        tier = fetch_user_tier(user_id)
+        task_input["_ai_company_site_limit"] = 2 if tier == "free" else 999
+    task_input.setdefault("_ai_company_site_used", 0)
+
+    # ── Split URLs by platform ─────────────────────────────────────────
+    linkedin_urls = [u for u in manual_urls if "linkedin.com" in u.lower()]
+    naukri_urls   = [u for u in manual_urls if "naukri.com"   in u.lower()]
+    other_urls    = [u for u in manual_urls
+                     if u not in linkedin_urls and u not in naukri_urls]
+    if other_urls:
+        print(f"  [URL_APPLY] ⚠️  {len(other_urls)} URL(s) are not LinkedIn or Naukri and will be skipped: {other_urls[:3]}")
+
+    total_applied = 0
+    total_skipped = 0
+    messages: list[str] = []
+
+    if linkedin_urls:
+        li_input = dict(task_input)
+        li_input["platform"]      = "linkedin"
+        li_input["specific_urls"] = linkedin_urls
+        print(f"  [URL_APPLY] Processing {len(linkedin_urls)} LinkedIn URL(s)…")
+        result = apply_linkedin_jobs(li_input)
+        total_applied += result.get("applied_count", 0)
+        total_skipped += result.get("skipped_count", 0)
+        messages.append(f"LinkedIn: {result.get('applied_count', 0)} applied")
+
+    if naukri_urls:
+        nk_input = dict(task_input)
+        nk_input["platform"]      = "naukri"
+        nk_input["specific_urls"] = naukri_urls
+        print(f"  [URL_APPLY] Processing {len(naukri_urls)} Naukri URL(s)…")
+        result = apply_naukri_jobs(nk_input)
+        total_applied += result.get("applied_count", 0)
+        total_skipped += result.get("skipped_count", 0)
+        messages.append(f"Naukri: {result.get('applied_count', 0)} applied")
+
+    return {
+        "applied_count": total_applied,
+        "skipped_count": total_skipped,
+        "message": " | ".join(messages) if messages else "No URLs processed",
+    }
 
 
 def _handle_tailor_resume(task_input: dict) -> dict:

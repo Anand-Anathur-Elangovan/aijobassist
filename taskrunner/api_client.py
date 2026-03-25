@@ -57,24 +57,28 @@ def update_task(task_id: str, status: str, output: dict = None, error: str = Non
         print(f"[ERROR] update_task: {response.status_code} {response.text}")
 
 
-def push_log(task_id: str, msg: str, level: str = "info") -> None:
+def push_log(task_id: str, msg: str, level: str = "info", category: str = "system", meta: dict = None) -> None:
     """
-    Append a single log line to tasks.logs  (JSONB array).
-    Each entry: { "ts": "<ISO>", "level": "info|warn|error|success", "msg": "..." }
-    Uses Supabase RPC so we can atomically append without a read-modify-write race.
-    Falls back to a simple PATCH if the RPC is not installed yet.
+    Append a structured log entry to tasks.logs (JSONB array).
+    Entry shape: { ts, level, category, msg, meta }
+    Levels:     info | success | warning | error | skip | ai | fill
+    Categories: navigation | search | form_fill | ai_decision | submit | skip | tailor | system | approval
+    Backward-compatible: old callers passing only (task_id, msg) or (task_id, msg, level) still work.
+    Uses Supabase RPC for atomic append; falls back to read-modify-write if RPC unavailable.
     """
     entry = {
-        "ts":    datetime.now(timezone.utc).strftime("%H:%M:%S"),
-        "level": level,
-        "msg":   msg,
+        "ts":       datetime.utcnow().isoformat() + "Z",
+        "level":    level,
+        "category": category,
+        "msg":      msg,
+        "meta":     meta or {},
     }
     # Try RPC approach first (requires fn append_task_log in Supabase)
     rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/append_task_log"
     resp = requests.post(
         rpc_url,
         headers=HEADERS,
-        json={"p_task_id": task_id, "p_entry": entry},
+        json={"task_id": task_id, "entry": entry},
     )
     if resp.status_code in (200, 204):
         return
@@ -413,6 +417,69 @@ def reset_seen_jobs(user_id: str, platform: str = None,
     if skip_reason:
         url += f"&skip_reason=eq.{skip_reason}"
     requests.delete(url, headers=HEADERS)
+
+
+# ── Semi-auto approval flow ────────────────────────────────────
+
+def set_waiting_approval(task_id: str, payload: dict) -> None:
+    """
+    Pause the task and store the approval payload so the web app can show the
+    ApprovalPanel. Called by the bot just before it would click Submit.
+    payload keys: job_title, company, url, screenshot_b64, waiting_since
+    """
+    url  = f"{SUPABASE_URL}/rest/v1/tasks?id=eq.{task_id}"
+    data = {
+        "status":            "WAITING_APPROVAL",
+        "approval_decision": None,
+        "approval_payload":  payload,
+    }
+    resp = requests.patch(url, headers=HEADERS, json=data)
+    if resp.status_code not in (200, 204):
+        print(f"[ERROR] set_waiting_approval: {resp.status_code} {resp.text}")
+
+
+def poll_approval_decision(task_id: str, timeout_seconds: int = 300) -> str:
+    """
+    Poll Supabase every 1 s for approval_decision.
+    Returns 'approved', 'skipped', or 'timeout' after timeout_seconds.
+    Resets task status back to RUNNING once a decision is received.
+    """
+    import time as _time
+    poll_url = (
+        f"{SUPABASE_URL}/rest/v1/tasks"
+        f"?id=eq.{task_id}&select=approval_decision,stop_requested"
+    )
+    for _ in range(timeout_seconds):
+        _time.sleep(1)
+        resp = requests.get(poll_url, headers=HEADERS)
+        if resp.status_code == 200:
+            rows = resp.json()
+            if rows:
+                task = rows[0]
+                if task.get("stop_requested"):
+                    _resume_task(task_id)
+                    return "skipped"
+                decision = task.get("approval_decision")
+                if decision in ("approved", "skipped"):
+                    _resume_task(task_id)
+                    return decision
+    # Timeout — auto-skip
+    requests.patch(
+        f"{SUPABASE_URL}/rest/v1/tasks?id=eq.{task_id}",
+        headers=HEADERS,
+        json={"status": "RUNNING", "approval_payload": None, "approval_decision": "skipped"},
+    )
+    return "timeout"
+
+
+def _resume_task(task_id: str) -> None:
+    """Internal helper: set task back to RUNNING and clear approval state."""
+    requests.patch(
+        f"{SUPABASE_URL}/rest/v1/tasks?id=eq.{task_id}",
+        headers=HEADERS,
+        json={"status": "RUNNING", "approval_payload": None},
+    )
+
 
 
 def save_cover_letter(user_id: str, job_id: str | None,
