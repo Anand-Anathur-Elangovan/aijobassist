@@ -32,5 +32,5 @@ ENV PYTHONPATH=/app:/app/taskrunner
 # Railway injects all env vars — no .env file needed at runtime
 ENV PYTHONUNBUFFERED=1
 
-# Start the task runner
+# Start the task runner 
 CMD ["python", "taskrunner/main.py"]
