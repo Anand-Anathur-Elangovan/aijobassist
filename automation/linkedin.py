@@ -317,8 +317,9 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             print("  [LINKEDIN] ⚠️  Tailor mode requested but no resume available — tailoring will be skipped")
 
     print("  [LINKEDIN] Launching browser…")
+    _headless = os.environ.get("TASK_RUNNER_ENV") == "railway"
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, args=stealth_launch_args())
+        browser = p.chromium.launch(headless=_headless, args=stealth_launch_args())
         context = browser.new_context(**stealth_context_options())
         page    = context.new_page()
         inject_stealth(page)

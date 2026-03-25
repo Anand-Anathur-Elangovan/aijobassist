@@ -12,7 +12,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed — rely on shell environment
 
-from api_client import fetch_pending_tasks, update_task, SUPABASE_URL, HEADERS, increment_usage
+from api_client import fetch_pending_tasks, update_task, SUPABASE_URL, HEADERS, increment_usage, record_railway_usage
 from task_runner import run_task
 
 POLL_INTERVAL  = 10   # seconds between task polls
@@ -103,6 +103,20 @@ def main():
 
             update_task(task_id, "RUNNING")
             print(f"[STATUS] {task_id} → RUNNING")
+            task_start_time = datetime.now(timezone.utc)
+
+            # Mark session as running with started_at (authoritative start time for billing)
+            if is_railway:
+                session_id = (task.get("input") or {}).get("session_id", "")
+                if session_id:
+                    try:
+                        requests.patch(
+                            f"{SUPABASE_URL}/rest/v1/railway_sessions?id=eq.{session_id}",
+                            headers={**HEADERS, "Prefer": "return=minimal"},
+                            json={"status": "running", "started_at": task_start_time.isoformat()},
+                        )
+                    except Exception:
+                        pass
 
             try:
                 output = run_task(task)
@@ -122,11 +136,25 @@ def main():
                 if action and uid:
                     increment_usage(uid, action)
 
+                # Record Railway minutes used (only on Railway container)
+                if is_railway and uid:
+                    duration = int((datetime.now(timezone.utc) - task_start_time).total_seconds())
+                    session_id = (task.get("input") or {}).get("session_id", "")
+                    record_railway_usage(uid, session_id, duration, status="completed")
+
             except Exception as e:
                 error_msg = str(e)
                 update_task(task_id, "FAILED", error=error_msg)
                 print(f"[STATUS] {task_id} → FAILED  error={error_msg}")
                 ran_any_task = True
+
+                # Record Railway minutes even on failure (user still consumed time)
+                if is_railway:
+                    uid = task.get("user_id", "")
+                    if uid:
+                        duration = int((datetime.now(timezone.utc) - task_start_time).total_seconds())
+                        session_id = (task.get("input") or {}).get("session_id", "")
+                        record_railway_usage(uid, session_id, duration, status="failed")
 
         else:
             # No pending tasks

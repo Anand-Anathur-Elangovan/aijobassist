@@ -182,6 +182,40 @@ def increment_usage(user_id: str, action_type: str) -> bool:
     return resp.ok
 
 
+def record_railway_usage(user_id: str, session_id: str, duration_seconds: int, status: str = "completed") -> None:
+    """
+    Record railway minutes used after a session ends on Railway.
+    Updates railway_sessions (ended_at, duration_seconds, status) and
+    increments railway_daily_usage via the increment_railway_minutes RPC.
+    Called by main.py after each task completes/fails.
+    """
+    if not user_id or not session_id:
+        return
+    minutes_used = round(duration_seconds / 60, 2)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    today   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # 1. Close the railway_session row
+    requests.patch(
+        f"{SUPABASE_URL}/rest/v1/railway_sessions?id=eq.{session_id}",
+        headers={**HEADERS, "Prefer": "return=minimal"},
+        json={"status": status, "ended_at": now_iso, "duration_seconds": duration_seconds},
+    )
+    # 2. Add minutes to daily usage bucket (RPC handles upsert atomically)
+    rpc_url = f"{SUPABASE_URL}/rest/v1/rpc/increment_railway_minutes"
+    resp = requests.post(
+        rpc_url, headers=HEADERS,
+        json={"p_user_id": user_id, "p_date": today, "p_minutes": minutes_used},
+    )
+    if not resp.ok:
+        # Fallback: manual upsert if RPC not yet deployed
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/railway_daily_usage",
+            headers={**HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal"},
+            json={"user_id": user_id, "usage_date": today, "minutes_used": minutes_used},
+        )
+    print(f"[USAGE] Railway {minutes_used:.1f} min recorded for user {user_id[:8]}… session {session_id[:8]}…")
+
+
 def record_application(user_id: str, company: str, role: str, job_url: str,
                         followup_days: int = 3, ats_score: int = None,
                         resume_id: str = None) -> str | None:
