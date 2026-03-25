@@ -2527,15 +2527,15 @@ export default function DashboardPage() {
                       <span className={
                         entry.level === "success" ? "text-emerald-400" :
                         entry.level === "error"   ? "text-red-400" :
-                        entry.level === "warn"    ? "text-amber-400" :
+                        entry.level === "warning" ? "text-amber-400" :
                         "text-slate-400"
                       }>
-                        {entry.level === "success" ? "✅" : entry.level === "error" ? "❌" : entry.level === "warn" ? "⚠" : "·"}
+                        {entry.level === "success" ? "✅" : entry.level === "error" ? "❌" : entry.level === "warning" ? "⚠" : "·"}
                       </span>
                       <span className={
                         entry.level === "success" ? "text-emerald-300" :
                         entry.level === "error"   ? "text-red-300" :
-                        entry.level === "warn"    ? "text-amber-300" :
+                        entry.level === "warning" ? "text-amber-300" :
                         "text-slate-300"
                       }>{entry.msg}</span>
                     </div>
