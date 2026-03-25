@@ -304,7 +304,7 @@ export default function AgentPage() {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       alert(`Failed to start Railway job: ${err.error ?? res.statusText}`);
-      return;
+      return; 
     }
 
     const data = await res.json();
