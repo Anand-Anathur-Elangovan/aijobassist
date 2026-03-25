@@ -479,11 +479,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         pass
                 if success:
                     applied += 1
-                    _log(task_input, f"Applied — {company_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": company_hint, "url": job_url})
+                    _log(task_input, f"✅ Applied — {company_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": company_hint, "url": job_url, "job_title": task_input.get("_page_job_title", "")})
                     _record_application(task_input, job_url, company_hint)
                 else:
                     skipped += 1
-                    _log(task_input, f"Skipped job ({skipped} total) — trying next", "skip", "skip", {"company": company_hint, "url": job_url})
+                    _log(task_input, f"⏭ Skipped — {company_hint or 'job'} ({skipped} total)", "skip", "skip", {"company": company_hint, "url": job_url, "job_title": task_input.get("_page_job_title", "")})
             else:
                 # The for loop finished without break → pool exhausted
                 if applied < max_apply:
@@ -531,11 +531,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                     pass
                             if success:
                                 applied += 1
-                                _log(task_input, f"Applied — {ej_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": ej_hint, "url": ej_url})
+                                _log(task_input, f"✅ Applied — {ej_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": ej_hint, "url": ej_url, "job_title": task_input.get("_page_job_title", "")})
                                 _record_application(task_input, ej_url, ej_hint)
                             else:
                                 skipped += 1
-                                _log(task_input, f"Skipped job ({skipped} total) — trying next", "skip", "skip", {"url": ej_url})
+                                _log(task_input, f"⏭ Skipped — {ej_hint or 'job'} ({skipped} total)", "skip", "skip", {"url": ej_url, "job_title": task_input.get("_page_job_title", "")})
 
             _set_progress(task_input, 100)
             _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success", "system", {"applied": applied, "skipped": skipped})
@@ -2261,6 +2261,47 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
     human_sleep(NAV_WAIT, NAV_WAIT + 2)
 
     try:
+        # ── Extract job title & company from page ────────────────
+        _page_job_title = ""
+        _page_company = task_input.get("company", "")
+        try:
+            for _title_sel in [
+                "h1.t-24", "h1.jobs-unified-top-card__job-title",
+                "h1[class*='topcard__title']", "h1.job-title",
+                "h2.t-24", "h1",
+            ]:
+                _title_el = page.locator(_title_sel).first
+                if _title_el.count() > 0:
+                    _page_job_title = (_title_el.text_content() or "").strip()[:120]
+                    if _page_job_title:
+                        break
+        except Exception:
+            pass
+        if not _page_company:
+            try:
+                for _co_sel in [
+                    "a.ember-view.t-black.t-normal span",
+                    "div.job-details-jobs-unified-top-card__company-name a",
+                    "span.jobs-unified-top-card__company-name",
+                    "a[class*='topcard__org-name-link']",
+                ]:
+                    _co_el = page.locator(_co_sel).first
+                    if _co_el.count() > 0:
+                        _page_company = (_co_el.text_content() or "").strip()[:80]
+                        if _page_company:
+                            break
+            except Exception:
+                pass
+        # Store in task_input for downstream use (logs, tailoring, etc.)
+        if _page_job_title:
+            task_input = dict(task_input)
+            task_input["_page_job_title"] = _page_job_title
+        if _page_company and not task_input.get("company"):
+            task_input = dict(task_input)
+            task_input["company"] = _page_company
+
+        _log(task_input, f"Reviewing: {_page_job_title or 'untitled'} at {_page_company or 'unknown company'}",
+             "info", "navigation", {"job_title": _page_job_title, "company": _page_company, "url": job_url})
         # ── Skip if already applied ───────────────────────────────
         try:
             if page.locator(

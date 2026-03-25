@@ -46,6 +46,19 @@ def _log(task_input: dict, msg: str, level: str = "info", category: str = "syste
         pass
 
 
+def _push_screenshot(task_input: dict, page) -> None:
+    """Push a live screenshot to railway_sessions (cloud mode only, best-effort)."""
+    session_id = task_input.get("session_id", "")
+    if not session_id:
+        return
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+        from api_client import push_screenshot
+        push_screenshot(session_id, page)
+    except Exception:
+        pass
+
+
 # ──────────────────────────────────────────────────────────────
 # Retry helpers
 # ──────────────────────────────────────────────────────────────
@@ -159,6 +172,9 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
             if not _login(page, task_input):
                 return {"applied_count": 0, "skipped_count": 0, "message": "Login failed or cancelled"}
 
+            # Screenshot after login
+            _push_screenshot(task_input, page)
+
             # ── Build keyword list (up to 3 keywords, sequential) ────
             _kw_list = [
                 k.strip() for k in [
@@ -237,6 +253,8 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                 task_input["_last_skip_reason"]   = "skipped"  # reset before each job
                 task_input["_last_skip_metadata"] = {}
                 success = _apply_to_job(page, job_url, task_input)
+                # Push screenshot after each application attempt (cloud mode)
+                _push_screenshot(task_input, page)
                 _skip_reason = task_input.get("_last_skip_reason", "skipped")
                 _skip_meta   = dict(task_input.get("_last_skip_metadata") or {})
                 if _skip_reason == "smart_match" and _resume_fp:
@@ -258,10 +276,12 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                 if success:
                     applied += 1
                     _record_application(task_input, job_url, _company_from_url(job_url))
-                    _log(task_input, f"Applied — {_company_from_url(job_url)} ({applied}/{max_apply})", "success", "submit", {"company": _company_from_url(job_url), "url": job_url})
+                    _jt = task_input.get("_page_job_title", "")
+                    _log(task_input, f"✅ Applied — {_company_from_url(job_url)} ({applied}/{max_apply})", "success", "submit", {"company": _company_from_url(job_url), "url": job_url, "job_title": _jt})
                 else:
                     skipped += 1
-                    _log(task_input, f"Skipped job [{_skip_reason}] ({skipped} total)", "skip", "skip", {"url": job_url, "skip_reason": _skip_reason})
+                    _jt = task_input.get("_page_job_title", "")
+                    _log(task_input, f"⏭ Skipped — {_company_from_url(job_url)} [{_skip_reason}] ({skipped} total)", "skip", "skip", {"url": job_url, "skip_reason": _skip_reason, "company": _company_from_url(job_url), "job_title": _jt})
 
             if applied < max_apply and skipped > 0:
                 print(f"  [NAUKRI] Pool exhausted (applied {applied}/{max_apply}, skipped {skipped}) — try broader keywords or lower match threshold")
@@ -633,6 +653,43 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
     human_sleep(NAV_WAIT, NAV_WAIT + 2)
 
     try:
+        # ── Extract job title & company from page ────────────────
+        _page_job_title = ""
+        _page_company = ""
+        try:
+            for _title_sel in [
+                "h1.styles_jd-header-title__rZwM1",
+                "h1[class*='jd-header-title']",
+                "h1.jd-header-title",
+                "h1",
+            ]:
+                _title_el = page.locator(_title_sel).first
+                if _title_el.count() > 0:
+                    _page_job_title = (_title_el.text_content() or "").strip()[:120]
+                    if _page_job_title:
+                        break
+        except Exception:
+            pass
+        try:
+            for _co_sel in [
+                "a.styles_jd-header-comp-name__MvqAI",
+                "a[class*='jd-header-comp-name']",
+                "a[class*='comp-name']",
+            ]:
+                _co_el = page.locator(_co_sel).first
+                if _co_el.count() > 0:
+                    _page_company = (_co_el.text_content() or "").strip()[:80]
+                    if _page_company:
+                        break
+        except Exception:
+            pass
+        if not _page_company:
+            _page_company = _company_from_url(job_url)
+        if _page_job_title:
+            task_input = dict(task_input)
+            task_input["_page_job_title"] = _page_job_title
+        _log(task_input, f"Reviewing: {_page_job_title or 'untitled'} at {_page_company or 'unknown'}",
+             "info", "navigation", {"job_title": _page_job_title, "company": _page_company, "url": job_url})
         # ── Skip if already applied ───────────────────────────────
         try:
             already_applied = page.locator(

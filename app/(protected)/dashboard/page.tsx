@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { getResumes, getJobs } from "@/lib/supabase";
 import { supabase } from "@/lib/supabase";
 import { useSubscription } from "@/components/SubscriptionGuard";
+import LogPanel from "@/components/LogPanel";
+import type { LogEntry } from "@/lib/types";
 
 type ResumeRow = { id: string; title: string; created_at: string; parsed_text?: string };
 type JobRow = { id: string; company: string; role: string; status: string };
@@ -170,6 +172,23 @@ export default function DashboardPage() {
   // Job history reset
   const [resetHistoryLoading, setResetHistoryLoading] = useState(false);
   const [resetSmartMatchLoading, setResetSmartMatchLoading] = useState(false);
+
+  // ── Cloud execution state ──────────────────────────────────
+  const [execMode, setExecMode] = useState<"local" | "cloud">("local");
+  const [railwayConfigured, setRailwayConfigured] = useState(false);
+  const [railwayQuota, setRailwayQuota] = useState<{ used: number; limit: number; remaining: number }>({ used: 0, limit: 5, remaining: 5 });
+  const [railwaySessionId, setRailwaySessionId] = useState<string | null>(null);
+  const [railwayTaskId, setRailwayTaskId] = useState<string | null>(null);
+  const [liveScreenshot, setLiveScreenshot] = useState<string | null>(null);
+  const [railwayStatus, setRailwayStatus] = useState<"idle" | "running" | "done">("idle");
+  const [railwayProgress, setRailwayProgress] = useState(0);
+  const [railwayCurrentJob, setRailwayCurrentJob] = useState<string | null>(null);
+  const [railwayLogs, setRailwayLogs] = useState<Array<{ message: string; level?: string; ts?: string }>>([]);
+  const [railwayStopping, setRailwayStopping] = useState(false);
+  const [showScreenshot, setShowScreenshot] = useState(true);
+  const cloudPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cloudStoppedRef = useRef(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
   const fetchTasks = async () => {
     const { data } = await supabase.from("tasks").select("*").order("created_at", { ascending: false });
@@ -399,6 +418,14 @@ export default function DashboardPage() {
     const u = userData.user;
     if (!u) { alert("User not logged in"); return; }
 
+    // ── Credential validation for auto/tailor modes ──────────
+    if (applyMode !== "url" && !semiAuto) {
+      if (!linkedinEmail.trim() || !linkedinPassword.trim()) {
+        alert(`Please enter your ${platform === "linkedin" ? "LinkedIn" : "Naukri"} email and password before starting Auto Apply.\n\nYour credentials are only used to log in during the automation run.`);
+        return;
+      }
+    }
+
     // Auto-save profile before creating task
     await saveProfile(true);
 
@@ -458,10 +485,12 @@ export default function DashboardPage() {
     }
 
     const taskType = applyMode === "tailor" ? "TAILOR_AND_APPLY" : "AUTO_APPLY";
-    const { error } = await supabase.from("tasks").insert([{
+    const isCloud = execMode === "cloud" && railwayConfigured;
+    const { data: newTask, error } = await supabase.from("tasks").insert([{
       user_id: u.id,
       type: taskType,
       status: "PENDING",
+      ...(isCloud && { execution_mode: "railway" }),
       input: {
         platform,
         semi_auto: semiAuto,
@@ -518,13 +547,41 @@ export default function DashboardPage() {
           schedule_end_hour:   scheduleEndHour,
         }),
       },
-    }]);
+    }]).select("id").single();
 
-    if (error) {
+    if (error || !newTask) {
       console.error(error);
-      alert("Error creating task: " + error.message);
+      alert("Error creating task: " + (error?.message ?? "Unknown"));
     } else {
       fetchTasks();
+
+      // ── If cloud mode, trigger Railway ──────────────────────
+      if (isCloud) {
+        const session = await supabase.auth.getSession();
+        const token = session.data.session?.access_token;
+        if (token) {
+          const res = await fetch("/api/railway/trigger", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ task_id: newTask.id, task_type: taskType, task_input: {} }),
+          });
+          if (res.ok) {
+            const triggerData = await res.json();
+            setRailwaySessionId(triggerData.session_id);
+            setRailwayTaskId(newTask.id);
+            setRailwayStatus("running");
+            setRailwayLogs([]);
+            setLiveScreenshot(null);
+            setRailwayProgress(0);
+            setRailwayCurrentJob(null);
+            startCloudPoll(triggerData.session_id, newTask.id);
+            fetchRailwayInfo();
+          } else {
+            const err = await res.json().catch(() => ({}));
+            alert(`Failed to start cloud job: ${err.error ?? res.statusText}`);
+          }
+        }
+      }
     }
     setTaskLoading(false);
   };
@@ -597,6 +654,154 @@ export default function DashboardPage() {
     setLivePromptSaving(false);
     setLivePrompt("");
   };
+
+  // ── Cloud / Railway helpers ────────────────────────────────
+  useEffect(() => {
+    if (!user) return;
+    fetchRailwayInfo();
+  }, [user]);
+
+  async function fetchRailwayInfo() {
+    if (!user) return;
+    const session = await supabase.auth.getSession();
+    const token = session.data.session?.access_token;
+    if (!token) return;
+
+    const { data: profile } = await supabase
+      .from("user_profiles")
+      .select("railway_configured, preferred_execution_mode")
+      .eq("user_id", user.id)
+      .single();
+
+    if (profile) {
+      if (profile.preferred_execution_mode === "railway") setExecMode("cloud");
+      if (profile.railway_configured) {
+        setRailwayConfigured(true);
+      } else {
+        try {
+          const ping = await fetch("/api/railway/status?ping=true", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (ping.ok) {
+            const pj = await ping.json();
+            if (pj.reachable) {
+              setRailwayConfigured(true);
+              await supabase.from("user_profiles").update({ railway_configured: true }).eq("user_id", user.id);
+            }
+          }
+        } catch { /* Railway unreachable */ }
+      }
+    }
+
+    const today = new Date().toISOString().split("T")[0];
+    const { data: usageRow } = await supabase
+      .from("railway_daily_usage")
+      .select("minutes_used")
+      .eq("user_id", user.id)
+      .eq("usage_date", today)
+      .maybeSingle();
+    const used = Number(usageRow?.minutes_used ?? 0);
+    const { data: sub } = await supabase
+      .from("subscriptions")
+      .select("plan_id")
+      .eq("user_id", user.id)
+      .in("status", ["active", "past_due"])
+      .maybeSingle();
+    let limit = 5;
+    if (sub?.plan_id) {
+      const { data: pl } = await supabase
+        .from("plan_limits")
+        .select("daily_limit")
+        .eq("plan_id", sub.plan_id)
+        .eq("action_type", "railway_minutes")
+        .maybeSingle();
+      if (pl) limit = pl.daily_limit;
+    }
+    setRailwayQuota({ used, limit, remaining: Math.max(0, limit - used) });
+  }
+
+  function stopCloudPoll() {
+    cloudStoppedRef.current = true;
+    if (cloudPollRef.current) { clearTimeout(cloudPollRef.current); cloudPollRef.current = null; }
+  }
+
+  function startCloudPoll(sessionId: string, taskId: string) {
+    stopCloudPoll();
+    cloudStoppedRef.current = false;
+    let lastLogCount = 0;
+
+    async function pollCloud() {
+      if (cloudStoppedRef.current) return;
+
+      const { data: sess } = await supabase
+        .from("railway_sessions")
+        .select("status, latest_screenshot")
+        .eq("id", sessionId)
+        .single();
+
+      if (sess?.latest_screenshot) {
+        setLiveScreenshot(`data:image/jpeg;base64,${sess.latest_screenshot}`);
+      }
+
+      const { data: task } = await supabase
+        .from("tasks")
+        .select("status, progress, current_job, logs, output")
+        .eq("id", taskId)
+        .single();
+
+      if (task) {
+        const logs = Array.isArray(task.logs) ? task.logs : [];
+        if (logs.length > lastLogCount) {
+          const newEntries = logs.slice(lastLogCount).map((e: unknown) =>
+            typeof e === "string" ? { message: e, level: "info", ts: new Date().toISOString() }
+              : (e as { message?: string; msg?: string; level?: string; ts?: string })
+          );
+          const normalised = newEntries.map((e) => ({ ...e, message: (e as { message?: string; msg?: string }).message ?? (e as { msg?: string }).msg ?? "" }));
+          setRailwayLogs((prev) => [...prev, ...normalised]);
+          lastLogCount = logs.length;
+        }
+        if ((task.progress ?? 0) !== undefined) setRailwayProgress(task.progress ?? 0);
+        if (task.current_job) setRailwayCurrentJob(task.current_job);
+      }
+
+      const ended = ["completed", "failed", "stopped"].includes(sess?.status ?? "") ||
+                    ["DONE", "FAILED"].includes(task?.status ?? "");
+      if (ended) {
+        setRailwayStatus("done");
+        // Update liveTask with the final task data so the completion report shows
+        if (task) {
+          setLiveTask({ id: taskId, type: "", status: task.status ?? "DONE", created_at: "", progress: task.progress, current_job: task.current_job, logs: task.logs as LogEntry[], output: task.output as TaskRow["output"] });
+        }
+        setRailwayLogs((prev) => [
+          ...prev,
+          { message: `Session ended — ${sess?.status ?? task?.status ?? "done"}`, level: "info", ts: new Date().toISOString() },
+        ]);
+        fetchRailwayInfo();
+        return;
+      }
+
+      cloudPollRef.current = setTimeout(pollCloud, 2000);
+    }
+
+    cloudPollRef.current = setTimeout(pollCloud, 2000);
+  }
+
+  async function stopRailwaySession() {
+    if (!railwaySessionId || railwayStopping) return;
+    setRailwayStopping(true);
+    const session = await supabase.auth.getSession();
+    const token = session.data.session?.access_token;
+    if (!token) { setRailwayStopping(false); return; }
+    await fetch("/api/railway/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ session_id: railwaySessionId, task_id: railwayTaskId }),
+    });
+    stopCloudPoll();
+    setRailwayStatus("done");
+    setRailwayStopping(false);
+    fetchRailwayInfo();
+  }
 
   const lastSeen = user?.last_sign_in_at
     ? new Date(user.last_sign_in_at).toLocaleDateString("en-US", {
@@ -1009,8 +1214,11 @@ export default function DashboardPage() {
           <div className="space-y-2 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
             <p className="font-mono text-xs text-slate-400 uppercase tracking-widest">
               {platform === "linkedin" ? "🔵 LinkedIn" : "🟠 Naukri"} Login
-              <span className="ml-1 normal-case text-slate-600 font-normal">
-                (optional — pre-fills the browser form)
+              <span className="ml-1 normal-case font-normal">
+                {semiAuto
+                  ? <span className="text-slate-600">(optional for semi-auto — you can type in the browser)</span>
+                  : <span className="text-amber-400">*required for auto mode</span>
+                }
               </span>
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1950,39 +2158,206 @@ export default function DashboardPage() {
             </details>
           </div>
 
-          <div className="flex justify-end">
-            <button
-              onClick={() => {
-                if (applyMode !== "url" && !phone.trim()) {
-                  alert("Please enter your phone number first.");
-                  return;
-                }
-                createTask();
-              }}
-              disabled={taskLoading}
-              className={`disabled:opacity-50 text-white font-bold px-5 py-2.5 rounded-lg transition-colors ${
-                applyMode === "url"
-                  ? "bg-sky-500 hover:bg-sky-400"
+          {/* ── Execution Mode Toggle + Apply ────────────────── */}
+          <div className="flex flex-col gap-3 mt-2">
+            {/* Mode toggle */}
+            <div className="flex items-center gap-3">
+              <span className="font-mono text-xs text-slate-500">Run on:</span>
+              <div className="flex rounded-lg border border-slate-700 overflow-hidden">
+                <button
+                  onClick={() => setExecMode("local")}
+                  className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    execMode === "local" ? "bg-blue-500 text-white" : "bg-slate-800 text-slate-400 hover:text-white"
+                  }`}
+                >💻 Local Machine</button>
+                <button
+                  onClick={() => {
+                    if (!railwayConfigured) {
+                      alert("Railway Cloud is not configured yet. Go to Agent page → Setup Guide to configure it.");
+                      return;
+                    }
+                    setExecMode("cloud");
+                  }}
+                  className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    execMode === "cloud" ? "bg-violet-500 text-white" : "bg-slate-800 text-slate-400 hover:text-white"
+                  }`}
+                >☁️ Cloud</button>
+              </div>
+              {execMode === "cloud" && (
+                <span className="text-xs text-slate-500 font-mono">
+                  {railwayQuota.remaining}/{railwayQuota.limit} min remaining today
+                </span>
+              )}
+            </div>
+
+            {/* Apply button */}
+            <div className="flex justify-end">
+              <button
+                onClick={() => {
+                  if (applyMode !== "url" && !phone.trim()) {
+                    alert("Please enter your phone number first.");
+                    return;
+                  }
+                  createTask();
+                }}
+                disabled={taskLoading || (execMode === "cloud" && railwayQuota.remaining <= 0)}
+                className={`disabled:opacity-50 text-white font-bold px-5 py-2.5 rounded-lg transition-colors ${
+                  execMode === "cloud"
+                    ? "bg-violet-500 hover:bg-violet-400"
+                    : applyMode === "url"
+                    ? "bg-sky-500 hover:bg-sky-400"
+                    : applyMode === "tailor"
+                    ? "bg-amber-500 hover:bg-amber-400"
+                    : semiAuto
+                    ? "bg-amber-500 hover:bg-amber-400"
+                    : "bg-blue-500 hover:bg-blue-400"
+                }`}
+              >
+                {taskLoading
+                  ? "Creating…"
+                  : execMode === "cloud"
+                  ? "☁️ Start on Cloud"
+                  : applyMode === "url"
+                  ? "🔗 Apply to These URLs"
                   : applyMode === "tailor"
-                  ? "bg-amber-500 hover:bg-amber-400"
+                  ? "✨ Start Tailor & Apply"
                   : semiAuto
-                  ? "bg-amber-500 hover:bg-amber-400"
-                  : "bg-blue-500 hover:bg-blue-400"
-              }`}
-            >
-              {taskLoading
-                ? "Creating…"
-                : applyMode === "url"
-                ? "🔗 Apply to These URLs"
-                : applyMode === "tailor"
-                ? "✨ Start Tailor & Apply"
-                : semiAuto
-                ? "🤝 Start Semi-Auto Apply"
-                : "🚀 Start Auto Apply"}
-            </button>
+                  ? "🤝 Start Semi-Auto Apply"
+                  : "🚀 Start Auto Apply"}
+              </button>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* ── Cloud Live Panel (Screenshot + Logs) ─────────────────── */}
+      {railwayStatus !== "idle" && (
+        <div className="mb-12 animate-fadeUp bg-slate-900/60 border border-violet-500/30 rounded-xl overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+            <div className="flex items-center gap-3">
+              {railwayStatus === "running" && <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse" />}
+              <div>
+                <p className="text-sm font-bold text-white">
+                  {railwayStatus === "running" ? "☁️ Cloud Automation Running" : "☁️ Session Ended"}
+                </p>
+                {railwayCurrentJob && <p className="text-xs text-slate-400 mt-0.5 truncate max-w-64">{railwayCurrentJob}</p>}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {railwayStatus === "running" && (
+                <div className="flex items-center gap-2">
+                  <div className="w-24 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                    <div className="h-full bg-violet-500 rounded-full transition-all" style={{ width: `${railwayProgress}%` }} />
+                  </div>
+                  <span className="text-xs text-slate-400">{railwayProgress}%</span>
+                </div>
+              )}
+              <button
+                onClick={() => setShowScreenshot(p => !p)}
+                className="px-3 py-1.5 text-xs font-medium border border-slate-700 rounded-lg text-slate-400 hover:text-white hover:border-slate-500 transition-colors"
+              >{showScreenshot ? "🖥 Hide Feed" : "🖥 Show Feed"}</button>
+              {railwayStatus === "running" ? (
+                <button onClick={stopRailwaySession} disabled={railwayStopping}
+                  className="px-3 py-1.5 text-xs font-semibold bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 rounded-lg transition-all disabled:opacity-50"
+                >{railwayStopping ? "Stopping…" : "⏹ Stop"}</button>
+              ) : (
+                <button onClick={() => { stopCloudPoll(); setRailwayStatus("idle"); setRailwaySessionId(null); setRailwayTaskId(null); setLiveScreenshot(null); setRailwayLogs([]); }}
+                  className="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 rounded-lg transition-colors"
+                >Close</button>
+              )}
+            </div>
+          </div>
+          <div className={`grid gap-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-800 ${showScreenshot ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
+            {showScreenshot && (
+              <div className="relative bg-slate-950 flex items-center justify-center" style={{ minHeight: "280px" }}>
+                {liveScreenshot ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={liveScreenshot} alt="Live automation screenshot" className="w-full object-contain" />
+                ) : (
+                  <div className="flex flex-col items-center gap-3 text-slate-600">
+                    {railwayStatus === "running" ? (
+                      <><span className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" /><p className="text-xs">Waiting for first screenshot…</p></>
+                    ) : <p className="text-xs">No screenshot available</p>}
+                  </div>
+                )}
+                {liveScreenshot && <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-slate-400 px-2 py-0.5 rounded">Live</div>}
+              </div>
+            )}
+            <div style={{ minHeight: "280px", maxHeight: "320px" }}>
+              <LogPanel
+                logs={railwayLogs.map((l) => ({
+                  ts: l.ts ?? new Date().toISOString(),
+                  level: (l.level ?? "info") as LogEntry["level"],
+                  category: "system" as const,
+                  msg: l.message,
+                  meta: {},
+                }))}
+                isRunning={railwayStatus === "running"}
+              />
+            </div>
+          </div>
+
+          {/* ── Completion Report ───────────────────────────────── */}
+          {railwayStatus === "done" && liveTask?.output && (
+            <div className="p-4 border-t border-slate-800">
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-2xl">🎉</span>
+                <div>
+                  <p className="font-body font-semibold text-emerald-400">
+                    Applied to {liveTask.output.applied_count ?? 0} jobs
+                  </p>
+                  <p className="font-body text-xs text-slate-400 mt-0.5">{liveTask.output.message}</p>
+                </div>
+              </div>
+              {/* Report table from logs */}
+              {railwayLogs.length > 0 && (() => {
+                const report = railwayLogs
+                  .filter((l) => l.level === "success" || l.level === "skip")
+                  .map((l) => {
+                    const meta = (l as { meta?: Record<string, unknown> }).meta ?? {};
+                    return {
+                      company: (meta.company as string) || "—",
+                      position: (meta.job_title as string) || "—",
+                      score: meta.score != null ? `${meta.score}%` : "—",
+                      status: l.level === "success" ? "✅ Applied" : "⏭ Skipped",
+                      reason: (meta.skip_reason as string) || "",
+                    };
+                  });
+                if (report.length === 0) return null;
+                return (
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-700 text-slate-500">
+                          <th className="text-left py-2 px-2 font-mono">#</th>
+                          <th className="text-left py-2 px-2 font-mono">Company</th>
+                          <th className="text-left py-2 px-2 font-mono">Position</th>
+                          <th className="text-left py-2 px-2 font-mono">Score</th>
+                          <th className="text-left py-2 px-2 font-mono">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {report.map((r, i) => (
+                          <tr key={i} className="border-b border-slate-800">
+                            <td className="py-1.5 px-2 text-slate-600">{i + 1}</td>
+                            <td className="py-1.5 px-2 text-slate-300">{r.company}</td>
+                            <td className="py-1.5 px-2 text-slate-300">{r.position}</td>
+                            <td className="py-1.5 px-2 text-slate-400">{r.score}</td>
+                            <td className={`py-1.5 px-2 ${r.status.includes("Applied") ? "text-emerald-400" : "text-amber-400"}`}>
+                              {r.status}{r.reason ? ` (${r.reason})` : ""}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+          <div ref={logsEndRef} />
+        </div>
+      )}
       {/* ── Gmail & Email Follow-Up Settings ─────────────────────── */}
       <div className="mb-12 animate-fadeUp animate-fadeUp-delay-3">
         <h2 className="font-display font-semibold text-lg text-white mb-4">
