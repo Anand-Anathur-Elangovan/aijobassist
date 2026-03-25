@@ -55,10 +55,28 @@ def main():
     print("  VantaHire Task Runner — Started")
     print("=" * 50)
 
+    is_railway = os.environ.get("TASK_RUNNER_ENV") == "railway"
+
     # Track if we've executed at least one task (for exit-after-run mode)
     ran_any_task = False
 
     last_gmail_check = datetime.now(timezone.utc) - timedelta(seconds=GMAIL_INTERVAL)  # run on first boot
+    # On Railway: only print idle status every 5 minutes to keep logs clean
+    last_idle_log    = datetime.now(timezone.utc) - timedelta(seconds=300)
+
+    # ── Startup: heal any tasks stuck in RUNNING (e.g. from a previous crash) ──
+    if is_railway:
+        try:
+            import requests as _req
+            from api_client import SUPABASE_URL, HEADERS
+            _req.patch(
+                f"{SUPABASE_URL}/rest/v1/tasks?status=eq.RUNNING&execution_mode=eq.railway",
+                headers={**HEADERS, "Prefer": "return=minimal"},
+                json={"status": "FAILED", "error": "Task runner restarted — marked stale RUNNING tasks as FAILED"},
+            )
+            print("[STARTUP] Stale RUNNING tasks reset to FAILED")
+        except Exception as _e:
+            print(f"[STARTUP] Could not reset stale tasks: {_e}")
 
     while True:
         # ── Daily Gmail check ──────────────────────────────────
@@ -68,8 +86,7 @@ def main():
             _trigger_gmail_daily_checks()
             last_gmail_check = now
 
-        # ── Regular task poll ──────────────────────────────────
-        print("\n[POLL] Checking for pending tasks...")
+        # ── Regular task poll (silent unless Railway idle log interval reached) ──
         tasks = fetch_pending_tasks()
 
         if tasks:
@@ -113,7 +130,7 @@ def main():
 
         else:
             # No pending tasks
-            if ran_any_task and os.environ.get("TASK_RUNNER_ENV") != "railway":
+            if ran_any_task and not is_railway:
                 # Local agent exits after completing all tasks
                 print("\n" + "=" * 50)
                 print("  All tasks completed. Exiting.")
@@ -122,7 +139,10 @@ def main():
             elif ran_any_task:
                 # On Railway: reset flag and keep polling for more tasks
                 ran_any_task = False
-            print("[IDLE]  No pending tasks. Sleeping...")
+            # Only print idle message every 5 minutes on Railway (suppress log spam)
+            if not is_railway or (datetime.now(timezone.utc) - last_idle_log).total_seconds() >= 300:
+                print("[IDLE]  No pending tasks. Sleeping...")
+                last_idle_log = datetime.now(timezone.utc)
 
         time.sleep(POLL_INTERVAL)
 

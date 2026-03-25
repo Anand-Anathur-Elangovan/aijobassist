@@ -15,13 +15,22 @@ const POLL_INTERVAL_MS = 1000
 const MAX_STREAM_MS = 5 * 60 * 1000
 
 export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url)
+
   // ── Auth ───────────────────────────────────────────────────
-  const user = await getAuthUser(req)
+  // EventSource can't set Authorization headers, so accept token as query param fallback
+  let user = await getAuthUser(req)
+  if (!user) {
+    const queryToken = searchParams.get('token')
+    if (queryToken) {
+      const sb = getServiceSupabase()
+      const { data } = await sb.auth.getUser(queryToken)
+      user = data.user ?? null
+    }
+  }
   if (!user) {
     return new Response('Unauthorized', { status: 401 })
   }
-
-  const { searchParams } = new URL(req.url)
   const sessionId = searchParams.get('session_id')
   if (!sessionId) {
     return new Response('session_id is required', { status: 400 })

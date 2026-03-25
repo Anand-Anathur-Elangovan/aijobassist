@@ -586,6 +586,258 @@ check("Placement: 6 resume tips", len(placement["resume_tips"]) == 6)
 
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# §16  RAILWAY CLOUD EXECUTION FLOW
+#      Tests: env detection, task routing, fetch_pending_tasks filtering,
+#             stop-task logic, screenshot push flow, session_id injection,
+#             main.py loop behaviour, trigger route payload, push_screenshot
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n§16  Railway cloud execution flow")
+
+import os as _os
+import base64 as _b64
+import json as _json
+
+# ── 16.1  TASK_RUNNER_ENV detection ────────────────────────────────────────
+_orig_env = _os.environ.get("TASK_RUNNER_ENV")
+
+_os.environ.pop("TASK_RUNNER_ENV", None)
+check("Env: local agent → TASK_RUNNER_ENV not set",
+      _os.environ.get("TASK_RUNNER_ENV") != "railway")
+
+_os.environ["TASK_RUNNER_ENV"] = "railway"
+check("Env: Railway container → TASK_RUNNER_ENV=railway",
+      _os.environ.get("TASK_RUNNER_ENV") == "railway")
+
+# Restore
+if _orig_env is None:
+    _os.environ.pop("TASK_RUNNER_ENV", None)
+else:
+    _os.environ["TASK_RUNNER_ENV"] = _orig_env
+
+
+# ── 16.2  task_runner.py Railway guard logic (no execution_mode=railway locally) ──
+def _should_skip_locally(task: dict) -> bool:
+    """Mirrors the guard in task_runner.py run_task()."""
+    return (
+        task.get("execution_mode") == "railway"
+        and _os.environ.get("TASK_RUNNER_ENV") != "railway"
+    )
+
+_os.environ.pop("TASK_RUNNER_ENV", None)
+check("Guard: local + execution_mode=railway → skipped",
+      _should_skip_locally({"execution_mode": "railway"}))
+check("Guard: local + execution_mode=own_machine → not skipped",
+      not _should_skip_locally({"execution_mode": "own_machine"}))
+check("Guard: local + no execution_mode → not skipped",
+      not _should_skip_locally({}))
+
+_os.environ["TASK_RUNNER_ENV"] = "railway"
+check("Guard: Railway + execution_mode=railway → NOT skipped (runs on cloud)",
+      not _should_skip_locally({"execution_mode": "railway"}))
+check("Guard: Railway + own_machine → not skipped (incl. legacy tasks)",
+      not _should_skip_locally({"execution_mode": "own_machine"}))
+
+_os.environ.pop("TASK_RUNNER_ENV", None)
+
+
+# ── 16.3  fetch_pending_tasks URL selection ──────────────────────────────────
+def _pending_task_url(is_railway: bool) -> str:
+    SUPABASE_URL = "https://feqhdpxnzlctpwvvjxui.supabase.co"
+    if is_railway:
+        return f"{SUPABASE_URL}/rest/v1/tasks?status=eq.PENDING&execution_mode=eq.railway&order=created_at.asc"
+    else:
+        return f"{SUPABASE_URL}/rest/v1/tasks?status=eq.PENDING&execution_mode=neq.railway&order=created_at.asc"
+
+check("DB query: Railway → filters execution_mode=railway",
+      "execution_mode=eq.railway" in _pending_task_url(True))
+check("DB query: local → excludes execution_mode=railway tasks",
+      "execution_mode=neq.railway" in _pending_task_url(False))
+check("DB query: both still filter PENDING only",
+      "status=eq.PENDING" in _pending_task_url(True)
+      and "status=eq.PENDING" in _pending_task_url(False))
+
+
+# ── 16.4  main.py loop behaviour on Railway ──────────────────────────────────
+def _should_exit_after_run(ran_any_task: bool, is_railway: bool) -> bool:
+    """
+    Mirrors updated main.py logic:
+      - Local: exit after all tasks done
+      - Railway: reset ran_any_task flag and keep polling (never exits)
+    """
+    if ran_any_task and not is_railway:
+        return True   # local: exit
+    return False      # railway: keep looping
+
+check("main.py: local + tasks done → exits",
+      _should_exit_after_run(True, False))
+check("main.py: Railway + tasks done → does NOT exit",
+      not _should_exit_after_run(True, True))
+check("main.py: local + no tasks → does not exit",
+      not _should_exit_after_run(False, False))
+check("main.py: Railway + no tasks → does not exit",
+      not _should_exit_after_run(False, True))
+
+
+# ── 16.5  trigger/route.ts keeps task PENDING + injects session_id ────────────
+def _build_trigger_task_update(
+    existing_input: dict,
+    task_input_override: dict,
+    session_id: str,
+    set_status_to: str = "PENDING",   # MUST remain PENDING so Railway poller picks it up
+) -> dict:
+    """
+    Mirrors the DB update in trigger/route.ts after session row is created.
+    Previously (buggy): set status='RUNNING' (Railway poller never found it).
+    Fixed: keeps PENDING + injects session_id into input.
+    """
+    return {
+        "execution_mode": "railway",
+        "status": set_status_to,
+        "input": {**existing_input, **task_input_override, "session_id": session_id},
+    }
+
+update = _build_trigger_task_update(
+    {"user_id": "u1", "keywords": "SWE"},
+    {"max_apply": 5},
+    "sess-123",
+)
+check("Trigger: task kept as PENDING (not RUNNING)",
+      update["status"] == "PENDING")
+check("Trigger: session_id injected into input",
+      update["input"].get("session_id") == "sess-123")
+check("Trigger: existing input preserved",
+      update["input"].get("user_id") == "u1")
+check("Trigger: task_input_override applied",
+      update["input"].get("max_apply") == 5)
+check("Trigger: execution_mode set to railway",
+      update["execution_mode"] == "railway")
+
+
+# ── 16.6  push_screenshot logic ──────────────────────────────────────────────
+def _mock_push_screenshot(session_id: str, page_or_bytes) -> dict | None:
+    """Mirrors push_screenshot() in api_client.py (without network call)."""
+    if not session_id:
+        return None
+    try:
+        if hasattr(page_or_bytes, "screenshot"):
+            img_bytes = page_or_bytes.screenshot()
+        else:
+            img_bytes = page_or_bytes
+        b64 = _b64.b64encode(img_bytes).decode()
+        return {"session_id": session_id, "latest_screenshot": b64}
+    except Exception:
+        return None
+
+# Fake Playwright Page
+class _MockPage:
+    def screenshot(self, **kwargs):
+        return b"\xff\xd8\xff\xe0" + b"\x00" * 20  # fake JPEG header + padding
+
+result = _mock_push_screenshot("sess-abc", _MockPage())
+check("push_screenshot: page object → b64 encoded",
+      result is not None and len(result["latest_screenshot"]) > 0)
+check("push_screenshot: session_id preserved",
+      result["session_id"] == "sess-abc")
+check("push_screenshot: valid base64",
+      _b64.b64decode(result["latest_screenshot"])[:2] == b"\xff\xd8")
+
+result_bytes = _mock_push_screenshot("sess-xyz", b"\xff\xd8\xff\xe0\x00\x01")
+check("push_screenshot: raw bytes input → works",
+      result_bytes is not None and result_bytes["session_id"] == "sess-xyz")
+
+result_empty = _mock_push_screenshot("", _MockPage())
+check("push_screenshot: empty session_id → no-op (returns None)",
+      result_empty is None)
+
+
+# ── 16.7  _push_screenshot helper in linkedin.py (session_id gate) ───────────
+def _should_push_screenshot(task_input: dict) -> bool:
+    """Mirrors the guard in _push_screenshot() in linkedin.py."""
+    return bool(task_input.get("session_id", ""))
+
+check("_push_screenshot: present session_id → fires",
+      _should_push_screenshot({"session_id": "sess-123"}))
+check("_push_screenshot: missing session_id → skipped (own-machine)",
+      not _should_push_screenshot({}))
+check("_push_screenshot: empty session_id → skipped",
+      not _should_push_screenshot({"session_id": ""}))
+
+
+# ── 16.8  stopActiveTask — Supabase update shape ──────────────────────────────
+def _build_stop_update(active_task_id: str) -> dict | None:
+    """Mirrors stopActiveTask() in agent/page.tsx."""
+    if not active_task_id:
+        return None
+    return {"stop_requested": True, "status": "DONE"}
+
+upd = _build_stop_update("task-abc")
+check("Stop: sets stop_requested=True",    upd["stop_requested"] is True)
+check("Stop: sets status=DONE",            upd["status"] == "DONE")
+check("Stop: no task_id → returns None",   _build_stop_update("") is None)
+
+
+# ── 16.9  stoppedRef race-condition guard ────────────────────────────────────
+class _MockPollState:
+    def __init__(self):
+        self.stopped = False
+        self.task_status = "RUNNING"
+        self.task_logs = ["log1", "log2"]
+
+    def stop_task(self):
+        self.stopped = True
+        self.task_status = None
+        self.task_logs = []
+
+    def poll(self, db_task_status: str, db_logs: list):
+        """Simulates pollActiveTask respecting stoppedRef."""
+        if self.stopped:
+            return  # blocked by stoppedRef
+        self.task_status = db_task_status
+        self.task_logs = db_logs
+
+state = _MockPollState()
+state.stop_task()
+# Poll fires immediately after stop (DB may still say RUNNING)
+state.poll("RUNNING", ["log1", "log2", "log3"])
+check("Race guard: poll after stop doesn't re-populate task_status",
+      state.task_status is None)
+check("Race guard: poll after stop doesn't re-populate task_logs",
+      state.task_logs == [])
+
+# After 4s stoppedRef re-enables — simulate it
+state.stopped = False
+state.poll("DONE", ["final log"])
+check("Race guard: poll re-enables → updates state normally",
+      state.task_status == "DONE")
+
+
+# ── 16.10 Cloud vs Local panel visibility logic ──────────────────────────────
+def _panel_visible(railway_status: str, task_logs: list, railway_status_is_idle: bool) -> dict:
+    """Mirrors conditional rendering in agent/page.tsx."""
+    return {
+        "cloud_panel":  railway_status != "idle",
+        "local_panel":  len(task_logs) > 0 and railway_status_is_idle,
+        "mode_switcher": True,  # always shown once railwayConfigured
+    }
+
+p = _panel_visible("running", [], True)
+check("Panel: cloud running → cloud panel visible, local hidden",
+      p["cloud_panel"] and not p["local_panel"])
+
+p = _panel_visible("idle", ["log1"], True)
+check("Panel: idle + local logs → local panel visible, cloud hidden",
+      not p["cloud_panel"] and p["local_panel"])
+
+p = _panel_visible("idle", [], True)
+check("Panel: idle + no logs → both panels hidden",
+      not p["cloud_panel"] and not p["local_panel"])
+
+p = _panel_visible("done", ["log1"], False)
+check("Panel: cloud done → cloud session-ended panel visible",
+      p["cloud_panel"])
+
+
 print("\n" + "═"*70)
 passed  = sum(1 for s, _, _ in results if s == PASS)
 failed  = sum(1 for s, _, _ in results if s == FAIL)

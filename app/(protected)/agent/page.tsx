@@ -35,6 +35,7 @@ export default function AgentPage() {
   const [showExecModal,      setShowExecModal]       = useState(false);
   const [pendingTaskType,    setPendingTaskType]      = useState<"AUTO_APPLY" | "TAILOR_AND_APPLY">("AUTO_APPLY");
   const [railwaySessionId,   setRailwaySessionId]    = useState<string | null>(null);
+  const [railwayTaskId,      setRailwayTaskId]        = useState<string | null>(null);
   const [liveScreenshot,     setLiveScreenshot]      = useState<string | null>(null);
   const [railwayStatus,      setRailwayStatus]       = useState<"idle" | "running" | "done">("idle");
   const [railwayProgress,    setRailwayProgress]     = useState(0);
@@ -58,8 +59,6 @@ export default function AgentPage() {
   const [taskLogs,        setTaskLogs]        = useState<LogEntry[]>([]);
   const [taskStatus,      setTaskStatus]      = useState<string | null>(null);
   const [activeTaskId,    setActiveTaskId]    = useState<string | null>(null);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Prevents poll from re-populating state immediately after a manual stop
   const stoppedRef = useRef(false);
 
   useEffect(() => {
@@ -89,9 +88,14 @@ export default function AgentPage() {
   useEffect(() => {
     if (!user) return;
 
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
     async function pollActiveTask() {
       // Skip one poll cycle after a manual stop so the cleared state isn't overwritten
-      if (stoppedRef.current) return;
+      if (stoppedRef.current) {
+        pollTimer = setTimeout(pollActiveTask, 2000);
+        return;
+      }
 
       const { data: tasks } = await supabase
         .from("tasks")
@@ -108,6 +112,8 @@ export default function AgentPage() {
         setApprovalPayload(null);
         setTaskLogs([]);
         setActiveTaskId(null);
+        // Slow poll when idle — no need to hammer the DB every 2s
+        pollTimer = setTimeout(pollActiveTask, 10000);
         return;
       }
 
@@ -130,13 +136,15 @@ export default function AgentPage() {
       } else {
         setApprovalPayload(null);
       }
+
+      // Active task — fast poll every 2s for live updates
+      pollTimer = setTimeout(pollActiveTask, 2000);
     }
 
-    // Poll every 2 seconds
+    // Kick off immediately
     pollActiveTask();
-    pollIntervalRef.current = setInterval(pollActiveTask, 2000);
     return () => {
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [user]);
 
@@ -200,18 +208,14 @@ export default function AgentPage() {
       }
     }
 
-    // Fetch today's Railway quota
-    const res = await fetch("/api/railway/status?ping=false", {
-      headers: { Authorization: `Bearer ${token}` },
-    }).catch(() => null);
-    // Quota is fetched via billing endpoint — use Supabase directly
+    // Fetch today's Railway quota directly from Supabase
     const today = new Date().toISOString().split("T")[0];
     const { data: usageRow } = await supabase
       .from("railway_daily_usage")
       .select("minutes_used")
       .eq("user_id", user.id)
       .eq("usage_date", today)
-      .single();
+      .maybeSingle();
     const used = Number(usageRow?.minutes_used ?? 0);
     // Get plan limit
     const { data: sub } = await supabase
@@ -219,7 +223,7 @@ export default function AgentPage() {
       .select("plan_id")
       .eq("user_id", user.id)
       .in("status", ["active", "past_due"])
-      .single();
+      .maybeSingle();
     let limit = 5;
     if (sub?.plan_id) {
       const { data: pl } = await supabase
@@ -227,11 +231,10 @@ export default function AgentPage() {
         .select("daily_limit")
         .eq("plan_id", sub.plan_id)
         .eq("action_type", "railway_minutes")
-        .single();
+        .maybeSingle();
       if (pl) limit = pl.daily_limit;
     }
     setRailwayQuota({ used, limit, remaining: Math.max(0, limit - used) });
-    void res; // stop lint warning
   }
 
   function openExecutionModal(taskType: "AUTO_APPLY" | "TAILOR_AND_APPLY") {
@@ -305,6 +308,7 @@ export default function AgentPage() {
 
     const data = await res.json();
     setRailwaySessionId(data.session_id);
+    setRailwayTaskId(newTask.id);
     setRailwayStatus("running");
     setRailwayLogs([]);
     setLiveScreenshot(null);
@@ -314,15 +318,16 @@ export default function AgentPage() {
     // Refresh quota
     await fetchRailwayInfo();
 
-    // Start SSE screenshot stream
-    startScreenshotStream(data.session_id);
+    // Start SSE screenshot stream (pass token — EventSource can't set headers)
+    startScreenshotStream(data.session_id, token);
   }
 
-  function startScreenshotStream(sessionId: string) {
+  function startScreenshotStream(sessionId: string, token: string) {
     // Close any existing stream
     evtSourceRef.current?.close();
 
-    const evtSource = new EventSource(`/api/railway/stream?session_id=${sessionId}`);
+    // EventSource can't send Authorization headers — pass token as query param
+    const evtSource = new EventSource(`/api/railway/stream?session_id=${sessionId}&token=${encodeURIComponent(token)}`);
     evtSourceRef.current = evtSource;
 
     evtSource.addEventListener("screenshot", (e) => {
@@ -374,7 +379,9 @@ export default function AgentPage() {
         "Content-Type":  "application/json",
         "Authorization": `Bearer ${token}`,
       },
-      body: JSON.stringify({ session_id: railwaySessionId }),
+      // Pass task_id so the route sets stop_requested=true on the task
+      // — Python checks this flag mid-execution and stops cleanly
+      body: JSON.stringify({ session_id: railwaySessionId, task_id: railwayTaskId }),
     });
 
     evtSourceRef.current?.close();
@@ -853,7 +860,7 @@ export default function AgentPage() {
                 </button>
               ) : (
                 <button
-                  onClick={() => { setRailwayStatus("idle"); setRailwaySessionId(null); setLiveScreenshot(null); setRailwayLogs([]); }}
+                  onClick={() => { setRailwayStatus("idle"); setRailwaySessionId(null); setRailwayTaskId(null); setLiveScreenshot(null); setRailwayLogs([]); }}
                   className="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 rounded-lg transition-colors"
                 >
                   Close
