@@ -2574,23 +2574,9 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                             if (t && t.length >= 2 && t.length < 100) { company = t; break; }
                         }
                     }
-                    // Title fallback: find a prominent <p> near the company element
-                    if (!title && companyEl) {
-                        // Walk up from company element, look for a <p> sibling that has substantial text
-                        let el = companyEl.parentElement;
-                        for (let i = 0; i < 8 && el; i++) {
-                            for (const p of el.querySelectorAll('p')) {
-                                const t = (p.innerText || '').replace(/\\s+/g, ' ').trim();
-                                // Job titles are typically 3-80 chars, no newlines, no bullet chars
-                                if (t.length >= 3 && t.length <= 80 && !t.includes('\\n') && !t.match(/[·•·]/)) {
-                                    title = t;
-                                    break;
-                                }
-                            }
-                            if (title) break;
-                            el = el.parentElement;
-                        }
-                    }
+                    // NOTE: No DOM-walk title fallback here — it incorrectly picks up
+                    // company names from the sidebar job list as job titles.
+                    // Strategy 3 (tab title) reliably handles the title-missing case.
                     return {title, company};
                 }""")
                 if not _page_job_title and _extracted.get("title"):

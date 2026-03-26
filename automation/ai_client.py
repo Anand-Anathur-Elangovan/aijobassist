@@ -446,13 +446,24 @@ def match_score(resume_text: str, jd_text: str) -> dict:
     Auto-uses Claude Sonnet when ANTHROPIC_API_KEY is set.
     """
     if _has_api_key():
-        prompt = f"""Compare the resume to the job description. Return ONLY valid JSON, no prose:
+        prompt = f"""You are an ATS scoring engine. Score how well this resume matches the job description.
+
+Scoring criteria (out of 100):
+- Required skills & technologies present in resume: up to 50 pts (missing required skills = heavy penalty)
+- Years of experience meets or exceeds the requirement: up to 20 pts
+- Domain / industry alignment: up to 15 pts
+- Seniority level match (e.g. senior role needs senior experience): up to 15 pts
+
+Calibration: 80+ = strong match (apply), 60-79 = decent match (apply), 40-59 = partial match (borderline), <40 = weak match (skip).
+
+Return ONLY valid JSON, no prose:
 {{
   "score": <integer 0-100>,
   "matching_skills": [<string>],
   "missing_skills":  [<string>],
   "suggestions":     [<string>]
 }}
+
 Resume:
 {resume_text}
 
