@@ -906,6 +906,14 @@ def _build_user_profile(task_input: dict) -> dict:
         "notice_period": task_input.get("notice_period", ""),
         "salary_expectation": task_input.get("salary_expectation", ""),
         "current_ctc": task_input.get("current_ctc", ""),
+        # EEO / Diversity / Identity
+        "work_authorization": task_input.get("work_authorization", ""),
+        "nationality": task_input.get("nationality", ""),
+        "country_of_origin": task_input.get("country_of_origin", ""),
+        "gender": task_input.get("gender", ""),
+        "disability_status": task_input.get("disability_status", ""),
+        "veteran_status": task_input.get("veteran_status", ""),
+        "ethnicity": task_input.get("ethnicity", ""),
     }
 
     # Add employment context
@@ -1283,13 +1291,21 @@ def _fill_additional_questions(page: Page, task_input: dict):
                 option_labels = [lbl for _, lbl, _, _ in options]
                 is_yes_no = set(option_labels) <= {"yes", "no", ""}
 
-                # EEO/diversity Yes/No radios should get "No"/"prefer not" handled below
-                # by forcing want_no so Claude doesn't pick the wrong option
+                # EEO/diversity Yes/No radios — use user's actual profile values, not always "No"
                 if is_yes_no and any(kw in question_text for kw in (
                     "disability", "disabled", "veteran", "protected veteran",
                     "gender", "race", "ethnicity", "sexual orientation",
                 )):
-                    want_no = True
+                    d_status = (task_input.get("disability_status") or "").lower()
+                    v_status = (task_input.get("veteran_status") or "").lower()
+                    if "disability" in question_text or "disabled" in question_text:
+                        # "No" unless user explicitly says they have a disability
+                        want_no = "i have a disability" not in d_status
+                    elif "veteran" in question_text:
+                        # "No" unless user is a veteran
+                        want_no = not ("i am a veteran" in v_status or "disabled veteran" in v_status)
+                    else:
+                        want_no = True  # gender/race/ethnicity/sexual orientation → No
 
                 if is_yes_no:
                     # Simple Yes/No — use keyword heuristics
@@ -1310,22 +1326,78 @@ def _fill_additional_questions(page: Page, task_input: dict):
                         "gender", "race", "ethnicity", "sexual orientation",
                     ))
                     if _eeo_question:
-                        # Find a "prefer not" / "decline" / "no disability" option
-                        for r, lbl, val, inp_id in options:
-                            if any(kw in lbl for kw in (
-                                "prefer not", "decline", "do not wish", "not specified",
-                                "choose not", "no disability", "not disabled",
-                                "i don't have", "i do not have",
-                            )):
-                                target_radio, target_label_id = r, inp_id
-                                print(f"  [LINKEDIN] Radio → EEO opt-out '{lbl}' for: {question_text[:60]!r}")
-                                break
-                        # If no opt-out found, pick "No" or first option
-                        if target_radio is None:
+                        # Pull user's actual EEO profile values
+                        d_status = (task_input.get("disability_status") or "").lower()
+                        v_status = (task_input.get("veteran_status") or "").lower()
+                        g_val    = (task_input.get("gender") or "").lower()
+                        eth_val  = (task_input.get("ethnicity") or "").lower()
+
+                        matched_from_profile = False
+                        if "disability" in question_text or "disabled" in question_text:
+                            if d_status and "prefer not" not in d_status:
+                                # Map user's choice to option keywords
+                                if "don't have" in d_status or "do not have" in d_status:
+                                    kws = ["no disability", "i don't have", "i do not have", "not disabled", "none", "no"]
+                                elif "i have" in d_status:
+                                    kws = ["i have a disability", "yes, i have", "have a disability"]
+                                else:
+                                    kws = ["prefer not", "decline", "do not wish", "not specified", "choose not"]
+                                for r, lbl, val, inp_id in options:
+                                    if any(kw in lbl for kw in kws):
+                                        target_radio, target_label_id = r, inp_id
+                                        print(f"  [LINKEDIN] Radio → Profile disability '{lbl}' for: {question_text[:60]!r}")
+                                        matched_from_profile = True
+                                        break
+                        elif "veteran" in question_text:
+                            if v_status and "prefer not" not in v_status:
+                                if "not a veteran" in v_status or ("not" in v_status and "veteran" in v_status):
+                                    kws = ["not a veteran", "i am not", "not protected", "non-veteran", "no"]
+                                elif "disabled veteran" in v_status:
+                                    kws = ["disabled veteran", "veteran with a disability"]
+                                elif "i am a veteran" in v_status:
+                                    kws = ["i am a veteran", "veteran", "active duty", "yes"]
+                                else:
+                                    kws = ["prefer not", "decline", "not wish", "not specified"]
+                                for r, lbl, val, inp_id in options:
+                                    if any(kw in lbl for kw in kws):
+                                        target_radio, target_label_id = r, inp_id
+                                        print(f"  [LINKEDIN] Radio → Profile veteran '{lbl}' for: {question_text[:60]!r}")
+                                        matched_from_profile = True
+                                        break
+                        elif "gender" in question_text:
+                            if g_val and "prefer not" not in g_val:
+                                for r, lbl, val, inp_id in options:
+                                    if g_val in lbl or lbl in g_val:
+                                        target_radio, target_label_id = r, inp_id
+                                        print(f"  [LINKEDIN] Radio → Profile gender '{lbl}' for: {question_text[:60]!r}")
+                                        matched_from_profile = True
+                                        break
+                        elif any(w in question_text for w in ("race", "ethnicity")):
+                            if eth_val and "prefer not" not in eth_val:
+                                for r, lbl, val, inp_id in options:
+                                    if eth_val in lbl or lbl in eth_val:
+                                        target_radio, target_label_id = r, inp_id
+                                        print(f"  [LINKEDIN] Radio → Profile ethnicity '{lbl}' for: {question_text[:60]!r}")
+                                        matched_from_profile = True
+                                        break
+
+                        # If no profile match or user chose prefer-not, pick opt-out option
+                        if not matched_from_profile:
                             for r, lbl, val, inp_id in options:
-                                if lbl in ("no", "none"):
+                                if any(kw in lbl for kw in (
+                                    "prefer not", "decline", "do not wish", "not specified",
+                                    "choose not", "no disability", "not disabled",
+                                    "i don't have", "i do not have",
+                                )):
                                     target_radio, target_label_id = r, inp_id
+                                    print(f"  [LINKEDIN] Radio → EEO opt-out '{lbl}' for: {question_text[:60]!r}")
                                     break
+                            # If no opt-out found, pick "No" or first option
+                            if target_radio is None:
+                                for r, lbl, val, inp_id in options:
+                                    if lbl in ("no", "none"):
+                                        target_radio, target_label_id = r, inp_id
+                                        break
                     else:
                         try:
                             from automation.ai_client import claude_answer_question
@@ -1469,12 +1541,24 @@ def _fill_additional_questions(page: Page, task_input: dict):
                 elif any(w in question_text for w in (
                     "sponsorship", "require visa", "need visa", "require work",
                 )):
-                    if not _pick(["no", "i don't need", "not required", "citizen", "authorized"]):
-                        # fallback first valid
-                        for i, v in enumerate(opt_vals):
-                            if v.lower() not in _SKIP_VALS:
-                                sel.select_option(v)
-                                break
+                    work_auth = (task_input.get("work_authorization") or "").lower()
+                    # Citizens, GC, EAD holders don't need sponsorship
+                    no_sponsor = any(kw in work_auth for kw in [
+                        "citizen", "permanent resident", "green card", "ead",
+                        "employment authorization", "not applicable",
+                    ])
+                    if no_sponsor:
+                        if not _pick(["no", "i don't need", "not required", "citizen", "authorized"]):
+                            for i, v in enumerate(opt_vals):
+                                if v.lower() not in _SKIP_VALS:
+                                    sel.select_option(v)
+                                    break
+                    else:
+                        if not _pick(["no", "i don't need", "not required", "citizen", "authorized"]):
+                            for i, v in enumerate(opt_vals):
+                                if v.lower() not in _SKIP_VALS:
+                                    sel.select_option(v)
+                                    break
 
                 # Yes/No questions → Yes
                 elif any(w in question_text for w in (
@@ -1488,13 +1572,35 @@ def _fill_additional_questions(page: Page, task_input: dict):
                                 sel.select_option(v)
                                 break
 
-                # Gender / diversity dropdowns → "Prefer not to say"
+                # Gender / diversity dropdowns — use user's actual profile value, fall back to "Prefer not"
                 elif any(w in question_text for w in ("gender", "ethnicity", "race", "disability", "veteran")):
-                    if not _pick(["prefer not", "decline", "do not wish", "not specified"]):
-                        for i, v in enumerate(opt_vals):
-                            if v.lower() not in _SKIP_VALS:
-                                sel.select_option(v)
-                                break
+                    d_status = (task_input.get("disability_status") or "").lower()
+                    v_status = (task_input.get("veteran_status") or "").lower()
+                    g_val    = (task_input.get("gender") or "").lower()
+                    eth_val  = (task_input.get("ethnicity") or "").lower()
+                    filled = False
+                    if "disability" in question_text:
+                        if d_status and "prefer not" not in d_status:
+                            if "don't have" in d_status or "do not have" in d_status:
+                                filled = _pick(["no disability", "i don't have", "i do not have", "not disabled", "no"])
+                            elif "i have" in d_status:
+                                filled = _pick(["yes, i have", "i have a disability", "have disability"])
+                    elif "veteran" in question_text:
+                        if v_status and "prefer not" not in v_status:
+                            if "not a veteran" in v_status:
+                                filled = _pick(["not a veteran", "i am not", "non-veteran", "no"])
+                            elif "disabled veteran" in v_status:
+                                filled = _pick(["disabled veteran", "veteran with a disability"])
+                            elif "i am a veteran" in v_status:
+                                filled = _pick(["i am a veteran", "veteran", "yes"])
+                    elif "gender" in question_text:
+                        if g_val and "prefer not" not in g_val:
+                            filled = _pick([g_val])
+                    elif any(w in question_text for w in ("ethnicity", "race")):
+                        if eth_val and "prefer not" not in eth_val:
+                            filled = _pick([eth_val])
+                    if not filled:
+                        _pick(["prefer not", "decline", "do not wish", "not specified"])
 
                 # How did you hear about this job → LinkedIn
                 elif any(w in question_text for w in ("how did you hear", "how did you find", "where did you hear", "source")):
@@ -1515,10 +1621,18 @@ def _fill_additional_questions(page: Page, task_input: dict):
                         _pick(["bachelor", "master", "b.tech", "b.e", "m.tech", "m.e"])
 
                 # Country / region based
-                elif any(w in question_text for w in ("country", "region", "based in")):
+                elif any(w in question_text for w in ("country", "region", "based in", "nationality", "country of origin")):
                     city = (task_input.get("current_city") or "").lower()
                     country = (task_input.get("phone_country") or "").split("(")[0].strip().lower()
-                    if city and _pick([city]):
+                    country_origin = (task_input.get("country_of_origin") or "").lower()
+                    nat_val = (task_input.get("nationality") or "").lower()
+                    if "nationality" in question_text and nat_val and _pick([nat_val]):
+                        pass
+                    elif "country of origin" in question_text and country_origin and _pick([country_origin]):
+                        pass
+                    elif country_origin and _pick([country_origin]):
+                        pass
+                    elif city and _pick([city]):
                         pass
                     elif country and _pick([country]):
                         pass

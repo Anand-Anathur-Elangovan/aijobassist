@@ -919,14 +919,74 @@ def claude_answer_question(
             matched = _match_option(grad_year)
             return _validate_fill("Graduation year", matched if matched else grad_year)
 
+    if any(k in q_lower for k in ("work authorization", "work permit", "authorized to work", "eligible to work",
+                                   "legal right to work", "require sponsorship", "need sponsorship",
+                                   "visa sponsorship", "require visa", "need visa", "need work")):
+        work_auth = (user_profile.get("work_authorization") or "").lower()
+        no_sponsor_kws = ["citizen", "permanent resident", "green card", "ead",
+                          "employment authorization", "not applicable"]
+        needs_sponsor = work_auth and not any(kw in work_auth for kw in no_sponsor_kws)
+        if any(k in q_lower for k in ("require sponsorship", "need sponsorship", "visa sponsorship",
+                                       "require visa", "need visa")):
+            if work_auth and not needs_sponsor:
+                # User doesn't need sponsorship
+                if options:
+                    matched = _match_option("no")
+                    return matched if matched else "No"
+                return _validate_fill("Sponsorship", "No")
+        if any(k in q_lower for k in ("authorized to work", "eligible to work", "legal right to work",
+                                       "work authorization")):
+            if options:
+                matched = _match_option("yes")
+                return matched if matched else "Yes"
+            return _validate_fill("Work authorization", "Yes")
+        # Generic: return user's visa status
+        if work_auth:
+            if options:
+                matched = _match_option(work_auth)
+                return matched if matched else work_auth
+            return _validate_fill("Work authorization", work_auth)
+
+    if any(k in q_lower for k in ("nationality", "country of origin", "country of birth", "place of origin")):
+        nat_val = (user_profile.get("nationality") or user_profile.get("country_of_origin") or "").strip()
+        if nat_val:
+            if options:
+                matched = _match_option(nat_val)
+                return matched if matched else nat_val
+            return _validate_fill("Nationality", nat_val)
+
     if any(k in q_lower for k in ("gender", "ethnicity", "race", "disability", "veteran", "pronoun", "sexual orientation")):
+        # Pull user's actual profile values
+        d_status = (user_profile.get("disability_status") or "").lower()
+        v_status = (user_profile.get("veteran_status") or "").lower()
+        g_val    = (user_profile.get("gender") or "").lower()
+        eth_val  = (user_profile.get("ethnicity") or "").lower()
+
+        user_eeo_val = ""
+        if any(k in q_lower for k in ("disability", "disabled")):
+            user_eeo_val = d_status
+        elif "veteran" in q_lower:
+            user_eeo_val = v_status
+        elif "gender" in q_lower:
+            user_eeo_val = g_val
+        elif any(k in q_lower for k in ("ethnicity", "race")):
+            user_eeo_val = eth_val
+
         if options:
-            # Prefer "Prefer not" / "Decline" options
+            # Try to match user's actual EEO value first
+            if user_eeo_val and "prefer not" not in user_eeo_val:
+                for opt in options:
+                    if user_eeo_val in opt.lower() or opt.lower() in user_eeo_val:
+                        return opt
+            # Fall back to "Prefer not to say" / "Decline" option
             for opt in options:
                 o = opt.lower()
                 if any(k in o for k in ("prefer not", "decline", "not wish", "not specified", "choose not")):
                     return opt
             return options[0]
+        # No options (text field) — return user's value or safe default
+        if user_eeo_val and "prefer not" not in user_eeo_val:
+            return user_eeo_val
         return "Prefer not to say"
 
     if not _has_api_key():
@@ -945,6 +1005,13 @@ def claude_answer_question(
         ("school", "School/University"),
         ("degree", "Degree"),
         ("major", "Major/Field of study"),
+        ("work_authorization", "Work authorization / visa status"),
+        ("nationality", "Nationality"),
+        ("country_of_origin", "Country of origin"),
+        ("gender", "Gender"),
+        ("disability_status", "Disability status"),
+        ("veteran_status", "Veteran status"),
+        ("ethnicity", "Race / ethnicity"),
     ]:
         val = user_profile.get(key, "")
         if val:

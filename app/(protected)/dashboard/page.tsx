@@ -114,6 +114,14 @@ export default function DashboardPage() {
   const [githubUrl, setGithubUrl] = useState("");
   const [portfolioUrl, setPortfolioUrl] = useState("");
   const [highestEducation, setHighestEducation] = useState("");
+  // EEO / Diversity fields
+  const [workAuthorization, setWorkAuthorization] = useState("");
+  const [nationality, setNationality] = useState("");
+  const [countryOfOrigin, setCountryOfOrigin] = useState("");
+  const [gender, setGender] = useState("");
+  const [disabilityStatus, setDisabilityStatus] = useState("");
+  const [veteranStatus, setVeteranStatus] = useState("");
+  const [ethnicity, setEthnicity] = useState("");
   // Employment, Education & Projects — persisted to user_profiles.job_preferences
   const [employments, setEmployments] = useState<EmploymentEntry[]>([]);
   const [educations, setEducations] = useState<EducationEntry[]>([]);
@@ -251,6 +259,14 @@ export default function DashboardPage() {
         if (p.github_url) setGithubUrl(p.github_url as string);
         if (p.portfolio_url) setPortfolioUrl(p.portfolio_url as string);
         if (p.highest_education) setHighestEducation(p.highest_education as string);
+        // EEO / Diversity
+        if (p.work_authorization) setWorkAuthorization(p.work_authorization as string);
+        if (p.nationality) setNationality(p.nationality as string);
+        if (p.country_of_origin) setCountryOfOrigin(p.country_of_origin as string);
+        if (p.gender) setGender(p.gender as string);
+        if (p.disability_status) setDisabilityStatus(p.disability_status as string);
+        if (p.veteran_status) setVeteranStatus(p.veteran_status as string);
+        if (p.ethnicity) setEthnicity(p.ethnicity as string);
         if (p.phone) setPhone(p.phone as string);
         if (p.phone_country) setPhoneCountry(p.phone_country as string);
         if (p.years_experience) setYearsExp(String(p.years_experience));
@@ -385,6 +401,14 @@ export default function DashboardPage() {
       employments: employments.filter(e => e.company.trim() || e.position.trim()),
       educations: educations.filter(e => e.school.trim() || e.degree.trim()),
       projects: projects.filter(p => p.name.trim()),
+      // EEO / Diversity fields
+      work_authorization: workAuthorization,
+      nationality: nationality.trim(),
+      country_of_origin: countryOfOrigin.trim(),
+      gender,
+      disability_status: disabilityStatus,
+      veteran_status: veteranStatus,
+      ethnicity,
       // Search & automation settings (persist across refresh)
       keywords: keywords.trim(),
       keywords2: keywords2.trim(),
@@ -476,6 +500,14 @@ export default function DashboardPage() {
           ...(employments.length > 0 && { employments }),
           ...(educations.length > 0 && { educations }),
           ...(projects.length > 0 && { projects }),
+          // EEO / Diversity
+          ...(workAuthorization && { work_authorization: workAuthorization }),
+          ...(nationality.trim() && { nationality: nationality.trim() }),
+          ...(countryOfOrigin.trim() && { country_of_origin: countryOfOrigin.trim() }),
+          ...(gender && { gender }),
+          ...(disabilityStatus && { disability_status: disabilityStatus }),
+          ...(veteranStatus && { veteran_status: veteranStatus }),
+          ...(ethnicity && { ethnicity }),
           full_name: u.user_metadata?.full_name || u.email?.split("@")[0] || "",
           email: u.email || "",
           ...(linkedinEmail && { linkedin_email: linkedinEmail }),
@@ -528,6 +560,14 @@ export default function DashboardPage() {
         ...(employments.length > 0 && { employments }),
         ...(educations.length > 0 && { educations }),
         ...(projects.length > 0 && { projects }),
+        // EEO / Diversity
+        ...(workAuthorization && { work_authorization: workAuthorization }),
+        ...(nationality.trim() && { nationality: nationality.trim() }),
+        ...(countryOfOrigin.trim() && { country_of_origin: countryOfOrigin.trim() }),
+        ...(gender && { gender }),
+        ...(disabilityStatus && { disability_status: disabilityStatus }),
+        ...(veteranStatus && { veteran_status: veteranStatus }),
+        ...(ethnicity && { ethnicity }),
         full_name: u.user_metadata?.full_name || u.email?.split("@")[0] || "",
         email: u.email || "",
         ...(linkedinEmail && { linkedin_email: linkedinEmail }),
@@ -1913,6 +1953,104 @@ export default function DashboardPage() {
                 />
               </div>
             </div>
+
+            {/* ── EEO / Diversity & Work Authorization ──────────── */}
+            <details className="mt-4 group">
+              <summary className="cursor-pointer font-mono text-xs text-blue-400 uppercase tracking-widest select-none hover:text-blue-300 transition-colors">
+                🪪 EEO / Diversity & Work Authorization — <span className="text-slate-500 normal-case">optional, used to answer compliance questions</span>
+              </summary>
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Work Authorization / Visa Status</label>
+                  <select
+                    value={workAuthorization}
+                    onChange={(e) => setWorkAuthorization(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">Select</option>
+                    <option value="Citizen">Citizen</option>
+                    <option value="Permanent Resident / Green Card">Permanent Resident / Green Card</option>
+                    <option value="EAD (Employment Authorization Document)">EAD (Employment Authorization Document)</option>
+                    <option value="H1B Visa">H1B Visa</option>
+                    <option value="H4 EAD">H4 EAD</option>
+                    <option value="OPT (F1 Student Visa)">OPT (F1 Student Visa)</option>
+                    <option value="L1 / L2 Visa">L1 / L2 Visa</option>
+                    <option value="TN Visa">TN Visa</option>
+                    <option value="Other Work Visa">Other Work Visa</option>
+                    <option value="Not Applicable">Not Applicable</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Nationality</label>
+                  <input
+                    type="text" placeholder="e.g. Indian, American"
+                    value={nationality}
+                    onChange={(e) => setNationality(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Country of Origin</label>
+                  <input
+                    type="text" placeholder="e.g. India, USA"
+                    value={countryOfOrigin}
+                    onChange={(e) => setCountryOfOrigin(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Gender <span className="text-slate-600 font-normal">(used for EEO forms)</span></label>
+                  <select
+                    value={gender}
+                    onChange={(e) => setGender(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">Select</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Non-binary">Non-binary</option>
+                    <option value="Other">Other</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Disability Status <span className="text-slate-600 font-normal">(EEO forms)</span></label>
+                  <select
+                    value={disabilityStatus}
+                    onChange={(e) => setDisabilityStatus(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">Select</option>
+                    <option value="I don't have a disability">I don&apos;t have a disability</option>
+                    <option value="I have a disability">I have a disability</option>
+                    <option value="Prefer not to disclose">Prefer not to disclose</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Veteran Status <span className="text-slate-600 font-normal">(EEO forms)</span></label>
+                  <select
+                    value={veteranStatus}
+                    onChange={(e) => setVeteranStatus(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">Select</option>
+                    <option value="I am not a veteran">I am not a veteran</option>
+                    <option value="I am a veteran">I am a veteran</option>
+                    <option value="I am a disabled veteran">I am a disabled veteran</option>
+                    <option value="Prefer not to disclose">Prefer not to disclose</option>
+                  </select>
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block font-mono text-xs text-slate-400 mb-1">Race / Ethnicity <span className="text-slate-600 font-normal">(EEO forms)</span></label>
+                  <input
+                    type="text" placeholder="e.g. Asian, Hispanic/Latino, White/Caucasian, Prefer not to disclose"
+                    value={ethnicity}
+                    onChange={(e) => setEthnicity(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+            </details>
 
             {/* ── Employment History ──────────────────────────────── */}
             <details className="mt-4 group">
