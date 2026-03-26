@@ -446,13 +446,14 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 # Allow user to update the custom prompt mid-run
                 live_prompt = ctrl.get("custom_prompt_override")
                 if live_prompt:
-                    task_input = dict(task_input)
                     task_input["tailor_custom_prompt"] = live_prompt
 
                 # Inject current company for tailoring context
                 if company_hint:
-                    task_input = dict(task_input)
                     task_input["company"] = company_hint
+                # Clear per-job extracted fields so stale values from previous job don't bleed into report
+                task_input.pop("_page_job_title", None)
+                task_input.pop("_page_company", None)
 
                 # Progress: 5 % base + up to 90 % for applications
                 progress = 5 + int((applied / max_apply) * 90) if max_apply else 5
@@ -480,11 +481,13 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         pass
                 if success:
                     applied += 1
-                    _log(task_input, f"✅ Applied — {company_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": company_hint, "url": job_url, "job_title": task_input.get("_page_job_title", "")})
-                    _record_application(task_input, job_url, company_hint)
+                    _r_company   = task_input.get("_page_company") or task_input.get("company") or company_hint or "—"
+                    _r_job_title = task_input.get("_page_job_title") or "—"
+                    _log(task_input, f"✅ Applied — {_r_company} ({applied}/{max_apply})", "success", "submit", {"company": _r_company, "url": job_url, "job_title": _r_job_title})
+                    _record_application(task_input, job_url, _r_company)
                     _report.append({
-                        "company":     task_input.get("company") or company_hint or "—",
-                        "job_title":   task_input.get("_page_job_title") or "—",
+                        "company":     _r_company,
+                        "job_title":   _r_job_title,
                         "url":         job_url,
                         "score":       task_input.get("_last_match_score"),
                         "status":      "applied",
@@ -492,10 +495,12 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     })
                 else:
                     skipped += 1
-                    _log(task_input, f"⏭ Skipped — {company_hint or 'job'} ({skipped} total)", "skip", "skip", {"company": company_hint, "url": job_url, "job_title": task_input.get("_page_job_title", "")})
+                    _r_company   = task_input.get("_page_company") or task_input.get("company") or company_hint or "—"
+                    _r_job_title = task_input.get("_page_job_title") or "—"
+                    _log(task_input, f"⏭ Skipped — {_r_company} ({skipped} total)", "skip", "skip", {"company": _r_company, "url": job_url, "job_title": _r_job_title})
                     _report.append({
-                        "company":     task_input.get("company") or company_hint or "—",
-                        "job_title":   task_input.get("_page_job_title") or "—",
+                        "company":     _r_company,
+                        "job_title":   _r_job_title,
                         "url":         job_url,
                         "score":       task_input.get("_last_match_score"),
                         "status":      "skipped",
@@ -531,6 +536,9 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                             progress = 5 + int((applied / max_apply) * 90) if max_apply else 5
                             _set_progress(task_input, progress, ej_url)
                             _log(task_input, f"[{applied+1}/{max_apply}] Opening {ej_url}")
+                            # Clear per-job fields so stale values don't bleed into report
+                            task_input.pop("_page_job_title", None)
+                            task_input.pop("_page_company", None)
                             success = _apply_to_job(page, ej_url, task_input)
                             if _li_user_id:
                                 try:
@@ -548,11 +556,13 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                     pass
                             if success:
                                 applied += 1
-                                _log(task_input, f"✅ Applied — {ej_hint or 'LinkedIn'} ({applied}/{max_apply})", "success", "submit", {"company": ej_hint, "url": ej_url, "job_title": task_input.get("_page_job_title", "")})
-                                _record_application(task_input, ej_url, ej_hint)
+                                _er_company   = task_input.get("_page_company") or task_input.get("company") or ej_hint or "—"
+                                _er_job_title = task_input.get("_page_job_title") or "—"
+                                _log(task_input, f"✅ Applied — {_er_company} ({applied}/{max_apply})", "success", "submit", {"company": _er_company, "url": ej_url, "job_title": _er_job_title})
+                                _record_application(task_input, ej_url, _er_company)
                                 _report.append({
-                                    "company":     task_input.get("company") or ej_hint or "—",
-                                    "job_title":   task_input.get("_page_job_title") or "—",
+                                    "company":     _er_company,
+                                    "job_title":   _er_job_title,
                                     "url":         ej_url,
                                     "score":       task_input.get("_last_match_score"),
                                     "status":      "applied",
@@ -560,10 +570,12 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                 })
                             else:
                                 skipped += 1
-                                _log(task_input, f"⏭ Skipped — {ej_hint or 'job'} ({skipped} total)", "skip", "skip", {"url": ej_url, "job_title": task_input.get("_page_job_title", "")})
+                                _er_company   = task_input.get("_page_company") or task_input.get("company") or ej_hint or "—"
+                                _er_job_title = task_input.get("_page_job_title") or "—"
+                                _log(task_input, f"⏭ Skipped — {_er_company} ({skipped} total)", "skip", "skip", {"url": ej_url, "job_title": _er_job_title})
                                 _report.append({
-                                    "company":     task_input.get("company") or ej_hint or "—",
-                                    "job_title":   task_input.get("_page_job_title") or "—",
+                                    "company":     _er_company,
+                                    "job_title":   _er_job_title,
                                     "url":         ej_url,
                                     "score":       task_input.get("_last_match_score"),
                                     "status":      "skipped",
@@ -2525,8 +2537,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             except Exception:
                 pass
 
-        # Strategy 2: JavaScript DOM walk — scan all visible elements for job title/company
-        # More resilient to class-name changes
+        # Strategy 2: JavaScript DOM walk — resilient to class-name changes
         if not _page_job_title or not _page_company:
             try:
                 _extracted = page.evaluate("""() => {
@@ -2539,18 +2550,44 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                             break;
                         }
                     }
-                    // Company: look near logo images with company in alt text
+                    // Company strategy A: aria-label="Company, Concentrix."
+                    // LinkedIn always puts this on the company logo wrapper div
                     let company = '';
-                    for (const img of document.querySelectorAll('img[alt]')) {
-                        const alt = img.alt || '';
-                        const m = alt.match(/company logo for[,\\s]+(.+)/i);
-                        if (m) { company = m[1].trim(); break; }
+                    const companyEl = document.querySelector('[aria-label^="Company,"]');
+                    if (companyEl) {
+                        const lbl = companyEl.getAttribute('aria-label') || '';
+                        company = lbl.replace(/^Company,\\s*/i, '').replace(/\\.?\\s*$/, '').trim();
                     }
-                    // Company fallback: look for aria-label="... hiring" links
+                    // Company strategy B: img alt / svg aria-label "Company logo for, ..."
+                    if (!company) {
+                        for (const el of document.querySelectorAll('img[alt], svg[aria-label], img[aria-label]')) {
+                            const alt = el.getAttribute('alt') || el.getAttribute('aria-label') || '';
+                            const m = alt.match(/company logo for[,\\s]+(.+?)(\\.)?\\s*$/i);
+                            if (m) { company = m[1].trim(); break; }
+                        }
+                    }
+                    // Company strategy C: first /company/ link text
                     if (!company) {
                         for (const a of document.querySelectorAll('a[href*="/company/"]')) {
-                            const t = (a.innerText || a.getAttribute('aria-label') || '').trim();
+                            const t = (a.innerText || '').trim();
                             if (t && t.length > 0 && t.length < 100) { company = t; break; }
+                        }
+                    }
+                    // Title fallback: find a prominent <p> near the company element
+                    if (!title && companyEl) {
+                        // Walk up from company element, look for a <p> sibling that has substantial text
+                        let el = companyEl.parentElement;
+                        for (let i = 0; i < 8 && el; i++) {
+                            for (const p of el.querySelectorAll('p')) {
+                                const t = (p.innerText || '').replace(/\\s+/g, ' ').trim();
+                                // Job titles are typically 3-80 chars, no newlines, no bullet chars
+                                if (t.length >= 3 && t.length <= 80 && !t.includes('\\n') && !t.match(/[·•·]/)) {
+                                    title = t;
+                                    break;
+                                }
+                            }
+                            if (title) break;
+                            el = el.parentElement;
                         }
                     }
                     return {title, company};
@@ -2582,13 +2619,15 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                         _page_job_title = seg[:120]
             except Exception:
                 pass
-        # Store in task_input for downstream use (logs, tailoring, etc.)
+        # Store in task_input for downstream use (logs, tailoring, report, etc.)
+        # NOTE: mutate directly — do NOT use dict(task_input) copy here or
+        # the caller's task_input won't see these values when building the report.
         if _page_job_title:
-            task_input = dict(task_input)
             task_input["_page_job_title"] = _page_job_title
-        if _page_company and not task_input.get("company"):
-            task_input = dict(task_input)
-            task_input["company"] = _page_company
+        if _page_company:
+            task_input["_page_company"] = _page_company
+            if not task_input.get("company"):
+                task_input["company"] = _page_company
 
         _log(task_input, f"Reviewing: {_page_job_title or 'untitled'} at {_page_company or 'unknown company'}",
              "info", "navigation", {"job_title": _page_job_title, "company": _page_company, "url": job_url})
