@@ -2531,7 +2531,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     _co_el = page.locator(_co_sel).first
                     if _co_el.count() > 0:
                         _c = (_co_el.text_content() or "").strip()[:80]
-                        if _c:
+                        if len(_c) >= 2:  # guard against '.' or single-char junk
                             _page_company = _c
                             break
             except Exception:
@@ -2556,21 +2556,22 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     const companyEl = document.querySelector('[aria-label^="Company,"]');
                     if (companyEl) {
                         const lbl = companyEl.getAttribute('aria-label') || '';
-                        company = lbl.replace(/^Company,\\s*/i, '').replace(/\\.?\\s*$/, '').trim();
+                        const parsed = lbl.replace(/^Company,\\s*/i, '').replace(/\\.?\\s*$/, '').trim();
+                        if (parsed.length >= 2) company = parsed;
                     }
                     // Company strategy B: img alt / svg aria-label "Company logo for, ..."
                     if (!company) {
                         for (const el of document.querySelectorAll('img[alt], svg[aria-label], img[aria-label]')) {
                             const alt = el.getAttribute('alt') || el.getAttribute('aria-label') || '';
                             const m = alt.match(/company logo for[,\\s]+(.+?)(\\.)?\\s*$/i);
-                            if (m) { company = m[1].trim(); break; }
+                            if (m && m[1].trim().length >= 2) { company = m[1].trim(); break; }
                         }
                     }
-                    // Company strategy C: first /company/ link text
+                    // Company strategy C: first /company/ link text (min 2 chars)
                     if (!company) {
                         for (const a of document.querySelectorAll('a[href*="/company/"]')) {
                             const t = (a.innerText || '').trim();
-                            if (t && t.length > 0 && t.length < 100) { company = t; break; }
+                            if (t && t.length >= 2 && t.length < 100) { company = t; break; }
                         }
                     }
                     // Title fallback: find a prominent <p> near the company element
@@ -2593,9 +2594,13 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     return {title, company};
                 }""")
                 if not _page_job_title and _extracted.get("title"):
-                    _page_job_title = _extracted["title"][:120]
+                    _t = _extracted["title"].strip()
+                    if len(_t) >= 2:
+                        _page_job_title = _t[:120]
                 if not _page_company and _extracted.get("company"):
-                    _page_company = _extracted["company"][:80]
+                    _c = _extracted["company"].strip()
+                    if len(_c) >= 2:
+                        _page_company = _c[:80]
             except Exception:
                 pass
 
@@ -2609,13 +2614,17 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                 m = _re.match(r"^(.+?) at (.+?)\s*[\|·—]\s*LinkedIn", tab_title)
                 if m:
                     if not _page_job_title:
-                        _page_job_title = m.group(1).strip()[:120]
+                        _t = m.group(1).strip()
+                        if len(_t) >= 2:
+                            _page_job_title = _t[:120]
                     if not _page_company:
-                        _page_company = m.group(2).strip()[:80]
+                        _c = m.group(2).strip()
+                        if len(_c) >= 2:
+                            _page_company = _c[:80]
                 elif " | " in tab_title:
                     # Fallback: first segment before " | "
                     seg = tab_title.split(" | ")[0].strip()
-                    if not _page_job_title and seg:
+                    if not _page_job_title and len(seg) >= 2:
                         _page_job_title = seg[:120]
             except Exception:
                 pass
@@ -2734,7 +2743,6 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                              {"score": score, "threshold": match_threshold, "url": job_url, "skip_reason": "below_score_threshold"})
                         return False
                     _log(task_input, f"Match score {score}% passed — proceeding to apply", "success", "ai_decision", {"score": score})
-                    task_input = dict(task_input)
                     task_input["_last_match_score"] = score
                 except Exception as _me:
                     _log(task_input, f"Match scoring failed ({_me}) — applying anyway", "warning", "ai_decision")
@@ -2743,7 +2751,6 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
 
         # Store jd_text in task_input so _fill_additional_questions can use it for AI cover note
         if jd_text:
-            task_input = dict(task_input)
             task_input["_current_jd_text"] = jd_text
 
         # ── Tailor resume to this JD if requested ─────────────────
@@ -2773,7 +2780,6 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                             {"company": company, "job_title": role, "score": result.score_after},
                         )
                         if result.tailored_pdf_path and os.path.isfile(result.tailored_pdf_path):
-                            task_input = dict(task_input)
                             task_input["resume_path"]   = result.tailored_pdf_path
                             task_input["_tailored_pdf"] = result.tailored_pdf_path
                     except Exception as _te:
