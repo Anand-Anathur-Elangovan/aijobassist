@@ -827,21 +827,21 @@ def claude_answer_question(
     # ── Direct profile lookups — skip AI, validate substantive fields ──
     if any(k in q_lower for k in ("linkedin profile", "linkedin url", "linkedin link")):
         url = user_profile.get("linkedin_url", "").strip()
-        if url:
+        if url and "localhost" not in url and "127.0.0.1" not in url:
             return _validate_fill("LinkedIn URL", url)
-        return "No"
+        return ""
 
     if any(k in q_lower for k in ("github profile", "github url", "github link")):
         url = user_profile.get("github_url", "").strip()
-        if url:
+        if url and "localhost" not in url and "127.0.0.1" not in url:
             return _validate_fill("GitHub URL", url)
-        return "No"
+        return ""
 
     if any(k in q_lower for k in ("website", "blog", "portfolio")):
         url = user_profile.get("portfolio_url", "").strip()
-        if url:
+        if url and "localhost" not in url and "127.0.0.1" not in url:
             return _validate_fill("Portfolio URL", url)
-        return "No"
+        return ""
 
     if any(k in q_lower for k in ("your full name", "your name", "candidate name", "applicant name")):
         name = user_profile.get("full_name", "").strip()
@@ -970,11 +970,15 @@ RULES — follow these strictly:
 - Give the SHORTEST possible answer. Never write a full sentence.
 - For yes/no questions: answer ONLY "Yes" or "No".
 - For name fields: answer ONLY the name, nothing else.
-- For URL fields: answer ONLY the URL, or "No" if unavailable.
+- For URL fields: answer ONLY the URL, or blank if unavailable.
 - For number fields: answer ONLY the number.
 - For free-text: answer in 3-10 words maximum. No fluff, no filler.
+- If the question is a conditional follow-up like "If yes, please describe/identify": answer "No" if the preceding condition does not apply.
+- Questions about visa sponsorship, family/relatives at the company, outside business activities, or prior employment at the company: answer "No".
+- Questions about legal work authorization / eligible to work: answer "Yes".
 - NEVER start with "I", "My", "The", or any preamble.
 - NEVER explain your answer.
+- NEVER say "I need the complete question" — always give a direct short answer.
 
 Applicant profile:
 {profile_block}

@@ -872,6 +872,17 @@ def _is_autocomplete_input(inp) -> bool:
     return False
 
 
+def _sanitize_url(url: str) -> str:
+    """Return url only if it looks like a real public URL (not localhost/dev URLs)."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    bad = ("localhost", "127.0.0.1", "0.0.0.0", ":3000", ":8080", ":5000", ":4000")
+    if any(b in url for b in bad):
+        return ""
+    return url
+
+
 def _build_user_profile(task_input: dict) -> dict:
     """
     Build a user_profile dict from task_input for Claude AI calls.
@@ -887,9 +898,9 @@ def _build_user_profile(task_input: dict) -> dict:
         "email": task_input.get("email", ""),
         "phone": task_input.get("phone", ""),
         "current_city": task_input.get("current_city", ""),
-        "linkedin_url": task_input.get("linkedin_url", ""),
-        "github_url": task_input.get("github_url", ""),
-        "portfolio_url": task_input.get("portfolio_url", ""),
+        "linkedin_url": _sanitize_url(task_input.get("linkedin_url", "")),
+        "github_url": _sanitize_url(task_input.get("github_url", "")),
+        "portfolio_url": _sanitize_url(task_input.get("portfolio_url", "")),
         "years_experience": task_input.get("years_experience", 2),
         "highest_education": task_input.get("highest_education", ""),
         "notice_period": task_input.get("notice_period", ""),
@@ -1076,6 +1087,17 @@ def _fill_additional_questions(page: Page, task_input: dict):
                             "hometown", "home town", "address",
                         ))
 
+                        # "If yes, please describe/identify" follow-up fields → "No"
+                        _is_conditional_followup = any(kw in label_text for kw in (
+                            "if yes, please", "if yes, describe", "if yes, identify",
+                            "if applicable, please", "please explain if",
+                            "please describe your",
+                        ))
+                        if _is_conditional_followup:
+                            human_type(page, "No", locator=inp)
+                            print(f"  [LINKEDIN] Conditional follow-up '{label_text[:60]}' → 'No'")
+                            continue
+
                         # Use Claude to compose a free-text answer
                         try:
                             from automation.ai_client import claude_answer_question
@@ -1161,6 +1183,11 @@ def _fill_additional_questions(page: Page, task_input: dict):
             "personal relationship", "relationship with", "know the employee",
             "associated with deloitte", "employed by any company",
             "applied to", "applied in the past",
+            # Conflict of interest / relatives
+            "family member", "relative", "friends or family",
+            "outside business", "advisory", "consulting", "board role", "side business",
+            "worked for", "previously worked", "ever worked", "former employee",
+            "been employed by", "employment with",
         )
         # Keywords that should get "Yes" (all other yes/no questions)
         _YES_KEYWORDS = (
@@ -1256,6 +1283,14 @@ def _fill_additional_questions(page: Page, task_input: dict):
                 option_labels = [lbl for _, lbl, _, _ in options]
                 is_yes_no = set(option_labels) <= {"yes", "no", ""}
 
+                # EEO/diversity Yes/No radios should get "No"/"prefer not" handled below
+                # by forcing want_no so Claude doesn't pick the wrong option
+                if is_yes_no and any(kw in question_text for kw in (
+                    "disability", "disabled", "veteran", "protected veteran",
+                    "gender", "race", "ethnicity", "sexual orientation",
+                )):
+                    want_no = True
+
                 if is_yes_no:
                     # Simple Yes/No — use keyword heuristics
                     for r, lbl, val, inp_id in options:
@@ -1268,21 +1303,44 @@ def _fill_additional_questions(page: Page, task_input: dict):
                             target_radio, target_label_id = r, inp_id
                             break
                 else:
-                    # Non-Yes/No radios — use Claude to pick the best option
-                    try:
-                        from automation.ai_client import claude_answer_question
-                        non_blank = [lbl for _, lbl, _, _ in options if lbl.strip()]
-                        if non_blank and question_text:
-                            resume_summary = task_input.get("resume_text", "")[:500]
-                            user_profile = _build_user_profile(task_input)
-                            answer = claude_answer_question(question_text, non_blank, resume_summary, user_profile=user_profile)
+                    # Non-Yes/No radios — for EEO/diversity pick "prefer not" first,
+                    # then fall back to Claude for everything else
+                    _eeo_question = any(kw in question_text for kw in (
+                        "disability", "disabled", "veteran", "protected veteran",
+                        "gender", "race", "ethnicity", "sexual orientation",
+                    ))
+                    if _eeo_question:
+                        # Find a "prefer not" / "decline" / "no disability" option
+                        for r, lbl, val, inp_id in options:
+                            if any(kw in lbl for kw in (
+                                "prefer not", "decline", "do not wish", "not specified",
+                                "choose not", "no disability", "not disabled",
+                                "i don't have", "i do not have",
+                            )):
+                                target_radio, target_label_id = r, inp_id
+                                print(f"  [LINKEDIN] Radio → EEO opt-out '{lbl}' for: {question_text[:60]!r}")
+                                break
+                        # If no opt-out found, pick "No" or first option
+                        if target_radio is None:
                             for r, lbl, val, inp_id in options:
-                                if lbl == answer.lower() or answer.lower() in lbl or lbl in answer.lower():
+                                if lbl in ("no", "none"):
                                     target_radio, target_label_id = r, inp_id
-                                    print(f"  [LINKEDIN] Radio → Claude picked '{lbl}' for: {question_text[:60]!r}")
                                     break
-                    except Exception:
-                        pass
+                    else:
+                        try:
+                            from automation.ai_client import claude_answer_question
+                            non_blank = [lbl for _, lbl, _, _ in options if lbl.strip()]
+                            if non_blank and question_text:
+                                resume_summary = task_input.get("resume_text", "")[:500]
+                                user_profile = _build_user_profile(task_input)
+                                answer = claude_answer_question(question_text, non_blank, resume_summary, user_profile=user_profile)
+                                for r, lbl, val, inp_id in options:
+                                    if lbl == answer.lower() or answer.lower() in lbl or lbl in answer.lower():
+                                        target_radio, target_label_id = r, inp_id
+                                        print(f"  [LINKEDIN] Radio → Claude picked '{lbl}' for: {question_text[:60]!r}")
+                                        break
+                        except Exception:
+                            pass
 
                 # Fallback: first option in the group
                 if target_radio is None and options:
@@ -2300,9 +2358,19 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         _page_company = task_input.get("company", "")
         try:
             for _title_sel in [
-                "h1.t-24", "h1.jobs-unified-top-card__job-title",
+                # Current LinkedIn DOM (2024-2025)
+                "h1.job-details-jobs-unified-top-card__job-title",
+                "h1.job-details-jobs-unified-top-card__job-title--clickable",
+                "div.job-details-jobs-unified-top-card__job-title h1",
+                "h1[class*='job-details'][class*='title']",
+                # Legacy selectors
+                "h1.t-24.t-bold", "h1.t-24",
+                "h1.jobs-unified-top-card__job-title",
                 "h1[class*='topcard__title']", "h1.job-title",
-                "h2.t-24", "h1",
+                "h2.t-24",
+                # Broad fallback — grab any h1 on job page
+                "div.job-view-layout h1",
+                "main h1",
             ]:
                 _title_el = page.locator(_title_sel).first
                 if _title_el.count() > 0:
@@ -2314,10 +2382,18 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         if not _page_company:
             try:
                 for _co_sel in [
-                    "a.ember-view.t-black.t-normal span",
+                    # Current LinkedIn DOM (2024-2025)
                     "div.job-details-jobs-unified-top-card__company-name a",
+                    "div.job-details-jobs-unified-top-card__primary-description-container a",
+                    "span.job-details-jobs-unified-top-card__company-name",
+                    "a[class*='job-details'][class*='company']",
+                    # Legacy
+                    "a.ember-view.t-black.t-normal span",
                     "span.jobs-unified-top-card__company-name",
                     "a[class*='topcard__org-name-link']",
+                    "a[class*='company-name']",
+                    # Broad fallback
+                    "div.jobs-unified-top-card a.app-aware-link",
                 ]:
                     _co_el = page.locator(_co_sel).first
                     if _co_el.count() > 0:
