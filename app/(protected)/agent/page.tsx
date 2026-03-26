@@ -298,7 +298,7 @@ export default function AgentPage() {
         task_id:    newTask.id,
         task_type:  taskType,
         task_input: {},
-      }),
+      }), 
     });
 
     if (!res.ok) {
