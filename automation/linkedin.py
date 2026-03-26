@@ -2470,13 +2470,16 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         # ── Extract job title & company from page ────────────────
         _page_job_title = ""
         _page_company = task_input.get("company", "")
+
+        # Strategy 1: CSS selectors (try each, stop at first hit)
         try:
             for _title_sel in [
-                # Current LinkedIn DOM (2024-2025)
+                # Current LinkedIn DOM (2024-2026)
                 "h1.job-details-jobs-unified-top-card__job-title",
                 "h1.job-details-jobs-unified-top-card__job-title--clickable",
                 "div.job-details-jobs-unified-top-card__job-title h1",
                 "h1[class*='job-details'][class*='title']",
+                "h1[class*='unified-top-card'][class*='title']",
                 # Legacy selectors
                 "h1.t-24.t-bold", "h1.t-24",
                 "h1.jobs-unified-top-card__job-title",
@@ -2485,18 +2488,22 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                 # Broad fallback — grab any h1 on job page
                 "div.job-view-layout h1",
                 "main h1",
+                "h1",
             ]:
                 _title_el = page.locator(_title_sel).first
                 if _title_el.count() > 0:
-                    _page_job_title = (_title_el.text_content() or "").strip()[:120]
-                    if _page_job_title:
+                    _t = (_title_el.text_content() or "").strip()[:120]
+                    # Skip generic/nav h1s (very short or LinkedIn brand header)
+                    if _t and len(_t) > 2 and "linkedin" not in _t.lower():
+                        _page_job_title = _t
                         break
         except Exception:
             pass
+
         if not _page_company:
             try:
                 for _co_sel in [
-                    # Current LinkedIn DOM (2024-2025)
+                    # Current LinkedIn DOM (2024-2026)
                     "div.job-details-jobs-unified-top-card__company-name a",
                     "div.job-details-jobs-unified-top-card__primary-description-container a",
                     "span.job-details-jobs-unified-top-card__company-name",
@@ -2511,9 +2518,68 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                 ]:
                     _co_el = page.locator(_co_sel).first
                     if _co_el.count() > 0:
-                        _page_company = (_co_el.text_content() or "").strip()[:80]
-                        if _page_company:
+                        _c = (_co_el.text_content() or "").strip()[:80]
+                        if _c:
+                            _page_company = _c
                             break
+            except Exception:
+                pass
+
+        # Strategy 2: JavaScript DOM walk — scan all visible elements for job title/company
+        # More resilient to class-name changes
+        if not _page_job_title or not _page_company:
+            try:
+                _extracted = page.evaluate("""() => {
+                    // Title: look for h1 elements that aren't navigation/brand
+                    let title = '';
+                    for (const h1 of document.querySelectorAll('h1')) {
+                        const t = (h1.innerText || '').trim();
+                        if (t.length > 2 && t.length < 150 && !t.toLowerCase().includes('linkedin')) {
+                            title = t;
+                            break;
+                        }
+                    }
+                    // Company: look near logo images with company in alt text
+                    let company = '';
+                    for (const img of document.querySelectorAll('img[alt]')) {
+                        const alt = img.alt || '';
+                        const m = alt.match(/company logo for[,\\s]+(.+)/i);
+                        if (m) { company = m[1].trim(); break; }
+                    }
+                    // Company fallback: look for aria-label="... hiring" links
+                    if (!company) {
+                        for (const a of document.querySelectorAll('a[href*="/company/"]')) {
+                            const t = (a.innerText || a.getAttribute('aria-label') || '').trim();
+                            if (t && t.length > 0 && t.length < 100) { company = t; break; }
+                        }
+                    }
+                    return {title, company};
+                }""")
+                if not _page_job_title and _extracted.get("title"):
+                    _page_job_title = _extracted["title"][:120]
+                if not _page_company and _extracted.get("company"):
+                    _page_company = _extracted["company"][:80]
+            except Exception:
+                pass
+
+        # Strategy 3: Parse browser tab title — LinkedIn formats it as
+        #   "Job Title at Company | LinkedIn" or "Company: Job Title | LinkedIn"
+        if not _page_job_title or not _page_company:
+            try:
+                tab_title = page.title() or ""
+                # "Email Developer at WPP Production India | LinkedIn"
+                import re as _re
+                m = _re.match(r"^(.+?) at (.+?)\s*[\|·—]\s*LinkedIn", tab_title)
+                if m:
+                    if not _page_job_title:
+                        _page_job_title = m.group(1).strip()[:120]
+                    if not _page_company:
+                        _page_company = m.group(2).strip()[:80]
+                elif " | " in tab_title:
+                    # Fallback: first segment before " | "
+                    seg = tab_title.split(" | ")[0].strip()
+                    if not _page_job_title and seg:
+                        _page_job_title = seg[:120]
             except Exception:
                 pass
         # Store in task_input for downstream use (logs, tailoring, etc.)
