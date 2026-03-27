@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import json
 import base64
 import random
 import tempfile
@@ -451,6 +452,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 # Inject current company for tailoring context
                 if company_hint:
                     task_input["company"] = company_hint
+                else:
+                    task_input.pop("company", None)  # clear stale discovered company from previous job
                 # Clear per-job extracted fields so stale values from previous job don't bleed into report
                 task_input.pop("_page_job_title", None)
                 task_input.pop("_page_company", None)
@@ -539,6 +542,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                             # Clear per-job fields so stale values don't bleed into report
                             task_input.pop("_page_job_title", None)
                             task_input.pop("_page_company", None)
+                            task_input.pop("company", None)  # clear stale discovered company from previous job
                             success = _apply_to_job(page, ej_url, task_input)
                             if _li_user_id:
                                 try:
@@ -2366,12 +2370,16 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
     print(f"  [LINKEDIN] Searching: '{keywords}' in '{location}'")
 
     # ── Build filter params ─────────────────────────────────────────────
+    _li_apply_type = task_input.get("linkedin_apply_types", "easy_apply_only")
     params: dict[str, str] = {
         "keywords": keywords,
         "location": location,
-        "f_AL":     "true",   # Easy Apply only
         "sortBy":   "DD",     # Most recent
     }
+    # Easy Apply filter: only when preference is easy_apply_only
+    # For external_only/both we need general search (no f_AL)
+    if _li_apply_type == "easy_apply_only":
+        params["f_AL"] = "true"
 
     # Date posted: f_TPR  (r86400 = last 24h, r604800 = last week, r2592000 = last month)
     _DATE_MAP = {
@@ -2465,6 +2473,621 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
     return job_links
 
 
+def _dismiss_cookie_banner(pg, task_input: dict) -> None:
+    """
+    Click any cookie consent / GDPR banner accept button.
+    Runs a broad JS sweep first (fastest), then Playwright selector checks.
+    Silent — never raises.
+    """
+    try:
+        accepted = pg.evaluate("""() => {
+            const keywords = ['accept all','accept cookies','allow all','agree','i agree',
+                              'accept','allow cookies','got it','ok','okay','continue',
+                              'akzeptieren','accepter','aceptar','accetta'];
+            const reject   = ['reject','decline','deny','no thanks','refuse','necessary only',
+                               'essential only','manage','settings','preferences'];
+            for (const el of document.querySelectorAll(
+                'button,[role="button"],a[href="#"],[class*="cookie"],[class*="consent"],[id*="cookie"],[id*="consent"]'
+            )) {
+                const txt = (el.innerText||el.textContent||el.getAttribute('aria-label')||'').trim().toLowerCase();
+                if (!txt) continue;
+                if (reject.some(r => txt.includes(r))) continue;
+                if (keywords.some(k => txt.includes(k))) {
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        if accepted:
+            pg.wait_for_timeout(600)
+            _log(task_input, "External apply: cookie banner dismissed", "info", "navigation")
+            return
+    except Exception:
+        pass
+
+    # Playwright fallback — common framework selectors
+    for sel in [
+        "#onetrust-accept-btn-handler",
+        "button#accept-all", "button#acceptAll", "button#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+        "[data-testid='cookie-policy-dialog-accept-button']",
+        "button[aria-label*='Accept']", "button[aria-label*='accept']",
+        "button:has-text('Accept all')", "button:has-text('Accept All')",
+        "button:has-text('Allow all')", "button:has-text('Allow All')",
+        "button:has-text('Accept cookies')", "button:has-text('I accept')",
+        "button:has-text('Got it')", "button:has-text('OK')",
+        ".cc-accept", ".cc-btn.cc-allow",
+        "[class*='cookie'] button", "[id*='cookie'] button",
+    ]:
+        try:
+            btn = pg.locator(sel).first
+            if btn.is_visible(timeout=600):
+                btn.click()
+                pg.wait_for_timeout(600)
+                _log(task_input, f"External apply: cookie banner dismissed via {sel}", "info", "navigation")
+                return
+        except Exception:
+            continue
+
+
+def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
+    """
+    Open the company application portal in a new browser tab and fill+submit
+    the form using Claude AI (profile + resume data).
+    Returns True if successfully submitted, False otherwise.
+    """
+    try:
+        from automation.ai_client import fill_external_form_fields as _fill_fields
+    except ImportError:
+        _log(task_input, "External apply: ai_client unavailable", "error", "error")
+        return False
+
+    _log(task_input, "🌐 External apply — opening company portal…", "info", "navigation", {"url": apply_href})
+    ext_page = None
+    try:
+        ext_page = page.context.new_page()
+        # Use 'load' so the HTML + inline scripts fire, then wait for networkidle
+        # so React/Vue SPAs have time to render the form.
+        ext_page.goto(apply_href, wait_until="load", timeout=30000)
+        try:
+            ext_page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass  # timeout OK — continue with whatever rendered
+        human_sleep(1.5, 2.5)
+
+        # ── Dismiss cookie / consent banners before doing anything ──
+        _dismiss_cookie_banner(ext_page, task_input)
+
+        # ── If this is a job description page (no form yet), click 'Apply' CTA ──
+        # e.g. Ashby, Lever, Greenhouse all show a description page with an
+        # 'Apply for this Job' / 'Apply Now' button that leads to the actual form.
+        _clicked_apply_cta = False
+        for _cta_sel in [
+            "a:has-text('Apply for this Job')",
+            "a:has-text('Apply for this Position')",
+            "button:has-text('Apply for this Job')",
+            "a:has-text('Apply Now')",
+            "button:has-text('Apply Now')",
+            "a[href*='/application']",
+            "a[href*='/apply']",
+        ]:
+            try:
+                _cta = ext_page.locator(_cta_sel).first
+                if _cta.is_visible(timeout=1200):
+                    _log(task_input, f"External apply: clicking apply CTA ({_cta_sel})", "info", "navigation")
+                    _cta.click()
+                    # Check if click opened a popup/new tab — switch to it
+                    import time as _time; _time.sleep(0.8)
+                    _ctx_pages = page.context.pages
+                    if len(_ctx_pages) > 1 and _ctx_pages[-1] is not ext_page:
+                        _log(task_input, "External apply: CTA opened popup — switching to popup page", "info", "navigation")
+                        ext_page = _ctx_pages[-1]
+                    try:
+                        ext_page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    # Wait for at least one form element to appear (SPA renders async after networkidle)
+                    try:
+                        ext_page.wait_for_selector("input, textarea, select", state="visible", timeout=9000)
+                    except Exception:
+                        pass  # fall through to fixed sleep
+                    human_sleep(1.0, 1.8)
+                    _dismiss_cookie_banner(ext_page, task_input)
+                    _clicked_apply_cta = True
+                    break
+            except Exception:
+                continue
+
+        resume_text = task_input.get("resume_text", "")
+        jd_text     = task_input.get("_current_jd_text", "")
+        resume_path = task_input.get("resume_path", "")
+        # Build flat profile dict (no internal _ keys, no complex objects)
+        user_profile = {k: v for k, v in task_input.items()
+                        if not k.startswith("_") and isinstance(v, (str, int, float))}
+
+        # JS that returns all interactive form fields including radio/checkbox groups
+        FIELD_JS = """() => {
+            const fields = [], seen = new Set();
+            const isVisible = (el) => {
+                // Skip truly hidden elements — display:none, visibility:hidden, or detached
+                if (!el || el.offsetParent === null) return false;
+                const s = window.getComputedStyle(el);
+                if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            };
+            const getLabel = (el) => {
+                if (el.getAttribute('aria-label')) return el.getAttribute('aria-label').trim();
+                if (el.id) {
+                    const l = document.querySelector('label[for="' + el.id + '"]');
+                    if (l) return l.innerText.replace(/\\s+/g,' ').trim();
+                }
+                const lid = el.getAttribute('aria-labelledby');
+                if (lid) { const l = document.getElementById(lid); if (l) return l.innerText.replace(/\\s+/g,' ').trim(); }
+                if (el.placeholder) return el.placeholder.trim();
+                const p = el.parentElement;
+                if (p) { const t=(p.innerText||'').replace(/\\s+/g,' ').trim(); if(t&&t.length<100) return t; }
+                return '';
+            };
+            for (const el of document.querySelectorAll(
+                'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
+            )) {
+                if (!isVisible(el)) continue;  // skip hidden/invisible inputs
+                const key = el.id || el.name || (el.type+'_'+fields.length);
+                if (seen.has(key)) continue; seen.add(key);
+                const tag = el.tagName.toLowerCase();
+                // detect Oracle cx-select combobox vs plain text
+                const role = el.getAttribute('role') || '';
+                const type = tag==='select'?'select':tag==='textarea'?'textarea':
+                    (role==='combobox'?'combobox':(el.type||'text'));
+                const opts = type==='select' ? Array.from(el.options).filter(o=>o.value!=='').map(o=>o.text.trim()) : [];
+                fields.push({ id: key, name: el.name||'', label: getLabel(el), type, options: opts,
+                              required: el.required||el.getAttribute('aria-required')==='true',
+                              placeholder: el.placeholder||'' });
+            }
+            const groups = {};
+            for (const el of document.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
+                if (!isVisible(el)) continue;  // skip hidden checkboxes/radios
+                const g = el.name || ('grp_'+el.id);
+                if (!g) continue;
+                if (!groups[g]) groups[g]={ id:g, name:g, label:getLabel(el), type:el.type, options:[], required:el.required };
+                const optLbl = el.labels&&el.labels[0] ? el.labels[0].innerText.trim()
+                             : el.nextSibling&&el.nextSibling.textContent ? el.nextSibling.textContent.trim() : el.value;
+                groups[g].options.push(optLbl||el.value);
+            }
+            for (const g of Object.values(groups)) { if (!seen.has(g.id)) fields.push(g); }
+            // ── Oracle Fusion / Taleo cx-select-pills (button-group pill selectors) ──
+            for (const ul of document.querySelectorAll('ul.cx-select-pills-container')) {
+                if (!isVisible(ul)) continue;
+                const label = (ul.getAttribute('aria-label') || '').trim();
+                if (!label) continue;
+                const options = Array.from(ul.querySelectorAll('button .cx-select-pill-name'))
+                                    .map(s => s.textContent.trim()).filter(Boolean);
+                const key = 'cxpill_' + label.replace(/\\W+/g,'_').substring(0,40);
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    fields.push({ id: key, name: key, label, type: 'cx_pills', options, required: true, placeholder: '' });
+                }
+            }
+            // ── Oracle Fusion / Taleo — hidden required T&C / legal-disclaimer checkboxes ──
+            for (const inp of document.querySelectorAll('input[type="checkbox"].input-row__hidden-control')) {
+                if (inp.checked) continue;  // already accepted
+                const lbl = inp.id ? document.querySelector('label[for="'+inp.id+'"]') : inp.closest('label');
+                const text = lbl ? (lbl.innerText||'').replace(/\\s+/g,' ').trim().substring(0,80) : (inp.id||'legal_checkbox');
+                const key = 'legalchk_' + (inp.id || inp.name || 'chk');
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    fields.push({ id: inp.id||inp.name, name: inp.name||inp.id, label: text, type: 'legal_checkbox', options: [], required: true, placeholder: '' });
+                }
+            }
+            // ── intl-tel-input phone country selector (Greenhouse, Lever, etc.) ──
+            for (const btn of document.querySelectorAll('button.iti__selected-country')) {
+                if (!isVisible(btn)) continue;
+                const container = btn.closest('.iti');
+                const phoneInp = container ? container.querySelector('input[type="tel"],input[type="phone"],input[name*="phone"],input[id*="phone"]') : null;
+                const key = 'iti_phone_' + (phoneInp ? (phoneInp.id || phoneInp.name || 'phone') : 'phone');
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    fields.push({ id: key, name: key, label: 'Phone Country Code', type: 'iti_phone', options: [], required: false, placeholder: '' });
+                }
+            }
+            return fields;
+        }"""
+
+        for step in range(8):
+            fields      = ext_page.evaluate(FIELD_JS)
+            file_fields = [f for f in fields if f.get("type") == "file"]
+            form_fields = [f for f in fields if f.get("type") not in ("file",)]
+
+            # Full visible page text — gives Claude full context on what the form is asking
+            try:
+                page_text = ext_page.evaluate("() => (document.body && document.body.innerText) || ''")
+            except Exception:
+                page_text = ""
+
+            if not form_fields and not file_fields:
+                # Allow up to 3 retries for slow React/SPA portals (Greenhouse, Workday, etc.)
+                if step < 3:
+                    _log(task_input,
+                         f"External apply: no fields yet (attempt {step+1}/3) — waiting for SPA render…",
+                         "warning", "ai_decision")
+                    try:
+                        ext_page.wait_for_selector("input, textarea, select", state="visible", timeout=6000)
+                    except Exception:
+                        human_sleep(3.0, 4.0)
+                    continue  # re-run FIELD_JS on next step iteration
+                _log(task_input, f"External apply: no fields after {step+1} attempts — giving up", "warning", "ai_decision")
+                break
+
+            _log(task_input,
+                 f"External apply step {step+1}: {len(form_fields)} fields, {len(file_fields)} file input(s)",
+                 "info", "ai_decision")
+
+            # Fill text/select/radio/checkbox fields via Claude
+            if form_fields:
+                answers = _fill_fields(form_fields, user_profile, resume_text, jd_text, page_text=page_text)
+                for field in form_fields:
+                    fid    = field.get("id", "")
+                    fname  = field.get("name", "") or fid
+                    ftype  = field.get("type", "text")
+
+                    # ── Legal disclaimer / T&C checkboxes — always auto-accept ──────────
+                    if ftype == "legal_checkbox":
+                        try:
+                            ext_page.evaluate(
+                                """(id) => {
+                                    const inp = document.getElementById(id)
+                                             || document.querySelector('input[name="'+id+'"]');
+                                    if (!inp || inp.checked) return;
+                                    // Prefer the visual KO toggle button inside the label
+                                    const lbl = inp.id
+                                        ? document.querySelector('label[for="'+inp.id+'"]')
+                                        : inp.closest('label');
+                                    if (lbl) {
+                                        const span = lbl.querySelector('.apply-flow-input-checkbox__button');
+                                        if (span) { span.click(); return; }
+                                        lbl.click(); return;
+                                    }
+                                    inp.click();
+                                }""",
+                                fid
+                            )
+                            _log(task_input,
+                                 f"External apply: accepted legal/T&C checkbox '{field.get('label','?')[:50]}'",
+                                 "info", "ai_decision")
+                            human_sleep(0.2, 0.5)
+                        except Exception as _lce:
+                            _log(task_input, f"External apply: legal checkbox failed ({_lce})", "warning", "ai_decision")
+                        continue
+
+                    answer = str(answers.get(fid) or answers.get(fname) or "")
+                    if not answer:
+                        continue
+                    # IDs/names with CSS-special chars ([ ] . # etc.) cannot be used in
+                    # attribute selectors directly — always use JS getElementById/querySelector
+                    def _has_css_special(s: str) -> bool:
+                        return any(c in s for c in ("[", "]", ".", "#", ":", "(", ")", "!", "/"))
+                    try:
+                        if ftype == "iti_phone":
+                            # intl-tel-input phone country selector (Greenhouse, Lever, etc.)
+                            country_code = (user_profile.get("phone_country_code") or "us").lower()
+                            ext_page.evaluate(
+                                """([code]) => {
+                                    const btn = document.querySelector('button.iti__selected-country');
+                                    if (!btn) return;
+                                    btn.click();
+                                    return new Promise(resolve => setTimeout(() => {
+                                        const li = document.querySelector('[data-country-code="'+code+'"]')
+                                                || document.querySelector('[data-dial-code]')
+                                                        ?.closest('ul')?.querySelector('li[id*="'+code+'"]');
+                                        if (li) li.click();
+                                        resolve();
+                                    }, 350));
+                                }""",
+                                [country_code]
+                            )
+                            human_sleep(0.5, 0.8)
+                            continue
+                        elif ftype == "cx_pills":
+                            # Oracle Fusion ATS pill-button selector
+                            _filled = ext_page.evaluate(
+                                """([label, val]) => {
+                                    for (const ul of document.querySelectorAll('ul.cx-select-pills-container')) {
+                                        const lbl = (ul.getAttribute('aria-label')||'').trim();
+                                        if (lbl !== label) continue;
+                                        for (const btn of ul.querySelectorAll('button.cx-select-pill-section')) {
+                                            const txt = (btn.querySelector('.cx-select-pill-name')?.textContent||'').trim();
+                                            const vLo = val.trim().toLowerCase();
+                                            if (txt===val||txt.replace(/^\\s+/,'')===val
+                                                ||txt.toLowerCase()===vLo
+                                                ||txt.replace(/^\\s+/,'').toLowerCase()===vLo) {
+                                                if (btn.getAttribute('aria-pressed')!=='true') btn.click();
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                    return false;
+                                }""",
+                                [field.get("label", ""), answer]
+                            )
+                            if not _filled:
+                                _log(task_input,
+                                     f"External apply: cx-pills '{field.get('label','?')[:40]}' — no pill matched '{answer}'",
+                                     "warning", "ai_decision")
+                            human_sleep(0.1, 0.3)
+                            continue
+                        elif ftype == "combobox":
+                            # Oracle cx-select combobox: toggle open → pick option from listbox
+                            try:
+                                _tog = f"{fid}-toggle-button"
+                                ext_page.evaluate(
+                                    "(id) => { const b=document.getElementById(id); if(b) b.click(); }", _tog
+                                )
+                                human_sleep(0.4, 0.7)
+                                _picked = ext_page.evaluate(
+                                    """([cid, val]) => {
+                                        const lb = document.getElementById(cid+'-listbox')
+                                                || document.querySelector('[role="listbox"],[role="grid"]');
+                                        if (!lb) return false;
+                                        const vLo = val.toLowerCase();
+                                        for (const opt of lb.querySelectorAll('[role="option"],[role="row"],[role="gridcell"]')) {
+                                            const t = (opt.textContent||'').trim();
+                                            if (t===val||t.toLowerCase()===vLo||t.toLowerCase().includes(vLo)) {
+                                                opt.click(); return true;
+                                            }
+                                        }
+                                        return false;
+                                    }""",
+                                    [fid, answer]
+                                )
+                                if not _picked and not _has_css_special(fid):
+                                    # Fallback: type into input, autocomplete will suggest
+                                    _cinp = ext_page.locator(f'[id="{fid}"]').first
+                                    if _cinp.count():
+                                        _cinp.fill(answer)
+                                        human_sleep(0.5, 0.8)
+                                        ext_page.evaluate(
+                                            """([cid, val]) => {
+                                                const lb = document.querySelector('[role="listbox"],[role="grid"]');
+                                                if (!lb) return;
+                                                const vLo = val.toLowerCase();
+                                                for (const opt of lb.querySelectorAll('[role="option"],[role="row"],[role="gridcell"]')) {
+                                                    const t=(opt.textContent||'').trim();
+                                                    if (t===val||t.toLowerCase()===vLo||t.toLowerCase().includes(vLo)) {
+                                                        opt.click(); return;
+                                                    }
+                                                }
+                                            }""",
+                                            [fid, answer]
+                                        )
+                            except Exception as _cbe:
+                                _log(task_input, f"External apply: combobox '{field.get('label','?')[:40]}' failed ({_cbe})", "warning", "ai_decision")
+                            human_sleep(0.1, 0.3)
+                            continue
+                        elif ftype == "select":
+                            if fid and not fid.startswith("grp_") and not _has_css_special(fid):
+                                _sel = f'[id="{fid}"]'
+                            else:
+                                _sel = f'[name="{fname}"]'
+                            # Try by label text first (most robust for <select>), fallback to value
+                            _filled = False
+                            for _try in ("label", "value"):
+                                try:
+                                    if _try == "label":
+                                        ext_page.locator(_sel).select_option(label=answer)
+                                    else:
+                                        ext_page.locator(_sel).select_option(value=answer)
+                                    _filled = True
+                                    break
+                                except Exception:
+                                    continue
+                            if not _filled:
+                                # Last resort: JS select by text
+                                ext_page.evaluate(
+                                    """([id, name, val]) => {
+                                        const el = document.getElementById(id) ||
+                                                   document.querySelector('[name="'+name+'"]');
+                                        if (!el) return;
+                                        for (const opt of el.options) {
+                                            if (opt.text.trim()===val||opt.value===val) {
+                                                el.value=opt.value;
+                                                el.dispatchEvent(new Event('change',{bubbles:true}));
+                                                break;
+                                            }
+                                        }
+                                    }""",
+                                    [fid, fname, answer]
+                                )
+                        elif ftype in ("radio", "checkbox"):
+                            ext_page.evaluate(
+                                """([name, val]) => {
+                                    for (const inp of document.querySelectorAll('input[name="'+name+'"]')) {
+                                        if (!inp.offsetParent) continue;  // skip hidden
+                                        const lbl = inp.labels&&inp.labels[0] ? inp.labels[0].innerText.trim()
+                                                  : inp.nextSibling ? (inp.nextSibling.textContent||'').trim() : inp.value;
+                                        if (inp.value===val||lbl===val) { inp.click(); break; }
+                                    }
+                                }""",
+                                [fname, answer]
+                            )
+                        else:
+                            # Use JS fill for IDs with special chars; Playwright locator for clean IDs
+                            if fid and not fid.startswith("grp_") and not _has_css_special(fid):
+                                el = ext_page.locator(f'[id="{fid}"]').first
+                                if el.count() > 0:
+                                    el.fill(answer)
+                            else:
+                                ext_page.evaluate(
+                                    """([id, name, val]) => {
+                                        const el = document.getElementById(id) ||
+                                                   document.querySelector('[name="'+name+'"]');
+                                        if (el) {
+                                            el.focus();
+                                            el.value = val;
+                                            el.dispatchEvent(new Event('input',{bubbles:true}));
+                                            el.dispatchEvent(new Event('change',{bubbles:true}));
+                                        }
+                                    }""",
+                                    [fid, fname, answer]
+                                )
+                        human_sleep(0.05, 0.2)
+                    except Exception as _fe:
+                        _log(task_input,
+                             f"External apply: field '{field.get('label','?')}' fill failed ({_fe})",
+                             "warning", "ai_decision")
+
+            # Resume upload (first file input only)
+            if file_fields and resume_path and os.path.isfile(resume_path):
+                try:
+                    ext_page.locator('input[type="file"]').first.set_input_files(resume_path)
+                    human_sleep(1.0, 2.0)
+                    _log(task_input, "External apply: resume uploaded", "success", "ai_decision")
+                except Exception as _ue:
+                    _log(task_input, f"External apply: resume upload failed ({_ue})", "warning", "ai_decision")
+
+            # ── Before advancing: auto-accept any remaining unchecked legal/T&C checkboxes ──
+            # (catches checkboxes that FIELD_JS missed or that appeared after fills)
+            try:
+                _n_legal = ext_page.evaluate("""
+                    () => {
+                        let n = 0;
+                        for (const inp of document.querySelectorAll('input[type="checkbox"].input-row__hidden-control')) {
+                            if (inp.checked) continue;
+                            const lbl = inp.id
+                                ? document.querySelector('label[for="'+inp.id+'"]')
+                                : inp.closest('label');
+                            if (lbl) {
+                                const span = lbl.querySelector('.apply-flow-input-checkbox__button');
+                                if (span) { span.click(); n++; continue; }
+                                lbl.click(); n++;
+                            }
+                        }
+                        return n;
+                    }
+                """)
+                if _n_legal:
+                    _log(task_input, f"External apply: auto-accepted {_n_legal} legal/T&C checkbox(es)", "info", "ai_decision")
+                    human_sleep(0.5, 1.0)
+            except Exception:
+                pass
+
+            # Try Submit — broad set of labels + type=submit fallback
+            _submitted = False
+            for submit_sel in [
+                "button[type='submit']", "input[type='submit']",
+                "button:has-text('Submit')", "button:has-text('Submit Application')",
+                "button:has-text('Apply Now')", "button:has-text('Apply')",
+                "button:has-text('Send Application')", "button:has-text('Send')",
+                "button:has-text('Complete Application')", "button:has-text('Finish')",
+                "button:has-text('Done')", "button:has-text('Confirm')",
+                "a:has-text('Submit Application')", "a:has-text('Apply Now')",
+                "[data-testid*='submit']", "[data-testid*='apply']",
+                "[class*='submit']", "[class*='apply-btn']",
+            ]:
+                try:
+                    btn = ext_page.locator(submit_sel).first
+                    if btn.is_visible(timeout=800):
+                        _pre_url = ext_page.url
+                        human_click(ext_page, locator=btn)
+                        human_sleep(2.5, 4.0)
+                        _post_url = ext_page.url
+                        # Verify actual submission via URL change or on-page confirmation
+                        _confirmed = _post_url != _pre_url
+                        if not _confirmed:
+                            try:
+                                _confirmed = bool(ext_page.evaluate(
+                                    """() => {
+                                        const txt = ((document.body && document.body.innerText) || '').toLowerCase();
+                                        return txt.includes('thank you') ||
+                                               txt.includes('application submitted') ||
+                                               txt.includes('successfully submitted') ||
+                                               txt.includes('application received') ||
+                                               txt.includes('we received your application') ||
+                                               txt.includes('application complete') ||
+                                               !!document.querySelector('.confirmation,[class*=confirmation],[data-testid*=confirmation]');
+                                    }"""
+                                ))
+                            except Exception:
+                                pass
+                        if _confirmed:
+                            _log(task_input, "✅ External application submitted", "success", "applied")
+                            ext_page.close()
+                            return True
+                        else:
+                            _log(task_input,
+                                 f"⚠️ Submit clicked but no confirmation detected (URL: {_post_url[:80]})",
+                                 "warning", "ai_decision")
+                            # Don't return — may be multi-step; continue outer loop
+                except Exception:
+                    continue
+
+            # Try Next / Continue
+            advanced = False
+            for next_sel in [
+                "button:has-text('Next')", "button:has-text('Continue')",
+                "button:has-text('Next Step')", "button:has-text('Proceed')",
+                "button:has-text('Save & Continue')", "button:has-text('Save and Continue')",
+                "button:has-text('Go to next')", "button[aria-label*='Next']",
+                "button[aria-label*='Continue']", "a:has-text('Next')",
+                "a:has-text('Continue')", "[data-testid*='next']",
+                "[data-testid*='continue']",
+            ]:
+                try:
+                    btn = ext_page.locator(next_sel).first
+                    if btn.is_visible(timeout=800):
+                        human_click(ext_page, locator=btn)
+                        human_sleep(1.5, 2.5)
+                        # Re-dismiss any cookie banner that might appear on new step
+                        _dismiss_cookie_banner(ext_page, task_input)
+                        _log(task_input, "External apply: moving to next step…", "info", "navigation")
+                        advanced = True
+                        break
+                except Exception:
+                    continue
+
+            if not advanced:
+                # Last resort: ask JS to find the most prominent non-back button
+                try:
+                    clicked = ext_page.evaluate("""() => {
+                        const candidates = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))
+                            .filter(el => {
+                                const txt = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().toLowerCase();
+                                const style = window.getComputedStyle(el);
+                                const rect = el.getBoundingClientRect();
+                                return el.offsetParent !== null
+                                    && rect.width > 40 && rect.height > 20
+                                    && !['back','cancel','close','decline','reject','dismiss','no thanks'].some(w=>txt.includes(w))
+                                    && (style.backgroundColor !== 'transparent' || el.type === 'submit');
+                            });
+                        if (candidates.length > 0) { candidates[0].click(); return true; }
+                        return false;
+                    }""")
+                    if clicked:
+                        human_sleep(1.5, 2.5)
+                        _dismiss_cookie_banner(ext_page, task_input)
+                        _log(task_input, "External apply: advanced via JS fallback button", "info", "navigation")
+                        advanced = True
+                except Exception:
+                    pass
+
+            if not advanced:
+                _log(task_input, "External apply: no Submit/Next found — cannot progress", "warning", "navigation")
+                break
+
+        _log(task_input, "External apply: could not complete submission", "warning", "navigation")
+        ext_page.close()
+        return False
+
+    except Exception as _e:
+        _log(task_input, f"External apply error: {_e}", "error", "error")
+        try:
+            if ext_page:
+                ext_page.close()
+        except Exception:
+            pass
+        return False
+
+
 def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
     """
     Complete Easy Apply flow for one job.
@@ -2481,7 +3104,11 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
     try:
         # ── Extract job title & company from page ────────────────
         _page_job_title = ""
-        _page_company = task_input.get("company", "")
+        # Always start fresh — do NOT seed from task_input["company"] here.
+        # That key is shared across all jobs in the loop, so seeding from it
+        # causes the previous job's company to bleed into this job.
+        # company_hint fallback is applied AFTER all strategies fail.
+        _page_company = ""
 
         # Strategy 1: CSS selectors (try each, stop at first hit)
         try:
@@ -2614,15 +3241,22 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                         _page_job_title = seg[:120]
             except Exception:
                 pass
+
+        # Last-resort fallback: use company_hint from task_input if all strategies failed
+        if not _page_company:
+            _page_company = task_input.get("company", "")
+
         # Store in task_input for downstream use (logs, tailoring, report, etc.)
         # NOTE: mutate directly — do NOT use dict(task_input) copy here or
         # the caller's task_input won't see these values when building the report.
         if _page_job_title:
             task_input["_page_job_title"] = _page_job_title
-        if _page_company:
-            task_input["_page_company"] = _page_company
-            if not task_input.get("company"):
-                task_input["company"] = _page_company
+        # Always overwrite _page_company so the report always gets the fresh value
+        # for this specific job (prevents previous job's company from bleeding through).
+        task_input["_page_company"] = _page_company
+        # Only update the shared "company" hint if it wasn't already set by the caller
+        if _page_company and not task_input.get("company"):
+            task_input["company"] = _page_company
 
         _log(task_input, f"Reviewing: {_page_job_title or 'untitled'} at {_page_company or 'unknown company'}",
              "info", "navigation", {"job_title": _page_job_title, "company": _page_company, "url": job_url})
@@ -2773,7 +3407,10 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             else:
                 _log(task_input, "Could not extract JD text — applying with original resume", "warning", "tailor")
 
-        # ── Find Easy Apply link/button ───────────────────────────
+        # ── Detect apply button type and route per user preference ──────────
+        _linkedin_apply_types = task_input.get("linkedin_apply_types", "easy_apply_only")
+
+        # Always look for Easy Apply button
         easy_apply_btn = None
         for sel in [
             "a[aria-label='Easy Apply to this job']",
@@ -2793,9 +3430,43 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             except Exception:
                 continue
 
-        if easy_apply_btn is None:
-            print(f"  [LINKEDIN] No Easy Apply button — skipping")
-            return False
+        # Look for external "Apply on company website" button
+        external_apply_href = None
+        if _linkedin_apply_types in ("external_only", "both"):
+            for ext_sel in [
+                "a[aria-label='Apply on company website']",
+                "a[aria-label*='Apply on company']",
+                "a[aria-label='Apply'][target='_blank']",
+            ]:
+                try:
+                    btn = page.locator(ext_sel).first
+                    if btn.is_visible(timeout=2000):
+                        _href = btn.get_attribute("href") or ""
+                        if _href:
+                            external_apply_href = _href
+                            print(f"  [LINKEDIN] External apply button found: {ext_sel}")
+                            break
+                except Exception:
+                    continue
+
+        # Route based on preference
+        if _linkedin_apply_types == "easy_apply_only":
+            if easy_apply_btn is None:
+                _log(task_input, "No Easy Apply button — skipping (preference: Easy Apply only)", "skip", "skip")
+                return False
+            # Fall through to Easy Apply flow below
+        elif _linkedin_apply_types == "external_only":
+            if not external_apply_href:
+                _log(task_input, "No external Apply button — skipping (preference: External Apply only)", "skip", "skip")
+                return False
+            return _apply_external_job(page, external_apply_href, task_input)
+        else:  # "both" — prefer Easy Apply, fall back to external
+            if easy_apply_btn is None and external_apply_href:
+                return _apply_external_job(page, external_apply_href, task_input)
+            elif easy_apply_btn is None:
+                _log(task_input, "No apply button found — skipping", "skip", "skip")
+                return False
+            # else: easy_apply_btn found, fall through to Easy Apply flow
 
         human_click(page, locator=easy_apply_btn)
         idle_jiggle(page, duration=random.uniform(3.0, 5.5))   # jiggle while modal loads

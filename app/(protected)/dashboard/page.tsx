@@ -94,8 +94,11 @@ export default function DashboardPage() {
   const [appsCount, setAppsCount] = useState(0);
   const [loadingData, setLoadingData] = useState(true);
   const [taskLoading, setTaskLoading] = useState(false);
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [phone, setPhone] = useState("");
   const [phoneCountry, setPhoneCountry] = useState("India (+91)");
+  const [phoneCountryCode, setPhoneCountryCode] = useState("in");
   const [yearsExp, setYearsExp] = useState("2");
   const [skillRating, setSkillRating] = useState("8");
   const [keywords, setKeywords] = useState("Software Engineer");
@@ -140,6 +143,8 @@ export default function DashboardPage() {
   const [favCompanyInput, setFavCompanyInput] = useState("");
   // Naukri-specific apply type preference
   const [naukriApplyTypes, setNaukriApplyTypes] = useState<"both" | "direct_only" | "company_site_only">("both");
+  // LinkedIn apply type preference
+  const [linkedinApplyTypes, setLinkedinApplyTypes] = useState<"easy_apply_only" | "external_only" | "both">("easy_apply_only");
   // LinkedIn search filters
   const [linkedinDatePosted, setLinkedinDatePosted] = useState<"any" | "past24h" | "pastWeek" | "pastMonth">("any");
   const [linkedinExpLevel, setLinkedinExpLevel] = useState<"all" | "internship" | "entry" | "associate" | "mid" | "director" | "executive">("all");
@@ -255,6 +260,8 @@ export default function DashboardPage() {
         const p = data.job_preferences as Record<string, unknown>;
         // Profile fields
         if (p.current_city) setCurrentCity(p.current_city as string);
+        if (p.first_name) setFirstName(p.first_name as string);
+        if (p.last_name) setLastName(p.last_name as string);
         if (p.linkedin_url) setLinkedinUrl(p.linkedin_url as string);
         if (p.github_url) setGithubUrl(p.github_url as string);
         if (p.portfolio_url) setPortfolioUrl(p.portfolio_url as string);
@@ -269,6 +276,7 @@ export default function DashboardPage() {
         if (p.ethnicity) setEthnicity(p.ethnicity as string);
         if (p.phone) setPhone(p.phone as string);
         if (p.phone_country) setPhoneCountry(p.phone_country as string);
+        if (p.phone_country_code) setPhoneCountryCode(p.phone_country_code as string);
         if (p.years_experience) setYearsExp(String(p.years_experience));
         if (p.notice_period) setNoticePeriod(String(p.notice_period));
         if (p.salary_expectation) setSalaryExpectation(String(p.salary_expectation));
@@ -303,6 +311,7 @@ export default function DashboardPage() {
         if (p.naukri_work_mode) setNaukriWorkMode(p.naukri_work_mode as "any" | "remote" | "hybrid" | "office");
         if (p.naukri_job_type) setNaukriJobType(p.naukri_job_type as "all" | "fullTime" | "partTime" | "contract" | "temporary");
         if (p.naukri_apply_types) setNaukriApplyTypes(p.naukri_apply_types as "both" | "direct_only" | "company_site_only");
+        if (p.linkedin_apply_types) setLinkedinApplyTypes(p.linkedin_apply_types as "easy_apply_only" | "external_only" | "both");
       }
       setProfileLoaded(true);
     });
@@ -388,12 +397,15 @@ export default function DashboardPage() {
     const prefs = {
       // Profile fields
       current_city: currentCity.trim(),
+      first_name: firstName.trim(),
+      last_name: lastName.trim(),
       linkedin_url: linkedinUrl.trim(),
       github_url: githubUrl.trim(),
       portfolio_url: portfolioUrl.trim(),
       highest_education: highestEducation.trim(),
       phone: phone.trim(),
       phone_country: phoneCountry,
+      phone_country_code: phoneCountryCode,
       years_experience: Number(yearsExp) || 0,
       notice_period: Number(noticePeriod) || 0,
       salary_expectation: salaryExpectation ? Number(salaryExpectation) : null,
@@ -436,6 +448,7 @@ export default function DashboardPage() {
       naukri_work_mode: naukriWorkMode,
       naukri_job_type: naukriJobType,
       naukri_apply_types: naukriApplyTypes,
+      linkedin_apply_types: linkedinApplyTypes,
     };
     const { error } = await supabase.from("user_profiles").upsert(
       { user_id: u.id, job_preferences: prefs, updated_at: new Date().toISOString() },
@@ -489,10 +502,13 @@ export default function DashboardPage() {
           // Profile / form-fill fields
           phone,
           phone_country: phoneCountry,
+          phone_country_code: phoneCountryCode,
           years_experience: Number(yearsExp),
           skill_rating: Number(skillRating),
           notice_period: Number(noticePeriod),
           ...(currentCity.trim() && { current_city: currentCity.trim() }),
+          ...(firstName.trim() && { first_name: firstName.trim() }),
+          ...(lastName.trim() && { last_name: lastName.trim() }),
           ...(linkedinUrl.trim() && { linkedin_url: linkedinUrl.trim() }),
           ...(githubUrl.trim() && { github_url: githubUrl.trim() }),
           ...(portfolioUrl.trim() && { portfolio_url: portfolioUrl.trim() }),
@@ -508,10 +524,11 @@ export default function DashboardPage() {
           ...(disabilityStatus && { disability_status: disabilityStatus }),
           ...(veteranStatus && { veteran_status: veteranStatus }),
           ...(ethnicity && { ethnicity }),
-          full_name: u.user_metadata?.full_name || u.email?.split("@")[0] || "",
+          full_name: (firstName.trim() && lastName.trim()) ? `${firstName.trim()} ${lastName.trim()}` : (u.user_metadata?.full_name || u.email?.split("@")[0] || ""),
           email: u.email || "",
           ...(linkedinEmail && { linkedin_email: linkedinEmail }),
           ...(linkedinPassword && { linkedin_password: linkedinPassword }),
+          linkedin_apply_types: linkedinApplyTypes,
           semi_auto: semiAuto,
           auto_cover_letter: autoCoverLetter,
           ...(scheduleEnabled && { schedule_start_hour: scheduleStartHour, schedule_end_hour: scheduleEndHour }),
@@ -539,6 +556,7 @@ export default function DashboardPage() {
         semi_auto: semiAuto,
         phone,
         phone_country: phoneCountry,
+        phone_country_code: phoneCountryCode,
         years_experience: Number(yearsExp),
         skill_rating: Number(skillRating),
         keywords,
@@ -552,6 +570,8 @@ export default function DashboardPage() {
         followup_days: Number(followupDays),
         // Profile fields for AI form filling
         ...(currentCity.trim() && { current_city: currentCity.trim() }),
+        ...(firstName.trim() && { first_name: firstName.trim() }),
+        ...(lastName.trim() && { last_name: lastName.trim() }),
         ...(linkedinUrl.trim() && { linkedin_url: linkedinUrl.trim() }),
         ...(githubUrl.trim() && { github_url: githubUrl.trim() }),
         ...(portfolioUrl.trim() && { portfolio_url: portfolioUrl.trim() }),
@@ -568,7 +588,7 @@ export default function DashboardPage() {
         ...(disabilityStatus && { disability_status: disabilityStatus }),
         ...(veteranStatus && { veteran_status: veteranStatus }),
         ...(ethnicity && { ethnicity }),
-        full_name: u.user_metadata?.full_name || u.email?.split("@")[0] || "",
+        full_name: (firstName.trim() && lastName.trim()) ? `${firstName.trim()} ${lastName.trim()}` : (u.user_metadata?.full_name || u.email?.split("@")[0] || ""),
         email: u.email || "",
         ...(linkedinEmail && { linkedin_email: linkedinEmail }),
         ...(linkedinPassword && { linkedin_password: linkedinPassword }),
@@ -588,6 +608,7 @@ export default function DashboardPage() {
         ...(platform === "linkedin" && {
           linkedin_date_posted: linkedinDatePosted,
           linkedin_remote: remoteEnabled,
+          linkedin_apply_types: linkedinApplyTypes,
           ...(linkedinExpLevel !== "all" && { linkedin_exp_level: linkedinExpLevel }),
           ...(linkedinJobType !== "all" && { linkedin_job_type: linkedinJobType }),
         }),
@@ -1406,6 +1427,44 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {/* LinkedIn — Apply Type */}
+          {platform === "linkedin" && (
+            <div className="space-y-2 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
+              <p className="font-mono text-xs text-slate-400 uppercase tracking-widest">
+                🔵 LinkedIn — Apply Type
+              </p>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {(
+                  [
+                    { value: "easy_apply_only", label: "⚡ Easy Apply Only" },
+                    { value: "external_only",   label: "🌐 External Apply Only" },
+                    { value: "both",            label: "🔀 Both" },
+                  ] as const
+                ).map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setLinkedinApplyTypes(value)}
+                    className={`px-3 py-1.5 rounded-lg font-mono text-xs font-semibold transition-colors ${
+                      linkedinApplyTypes === value
+                        ? "bg-blue-600 text-white"
+                        : "bg-slate-800 text-slate-400 hover:text-white border border-slate-700"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="font-mono text-xs text-slate-600 mt-1">
+                {linkedinApplyTypes === "easy_apply_only"
+                  ? "Only apply to jobs with LinkedIn Easy Apply. Skip jobs requiring external forms."
+                  : linkedinApplyTypes === "external_only"
+                  ? "Only apply to external company portals (AI fills forms). Skip Easy Apply jobs."
+                  : "Apply to both Easy Apply and external company portal jobs."}
+              </p>
+            </div>
+          )}
+
           {/* LinkedIn — Search Filters */}
           {platform === "linkedin" && (
             <div className="space-y-3 p-3 rounded-lg border border-slate-700 bg-slate-800/30">
@@ -1805,7 +1864,19 @@ export default function DashboardPage() {
               <label className="block font-mono text-xs text-slate-400 mb-1">Phone Country</label>
               <select
                 value={phoneCountry}
-                onChange={(e) => setPhoneCountry(e.target.value)}
+                onChange={(e) => {
+                  setPhoneCountry(e.target.value);
+                  const isoMap: Record<string, string> = {
+                    "India (+91)": "in",
+                    "United States (+1)": "us",
+                    "United Kingdom (+44)": "gb",
+                    "Canada (+1)": "ca",
+                    "Australia (+61)": "au",
+                    "Germany (+49)": "de",
+                    "Singapore (+65)": "sg",
+                  };
+                  setPhoneCountryCode(isoMap[e.target.value] || "us");
+                }}
                 className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
               >
                 <option value="India (+91)">India (+91)</option>
@@ -1901,6 +1972,24 @@ export default function DashboardPage() {
               </button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block font-mono text-xs text-slate-400 mb-1">First Name</label>
+                <input
+                  type="text" placeholder="e.g. Anand"
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block font-mono text-xs text-slate-400 mb-1">Last Name</label>
+                <input
+                  type="text" placeholder="e.g. Kumar"
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
               <div>
                 <label className="block font-mono text-xs text-slate-400 mb-1">Current City</label>
                 <input

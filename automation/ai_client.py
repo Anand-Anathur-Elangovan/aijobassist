@@ -493,6 +493,112 @@ Job Description:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 3b. fill_external_form_fields — fill company portal application form
+# ══════════════════════════════════════════════════════════════════════════
+def fill_external_form_fields(
+    fields: list,
+    user_profile: dict,
+    resume_text: str = "",
+    jd_text: str = "",
+    page_text: str = "",
+) -> dict:
+    """
+    Use Claude to fill company application portal form fields.
+    fields: list of {id, name, label, type, options, required, placeholder}
+    page_text: full visible text of the page (gives Claude full context)
+    Returns: {field_id: answer_value}
+    """
+    if not fields:
+        return {}
+
+    user_profile = user_profile or {}
+    _PROFILE_KEYS = [
+        "full_name", "first_name", "last_name", "email", "phone", "phone_country_code", "current_city",
+        "linkedin_url", "github_url", "portfolio_url",
+        "years_experience", "highest_education", "current_company", "current_position",
+        "notice_period", "salary_expectation", "current_ctc",
+        "work_authorization", "nationality", "gender",
+        "disability_status", "veteran_status", "ethnicity",
+    ]
+    profile_lines = [f"  {k}: {user_profile[k]}" for k in _PROFILE_KEYS if user_profile.get(k)]
+    profile_str = "\n".join(profile_lines) or "  (no profile data)"
+
+    # No API key — fill basic fields directly from profile
+    if not _has_api_key():
+        result = {}
+        for f in fields:
+            fid = f.get("id", "")
+            label = (f.get("label") or f.get("placeholder") or "").lower()
+            p = user_profile
+            if "first name" in label:
+                result[fid] = p.get("first_name") or (p.get("full_name", "") or "").split()[0]
+            elif "last name" in label or "surname" in label:
+                result[fid] = p.get("last_name") or " ".join((p.get("full_name", "") or "").split()[1:])
+            elif any(k in label for k in ("full name", "your name")):
+                result[fid] = p.get("full_name", "")
+            elif "email" in label:
+                result[fid] = p.get("email", "")
+            elif "phone" in label or "mobile" in label:
+                result[fid] = p.get("phone", "")
+            elif "linkedin" in label:
+                result[fid] = p.get("linkedin_url", "")
+            elif "github" in label:
+                result[fid] = p.get("github_url", "")
+            elif "portfolio" in label or "website" in label:
+                result[fid] = p.get("portfolio_url", "")
+            elif "city" in label or "location" in label:
+                result[fid] = p.get("current_city", "")
+        return result
+
+    fields_compact = [
+        {k: v for k, v in f.items()
+         if k in ("id", "label", "type", "options", "required", "placeholder") and v not in (None, "", [], False)}
+        for f in fields
+    ]
+
+    # Give Claude the full page text so it understands unusual field labels,
+    # custom ATS portals (Ashby, Lever, Greenhouse, Workday, etc.) and any
+    # instructions shown on the page itself.
+    page_context = f"\nFull page content (for context):\n{page_text[:3000]}" if page_text else ""
+    jd_section   = f"\nJob Description:\n{jd_text[:1000]}" if jd_text else ""
+
+    prompt = f"""You are filling out a job application form on a company's hiring portal.
+Use the candidate profile, resume, and full page content below to answer every field accurately.
+
+Rules:
+- For "first name" / "last name" fields, split full_name appropriately.
+- For select/radio/checkbox fields, your answer MUST exactly match one of the listed options.
+- For essay/open-ended questions, write a confident, positive 2-4 sentence answer as the candidate.
+- For salary/compensation fields, use salary_expectation from profile if available.
+- For notice period, use notice_period from profile.
+- For EEO/diversity fields (gender, race, ethnicity, disability, veteran status), use profile values; if absent use "I don't wish to answer" or "Prefer not to say".
+- For "how did you hear about us" → answer "LinkedIn".
+- For "are you related to anyone / previous employee" → answer "No".
+- For unknown open fields, give a reasonable positive answer inferred from the resume.
+- Leave blank ("") only if truly undeterminable.
+
+Candidate Profile:
+{profile_str}
+
+Resume:
+{resume_text[:2000]}{jd_section}{page_context}
+
+Form Fields (JSON):
+{json.dumps(fields_compact, indent=2)}
+
+Return ONLY a valid JSON object mapping each field "id" to its answer string.
+Example: {{"field_id_1": "John", "field_id_2": "john@email.com"}}"""
+
+    try:
+        result = _call_claude(prompt, max_tokens=2000, model=SONNET_MODEL)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+    return {}
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 4. tailor_resume — rewrite resume bullets to match JD
 # ══════════════════════════════════════════════════════════════════════════
 def tailor_resume(resume_text: str, jd_text: str) -> dict:
