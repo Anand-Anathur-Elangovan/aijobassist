@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/settings/\")",
+      "Bash(ls \"/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/notifications/\")",
+      "Read(//c/Users/Anand/Desktop/project Idea/aijobassist/app/api/tasks//**)",
+      "Read(//c/Users/Anand/Desktop/project Idea/aijobassist/app/api/tasks/**)",
+      "Bash(ls \"/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/agent/\")",
+      "Bash(cat \"/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/agent/page.tsx\")",
+      "Read(//c/Users/Anand/Desktop/project Idea/aijobassist/lib//**)",
+      "Read(//c/Users/Anand/Desktop/project Idea/aijobassist/**)",
+      "Bash(grep -rn \"telegram\\\\|chat_id\" '/c/Users/Anand/Desktop/project Idea/aijobassist/taskrunner/' --include=*.py)",
+      "Bash(grep -rn \"telegram_bot_token\\\\|telegram_chat_id\\\\|task_input\\\\[.telegram\" '/c/Users/Anand/Desktop/project Idea/aijobassist/' --include=*.py --include=*.ts)",
+      "Bash(grep -rn \"input.*telegram\\\\|telegram.*input\\\\|task.*input\\\\|notification_email\\\\|gmail_address\\\\|app_password\" '/c/Users/Anand/Desktop/project Idea/aijobassist/app/api/' --include=*.ts)",
+      "Bash(grep -rn \"user_profiles\\\\|CREATE TABLE.*profile\\\\|ALTER TABLE.*user_profile\" '/c/Users/Anand/Desktop/project Idea/aijobassist/' --include=*.sql)",
+      "Bash(ls '/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/')",
+      "Bash(cat '/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/layout.tsx')",
+      "Bash(grep -E \"^d|\\\\.py$|\\\\.sql$|\\\\.env|\\\\.json|\\\\.yaml|\\\\.yml\")"
+    ]
+  }
+}

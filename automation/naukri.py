@@ -547,9 +547,11 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
     max_apply   = int((task_input or {}).get("max_apply", MAX_APPLY))
     # When smart_match is on, most jobs get skipped — fetch a much larger pool
     smart_match = (task_input or {}).get("smart_match", False)
-    pool_mult   = 10 if smart_match else 4
-    target_pool = min(max(max_apply * pool_mult, 100), 500)
-    max_pages   = 25                       # safety cap
+    pool_mult   = 3 if smart_match else 2
+    # Hard cap: 50 job URLs per keyword search (consistent with LinkedIn)
+    SEARCH_POOL_CAP = 50
+    target_pool = min(SEARCH_POOL_CAP, max(max_apply * pool_mult, 20))
+    max_pages   = 4                        # 4 pages × ~20 jobs = ~80 slots; capped at 50 anyway
     seen: set   = set()
     job_links: list[str] = []
 

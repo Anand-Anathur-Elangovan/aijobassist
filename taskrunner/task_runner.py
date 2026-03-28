@@ -30,6 +30,18 @@ def run_task(task: dict) -> dict:
     task_input["task_id"] = task_id
     user_id = task_input["user_id"]
 
+    # ── Inject Telegram notification config ──────────────────────────────────
+    # Bot token is a server env var (shared for all users).
+    # Chat ID is per-user, stored in user_profiles.
+    if not task_input.get("telegram_bot_token"):
+        task_input["telegram_bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if user_id and not task_input.get("telegram_chat_id"):
+        from api_client import fetch_user_profile
+        profile = fetch_user_profile(user_id)
+        chat_id = profile.get("telegram_chat_id", "")
+        if chat_id:
+            task_input["telegram_chat_id"] = chat_id
+
     print(f"  [RUNNER] type={task_type}  user_id={user_id}")
 
     # ── Super admin bypass (by email — matches lib/api-auth.ts) ──
@@ -39,6 +51,9 @@ def run_task(task: dict) -> dict:
     ]
     user_email = fetch_user_email(user_id) if user_id else ""
     is_super_admin = user_email.lower() in SUPER_ADMIN_EMAILS
+
+    # Propagate admin flag so sub-handlers can enforce correct limits
+    task_input["_is_super_admin"] = is_super_admin
 
     # ── Quota gate ────────────────────────────────────────────
     quota_map = {
@@ -102,13 +117,25 @@ def _handle_url_apply(task_input: dict) -> dict:
         return {"applied_count": 0, "skipped_count": 0,
                 "message": "No URLs provided for URL_APPLY task"}
 
+    user_id        = task_input.get("user_id", "")
+    is_super_admin = task_input.get("_is_super_admin", False)
+    task_input     = dict(task_input)
+
+    # ── Per-tier max_apply limits (same tiers as AUTO_APPLY) ──────────
+    _TIER_MAX_APPLY = {
+        "free": 10, "starter": 30, "pro": 50, "premium": 50, "enterprise": 50,
+    }
+    tier = fetch_user_tier(user_id) if user_id else "free"
+    tier_limit = 100 if is_super_admin else _TIER_MAX_APPLY.get(tier, 10)
+    requested_max = int(task_input.get("max_apply", tier_limit))
+    task_input["max_apply"] = min(requested_max, tier_limit)
+    print(f"  [URL_APPLY] Tier={tier}  max_apply={task_input['max_apply']}/{tier_limit}")
+
     # ── Attach resume URL / text (same as AUTO_APPLY) ─────────────────
-    user_id = task_input.get("user_id", "")
     if user_id and not task_input.get("resume_url"):
         resume = fetch_latest_resume(user_id)
         if resume:
             content = resume.get("content") or {}
-            task_input = dict(task_input)
             task_input["resume_url"]      = content.get("file_url", "")
             task_input["resume_filename"] = content.get("file_name", resume.get("title", "resume.pdf"))
             if resume.get("parsed_text") and not task_input.get("resume_text"):
@@ -116,8 +143,7 @@ def _handle_url_apply(task_input: dict) -> dict:
             print(f"  [URL_APPLY] Resume: {task_input['resume_filename']}")
 
     # ── AI company-site quota ──────────────────────────────────────────
-    if user_id and "_ai_company_site_limit" not in task_input:
-        tier = fetch_user_tier(user_id)
+    if "_ai_company_site_limit" not in task_input:
         task_input["_ai_company_site_limit"] = 2 if tier == "free" else 999
     task_input.setdefault("_ai_company_site_used", 0)
 
@@ -212,14 +238,34 @@ def _handle_auto_apply(task_input: dict) -> dict:
     """Fetch resume from Supabase then launch LinkedIn browser automation."""
     from api_client import fetch_latest_resume, fetch_user_tier
 
-    platform = task_input.get("platform", "linkedin")
-    user_id  = task_input.get("user_id", "")
+    platform       = task_input.get("platform", "linkedin")
+    user_id        = task_input.get("user_id", "")
+    is_super_admin = task_input.get("_is_super_admin", False)
 
-    # ── AI company-site apply quota (free=2, paid=unlimited) ───
-    if user_id and "_ai_company_site_limit" not in task_input:
+    # ── Per-tier max_apply limits ──────────────────────────────────
+    # Free=10, Starter=30, Pro/Premium=50, Enterprise=50, Admin=100
+    _TIER_MAX_APPLY = {
+        "free":       10,
+        "starter":    30,
+        "pro":        50,
+        "premium":    50,
+        "enterprise": 50,
+    }
+    tier = "free"
+    if user_id:
         tier = fetch_user_tier(user_id)
+    tier_limit = 100 if is_super_admin else _TIER_MAX_APPLY.get(tier, 10)
+
+    # AI company-site apply quota (free=2, paid=unlimited)
+    if "_ai_company_site_limit" not in task_input:
         task_input["_ai_company_site_limit"] = 2 if tier == "free" else 999
     task_input.setdefault("_ai_company_site_used", 0)
+
+    # Cap user-requested max_apply at the tier limit — never exceed it
+    requested_max = int(task_input.get("max_apply", tier_limit))
+    task_input["max_apply"] = min(requested_max, tier_limit)
+    print(f"  [RUNNER] Tier={tier}  max_apply={task_input['max_apply']}/{tier_limit}"
+          + (" (admin)" if is_super_admin else ""))
 
     # Attach resume URL and parsed text if not already set
     if user_id and not task_input.get("resume_url"):
@@ -228,7 +274,6 @@ def _handle_auto_apply(task_input: dict) -> dict:
             content = resume.get("content") or {}
             task_input["resume_url"]      = content.get("file_url", "")
             task_input["resume_filename"] = content.get("file_name", resume.get("title", "resume.pdf"))
-            # Pass parsed_text as fallback for tailoring (no re-download required)
             if resume.get("parsed_text") and not task_input.get("resume_text"):
                 task_input["resume_text"] = resume["parsed_text"]
             print(f"  [RUNNER] Resume: {task_input['resume_filename']}")

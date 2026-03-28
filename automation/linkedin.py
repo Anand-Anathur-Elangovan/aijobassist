@@ -263,6 +263,10 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
     if task_input is None:
         task_input = {}
 
+    _session_start = time.time()   # for duration calculation in summary notification
+    task_input.setdefault("_session_stats", {"applied": 0, "manual_needed": 0, "skipped": 0,
+                                              "errors": 0, "manual_jobs": []})
+
     keywords  = task_input.get("keywords", "Software Engineer")
     location  = task_input.get("location", "")
     max_apply = int(task_input.get("max_apply", MAX_APPLY))
@@ -484,16 +488,24 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         pass
                 if success:
                     applied += 1
-                    _r_company   = task_input.get("_page_company") or task_input.get("company") or company_hint or "—"
-                    _r_job_title = task_input.get("_page_job_title") or "—"
+                    _r_company    = task_input.get("_page_company") or task_input.get("company") or company_hint or "—"
+                    _r_job_title  = task_input.get("_page_job_title") or "—"
+                    _r_apply_type = task_input.get("_last_apply_type", "easy_apply")
                     _log(task_input, f"✅ Applied — {_r_company} ({applied}/{max_apply})", "success", "submit", {"company": _r_company, "url": job_url, "job_title": _r_job_title})
                     _record_application(task_input, job_url, _r_company)
+                    # Track easy vs external counts in session stats
+                    _sstats = task_input.setdefault("_session_stats", {})
+                    if _r_apply_type == "external":
+                        _sstats["external_applied"] = _sstats.get("external_applied", 0) + 1
+                    else:
+                        _sstats["easy_applied"] = _sstats.get("easy_applied", 0) + 1
                     _report.append({
                         "company":     _r_company,
                         "job_title":   _r_job_title,
                         "url":         job_url,
                         "score":       task_input.get("_last_match_score"),
                         "status":      "applied",
+                        "apply_type":  _r_apply_type,
                         "skip_reason": "",
                     })
                 else:
@@ -507,6 +519,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         "url":         job_url,
                         "score":       task_input.get("_last_match_score"),
                         "status":      "skipped",
+                        "apply_type":  task_input.get("_last_apply_type", ""),
                         "skip_reason": task_input.get("_last_skip_reason", ""),
                     })
             else:
@@ -560,16 +573,23 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                     pass
                             if success:
                                 applied += 1
-                                _er_company   = task_input.get("_page_company") or task_input.get("company") or ej_hint or "—"
-                                _er_job_title = task_input.get("_page_job_title") or "—"
+                                _er_company    = task_input.get("_page_company") or task_input.get("company") or ej_hint or "—"
+                                _er_job_title  = task_input.get("_page_job_title") or "—"
+                                _er_apply_type = task_input.get("_last_apply_type", "easy_apply")
                                 _log(task_input, f"✅ Applied — {_er_company} ({applied}/{max_apply})", "success", "submit", {"company": _er_company, "url": ej_url, "job_title": _er_job_title})
                                 _record_application(task_input, ej_url, _er_company)
+                                _sstats2 = task_input.setdefault("_session_stats", {})
+                                if _er_apply_type == "external":
+                                    _sstats2["external_applied"] = _sstats2.get("external_applied", 0) + 1
+                                else:
+                                    _sstats2["easy_applied"] = _sstats2.get("easy_applied", 0) + 1
                                 _report.append({
                                     "company":     _er_company,
                                     "job_title":   _er_job_title,
                                     "url":         ej_url,
                                     "score":       task_input.get("_last_match_score"),
                                     "status":      "applied",
+                                    "apply_type":  _er_apply_type,
                                     "skip_reason": "",
                                 })
                             else:
@@ -583,11 +603,32 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                     "url":         ej_url,
                                     "score":       task_input.get("_last_match_score"),
                                     "status":      "skipped",
+                                    "apply_type":  task_input.get("_last_apply_type", ""),
                                     "skip_reason": task_input.get("_last_skip_reason", ""),
                                 })
 
             _set_progress(task_input, 100)
             _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success", "system", {"applied": applied, "skipped": skipped})
+
+            # ── Send session summary notification ──────────────────────────
+            try:
+                from automation.notifier import notify_session_summary
+                _duration = max(1, int((time.time() - _session_start) / 60))
+                _sstats = task_input.get("_session_stats", {})
+                notify_session_summary(task_input, {
+                    "applied":            applied,
+                    "easy_applied":       _sstats.get("easy_applied", -1),
+                    "external_applied":   _sstats.get("external_applied", 0),
+                    "manual_needed":      _sstats.get("manual_needed", 0),
+                    "skipped":            skipped,
+                    "errors":             _sstats.get("errors", 0),
+                    "duration_minutes":   _duration,
+                    "manual_jobs":        _sstats.get("manual_jobs", []),
+                    "jobs":               _report,
+                })
+            except Exception as _sne:
+                print(f"  [NOTIFY] Summary notification failed: {_sne}")
+
             return {
                 "applied_count": applied,
                 "skipped_count": skipped,
@@ -2548,11 +2589,13 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
 
     # ── Pagination ─────────────────────────────────────────────────────
     max_apply   = int(task_input.get("max_apply", MAX_APPLY))
-    # When smart_match is on, most jobs get skipped — fetch a much larger pool
+    # When smart_match is on, most jobs get skipped — fetch a slightly larger pool
     smart_match = task_input.get("smart_match", False)
-    pool_mult   = 10 if smart_match else 4
-    target_pool = max(max_apply * pool_mult, 30)   # minimum 30 jobs
-    max_pages   = 20
+    pool_mult   = 3 if smart_match else 2
+    # Hard cap: 50 job URLs per keyword search (as configured by admin)
+    SEARCH_POOL_CAP = 50
+    target_pool = min(SEARCH_POOL_CAP, max(max_apply * pool_mult, 20))
+    max_pages   = 4   # 4 pages × 25 jobs = 100 slots max; capped at 50 anyway
     seen: set   = set()
     job_links: list[str] = []
 
@@ -3647,6 +3690,9 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
 
                 answers = _fill_fields(form_fields, user_profile, resume_text, jd_text, page_text=page_text)
 
+                # Save latest answers so the notifier can include them in the alert
+                task_input["_last_external_answers"] = dict(answers or {})
+
                 # Create filler with proper validation
                 filler = ExternalFormFiller(
                     ext_page,
@@ -3966,14 +4012,38 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                              f"External apply: field '{field.get('label','?')}' fill failed ({_fe})",
                              "warning", "ai_decision")
 
-            # Resume upload (first file input only)
-            if file_fields and resume_path and os.path.isfile(resume_path):
-                try:
-                    ext_page.locator('input[type="file"]').first.set_input_files(resume_path)
-                    human_sleep(1.0, 2.0)
-                    _log(task_input, "External apply: resume uploaded", "success", "ai_decision")
-                except Exception as _ue:
-                    _log(task_input, f"External apply: resume upload failed ({_ue})", "warning", "ai_decision")
+            # Resume upload — detect visible file inputs directly (not relying on FIELD_JS alone)
+            _file_inp_visible = False
+            try:
+                for _fi in ext_page.locator('input[type="file"]').all():
+                    try:
+                        if _fi.is_visible(timeout=300):
+                            _file_inp_visible = True
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if _file_inp_visible or file_fields:
+                if resume_path and os.path.isfile(resume_path):
+                    try:
+                        ext_page.locator('input[type="file"]').first.set_input_files(resume_path)
+                        human_sleep(1.0, 2.0)
+                        _log(task_input, "External apply: resume uploaded", "success", "ai_decision")
+                    except Exception as _ue:
+                        _log(task_input, f"External apply: resume upload failed ({_ue})", "warning", "ai_decision")
+                        if not task_input.get("_ext_stuck_reason"):
+                            task_input["_ext_stuck_reason"] = f"Resume upload failed: {str(_ue)[:80]}"
+                elif _file_inp_visible:
+                    _log(task_input,
+                         "External apply: resume upload field found but no resume file available",
+                         "warning", "ai_decision")
+                    if not task_input.get("_ext_stuck_reason"):
+                        task_input["_ext_stuck_reason"] = (
+                            "Resume upload required but no resume file is available — "
+                            "please upload your resume manually"
+                        )
 
             # ── Before advancing: auto-accept any remaining unchecked legal/T&C checkboxes ──
             # (catches checkboxes that FIELD_JS missed or that appeared after fills)
@@ -4000,6 +4070,68 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                     human_sleep(0.5, 1.0)
             except Exception:
                 pass
+
+            # ── Pre-submit: only validate when a submit button is actually present ──
+            # Check if a submit button is visible on this step before doing validation
+            _submit_btn_visible = False
+            try:
+                for _scheck_sel in ["button[type='submit']", "input[type='submit']",
+                                    "button:has-text('Submit Application')", "button:has-text('Submit')",
+                                    "button:has-text('Apply Now')"]:
+                    try:
+                        if ext_page.locator(_scheck_sel).first.is_visible(timeout=500):
+                            _submit_btn_visible = True
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if _submit_btn_visible:
+                # If stuck reason already set (e.g. resume upload failed), bail out early
+                if task_input.get("_ext_stuck_reason"):
+                    _log(task_input,
+                         f"External apply: aborting submit — stuck: {task_input['_ext_stuck_reason']}",
+                         "warning", "navigation")
+                    break
+
+                # Scan for required text/select/textarea fields still empty on this step
+                try:
+                    _required_empty = ext_page.evaluate("""() => {
+                        const empty = [];
+                        for (const el of document.querySelectorAll(
+                            'input[required]:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="file"]):not([type="checkbox"]):not([type="radio"]),'
+                            + 'select[required], textarea[required]'
+                        )) {
+                            if (!el.offsetParent) continue;
+                            if (!el.value || !el.value.trim()) {
+                                const lbl = el.getAttribute('aria-label') ||
+                                            el.getAttribute('placeholder') ||
+                                            el.name || el.id || el.type;
+                                empty.push(String(lbl).substring(0, 50));
+                            }
+                        }
+                        // Also check for visible file inputs still empty (resume upload)
+                        for (const fi of document.querySelectorAll('input[type="file"]')) {
+                            if (!fi.offsetParent) continue;
+                            if (!fi.files || fi.files.length === 0) {
+                                const lbl = fi.getAttribute('aria-label') || fi.name || fi.id || 'resume';
+                                empty.push('File upload: ' + String(lbl).substring(0, 40));
+                            }
+                        }
+                        return empty;
+                    }""")
+                    if _required_empty:
+                        _log(task_input,
+                             f"External apply: {len(_required_empty)} required field(s) still empty: {_required_empty[:5]}",
+                             "warning", "ai_decision")
+                        if not task_input.get("_ext_stuck_reason"):
+                            task_input["_ext_stuck_reason"] = (
+                                f"Required fields not filled: {', '.join(str(r) for r in _required_empty[:3])}"
+                            )
+                        break  # exit step loop → manual notification triggered below
+                except Exception:
+                    pass  # if JS fails, proceed anyway
 
             # Try Submit — safe selectors only (avoid social-share/easy-apply buttons)
             _submitted = False
@@ -4030,6 +4162,40 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                         _post_url = ext_page.url
                         # Verify actual submission via URL change or on-page confirmation
                         _confirmed = _post_url != _pre_url
+                        # Even if URL changed, check for validation errors — many portals
+                        # navigate to an error/next page when required fields are missing
+                        if _confirmed:
+                            try:
+                                _has_validation_errors = ext_page.evaluate("""() => {
+                                    const txt = ((document.body && document.body.innerText) || '').toLowerCase();
+                                    const errPatterns = [
+                                        'required field', 'field is required', 'please fill',
+                                        'please complete', 'cannot be blank', 'please select a',
+                                        'please upload', 'upload your resume', 'select a language',
+                                        'please choose your language', 'missing required',
+                                        'fill out all required', 'fill in all required'
+                                    ];
+                                    if (errPatterns.some(p => txt.includes(p))) return true;
+                                    return !!(document.querySelector(
+                                        'input[aria-invalid="true"], select[aria-invalid="true"], '
+                                        + 'textarea[aria-invalid="true"], '
+                                        + '.field-error:not([aria-hidden="true"]), '
+                                        + '.error-message:not([aria-hidden="true"]), '
+                                        + '[class*="has-error"]:not([aria-hidden="true"])'
+                                    ));
+                                }""")
+                                if _has_validation_errors:
+                                    _log(task_input,
+                                         "⚠️ Submit: URL changed but validation errors on page — form incomplete",
+                                         "warning", "navigation")
+                                    if not task_input.get("_ext_stuck_reason"):
+                                        task_input["_ext_stuck_reason"] = (
+                                            "Validation errors after submit — required fields not filled "
+                                            "(check resume upload, language selection, or other required fields)"
+                                        )
+                                    _confirmed = False
+                            except Exception:
+                                pass
                         if not _confirmed:
                             try:
                                 _confirmed = bool(ext_page.evaluate(
@@ -4048,12 +4214,37 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                                 pass
                         if _confirmed:
                             _log(task_input, "✅ External application submitted", "success", "applied")
+                            task_input["_last_apply_type"] = "external"
                             ext_page.close()
                             return True
                         else:
                             _log(task_input,
                                  f"⚠️ Submit clicked but no confirmation detected (URL: {_post_url[:80]})",
                                  "warning", "ai_decision")
+                            # Wait an extra 2s for slow SPA confirmation and re-check
+                            human_sleep(2.0, 3.0)
+                            try:
+                                _recheck = bool(ext_page.evaluate(
+                                    """() => {
+                                        const txt = ((document.body && document.body.innerText) || '').toLowerCase();
+                                        return txt.includes('thank you') ||
+                                               txt.includes('application submitted') ||
+                                               txt.includes('successfully submitted') ||
+                                               txt.includes('application received') ||
+                                               txt.includes('we received your application') ||
+                                               txt.includes('application complete') ||
+                                               txt.includes('your application has been') ||
+                                               txt.includes('successfully applied') ||
+                                               !!document.querySelector('.confirmation,[class*=confirmation],[data-testid*=confirmation],[class*=success-message]');
+                                    }"""
+                                ))
+                                if _recheck:
+                                    _log(task_input, "✅ External application submitted (delayed confirmation)", "success", "applied")
+                                    task_input["_last_apply_type"] = "external"
+                                    ext_page.close()
+                                    return True
+                            except Exception:
+                                pass
                             # Don't return — may be multi-step; continue outer loop
                 except Exception:
                     continue
@@ -4133,11 +4324,61 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 break
 
         _log(task_input, "External apply: could not complete submission", "warning", "navigation")
+        try:
+            from automation.notifier import notify_manual_required
+            _ss = task_input.get("_session_stats", {})
+            _applied_so_far = _ss.get("easy_applied", 0) + _ss.get("external_applied", 0)
+            notify_manual_required(
+                task_input   = task_input,
+                company      = task_input.get("_page_company") or task_input.get("company") or "Unknown Company",
+                job_title    = task_input.get("_page_job_title") or "Unknown Position",
+                apply_url    = apply_href,
+                stuck_reason = task_input.get("_ext_stuck_reason") or "Could not complete submission — no Submit/Next button found",
+                answers      = task_input.get("_last_external_answers") or {},
+                linkedin_url = task_input.get("_current_job_url") or "",
+                applied_today= _applied_so_far,
+            )
+            # Track in session stats
+            _stats = task_input.setdefault("_session_stats", {})
+            _stats["manual_needed"] = _stats.get("manual_needed", 0) + 1
+            _stats.setdefault("manual_jobs", []).append({
+                "company": task_input.get("_page_company") or task_input.get("company") or "Unknown",
+                "title":   task_input.get("_page_job_title") or "Unknown",
+                "url":     apply_href,
+            })
+            # Clear stuck reason so it doesn't bleed into the next job
+            task_input.pop("_ext_stuck_reason", None)
+        except Exception as _ne:
+            print(f"  [NOTIFY] Notification send failed: {_ne}")
         ext_page.close()
         return False
 
     except Exception as _e:
         _log(task_input, f"External apply error: {_e}", "error", "error")
+        try:
+            from automation.notifier import notify_manual_required
+            _ss2 = task_input.get("_session_stats", {})
+            _applied_so_far2 = _ss2.get("easy_applied", 0) + _ss2.get("external_applied", 0)
+            notify_manual_required(
+                task_input   = task_input,
+                company      = task_input.get("_page_company") or task_input.get("company") or "Unknown Company",
+                job_title    = task_input.get("_page_job_title") or "Unknown Position",
+                apply_url    = apply_href,
+                stuck_reason = f"Automation error: {str(_e)[:120]}",
+                answers      = task_input.get("_last_external_answers") or {},
+                linkedin_url = task_input.get("_current_job_url") or "",
+                applied_today= _applied_so_far2,
+            )
+            _stats = task_input.setdefault("_session_stats", {})
+            _stats["manual_needed"] = _stats.get("manual_needed", 0) + 1
+            _stats.setdefault("manual_jobs", []).append({
+                "company": task_input.get("_page_company") or task_input.get("company") or "Unknown",
+                "title":   task_input.get("_page_job_title") or "Unknown",
+                "url":     apply_href,
+            })
+            task_input.pop("_ext_stuck_reason", None)
+        except Exception:
+            pass
         try:
             if ext_page:
                 ext_page.close()
@@ -4519,9 +4760,11 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             if not external_apply_href:
                 _log(task_input, "No external Apply button — skipping (preference: External Apply only)", "skip", "skip")
                 return False
+            task_input["_current_job_url"] = job_url
             return _apply_external_job(page, external_apply_href, task_input)
         else:  # "both" — prefer Easy Apply, fall back to external
             if easy_apply_btn is None and external_apply_href:
+                task_input["_current_job_url"] = job_url
                 return _apply_external_job(page, external_apply_href, task_input)
             elif easy_apply_btn is None:
                 _log(task_input, "No apply button found — skipping", "skip", "skip")
@@ -4595,6 +4838,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     if detected:
                         print("  [LINKEDIN] [SEMI-AUTO] ✅ Submission detected!")
                         _dismiss_post_apply_modal(page)
+                        task_input["_last_apply_type"] = "easy_apply"
                         return True
                     else:
                         print("  [LINKEDIN] [SEMI-AUTO] Timed out — skipping this job")
@@ -4614,6 +4858,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     human_sleep(2.5, 4.5)
                     print(f"  [LINKEDIN] ✅ {label}")
                     _dismiss_post_apply_modal(page)
+                    task_input["_last_apply_type"] = "easy_apply"
                     return True
 
             # Priority 1: Submit application (final step)

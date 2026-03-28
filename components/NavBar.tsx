@@ -19,6 +19,7 @@ const JOB_SEEKER_LINKS = [
   { href: "/interview-prep",  label: "Interview" },
   { href: "/applications",    label: "Applications" },
   { href: "/analytics",       label: "Analytics" },
+  { href: "/notifications",   label: "Notifications" },
   { href: "/upload-resume",   label: "Resume" },
   { href: "/billing",         label: "Billing" },
 ];

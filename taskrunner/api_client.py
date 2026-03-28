@@ -349,6 +349,21 @@ def save_notification(user_id: str, notif_type: str, title: str, message: str,
     )
 
 
+def fetch_user_profile(user_id: str) -> dict:
+    """Fetch user_profiles row (full_name, phone, telegram_chat_id, etc.)."""
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/user_profiles?user_id=eq.{user_id}&limit=1",
+            headers=HEADERS,
+        )
+        if resp.ok:
+            rows = resp.json()
+            return rows[0] if rows else {}
+    except Exception:
+        pass
+    return {}
+
+
 def fetch_user_email(user_id: str) -> str:
     """Resolve a user's email from auth.users via the service-role key."""
     try:
@@ -466,6 +481,33 @@ def record_seen_job(user_id: str, platform: str, job_url: str,
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
     )
+
+
+def reset_job_history(user_id: str, platform: str = None) -> bool:
+    """
+    Delete all job history for a user (manual reset via dashboard button).
+    Clears the seen-jobs cache so the bot will revisit all jobs on the next run.
+
+    platform: if specified, only clears history for that platform (e.g. 'linkedin').
+              If None, clears all platforms.
+
+    Returns True on success, False on error.
+    """
+    url = f"{SUPABASE_URL}/rest/v1/job_history?user_id=eq.{user_id}"
+    if platform:
+        url += f"&platform=eq.{platform}"
+    try:
+        resp = requests.delete(url, headers=HEADERS)
+        if resp.ok:
+            print(f"  [API] Job history cleared for user {user_id}"
+                  + (f" platform={platform}" if platform else " (all platforms)"))
+            return True
+        else:
+            print(f"  [API] reset_job_history failed: {resp.status_code} {resp.text[:100]}")
+            return False
+    except Exception as e:
+        print(f"  [API] reset_job_history error: {e}")
+        return False
 
 
 def reset_seen_jobs(user_id: str, platform: str = None,

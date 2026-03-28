@@ -16,7 +16,7 @@ import Link from "next/link";
 
 export default function SettingsPage() {
   const { user } = useAuth();
-  const [tab, setTab] = useState<"profile" | "account" | "gmail" | "preferences">("profile");
+  const [tab, setTab] = useState<"profile" | "account" | "gmail" | "notifications" | "preferences">("profile");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -29,6 +29,9 @@ export default function SettingsPage() {
   // Plan
   const [plan, setPlan] = useState<Plan | null>(null);
   const [sub, setSub] = useState<Subscription | null>(null);
+
+  // Telegram
+  const [telegramChatId, setTelegramChatId] = useState("");
 
   // Gmail
   const [gmailAddress, setGmailAddress] = useState("");
@@ -49,6 +52,7 @@ export default function SettingsPage() {
       setFullName(profile.full_name || "");
       setPhone(profile.phone || "");
       setCountry(profile.country || "India");
+      setTelegramChatId(profile.telegram_chat_id || "");
     }
 
     // Plan
@@ -76,6 +80,15 @@ export default function SettingsPage() {
     if (!user) return;
     setSaving(true);
     await updateUserProfile(user.id, { full_name: fullName, phone, country });
+    setSaving(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  }
+
+  async function saveNotifications() {
+    if (!user) return;
+    setSaving(true);
+    await updateUserProfile(user.id, { telegram_chat_id: telegramChatId.trim() });
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -111,6 +124,7 @@ export default function SettingsPage() {
     { key: "profile" as const, label: "Profile", icon: "👤" },
     { key: "account" as const, label: "Account", icon: "🔒" },
     { key: "gmail" as const, label: "Gmail", icon: "📧" },
+    { key: "notifications" as const, label: "Notifications", icon: "🔔" },
     { key: "preferences" as const, label: "Preferences", icon: "⚙️" },
   ];
 
@@ -300,6 +314,45 @@ export default function SettingsPage() {
           </div>
           <button onClick={saveGmail} disabled={saving} className="btn-primary">
             {saving ? "Saving..." : "Save Gmail Settings"}
+          </button>
+        </div>
+      )}
+
+      {/* Notifications tab */}
+      {tab === "notifications" && (
+        <div className="card space-y-6">
+          <div>
+            <h2 className="font-display font-bold text-white">Telegram Notifications</h2>
+            <p className="text-slate-400 text-sm mt-1">
+              Get instant alerts when the bot needs your help or finishes a session.
+            </p>
+          </div>
+
+          <div className="bg-slate-800/60 border border-slate-700 rounded-lg p-4 text-sm text-slate-300 space-y-2">
+            <p className="font-semibold text-amber-400">Setup (one-time, 2 min):</p>
+            <ol className="list-decimal list-inside space-y-1 text-slate-400">
+              <li>Open Telegram and search <span className="text-white font-mono">@AIJobSyncBot</span> → tap <span className="font-mono">Start</span></li>
+              <li>Then search <span className="text-white font-mono">@userinfobot</span> → tap <span className="font-mono">Start</span></li>
+              <li>Copy the <span className="text-white">Id</span> number it gives you and paste it below</li>
+            </ol>
+          </div>
+
+          <div className="max-w-sm">
+            <label className="block text-sm text-slate-400 mb-1">Your Telegram Chat ID</label>
+            <input
+              type="text"
+              value={telegramChatId}
+              onChange={(e) => setTelegramChatId(e.target.value)}
+              className="input-base"
+              placeholder="e.g. 987654321"
+            />
+            <p className="text-xs text-slate-500 mt-1">
+              This is your personal numeric ID from @userinfobot, not your phone number.
+            </p>
+          </div>
+
+          <button onClick={saveNotifications} disabled={saving} className="btn-primary">
+            {saving ? "Saving..." : "Save Notification Settings"}
           </button>
         </div>
       )}
