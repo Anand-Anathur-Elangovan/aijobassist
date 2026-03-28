@@ -614,10 +614,14 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
 
 def _login(page: Page, task_input: dict = None) -> bool:
     """
-    Open the LinkedIn login page.
-    - If linkedin_email + linkedin_password are in task_input: auto-fill and sign in.
-    - If only linkedin_email: pre-fill the email field; user types password.
-    - If neither: wait up to 3 minutes for user to log in manually.
+    Open the LinkedIn login page and sign in.
+
+    Design-agnostic: works regardless of LinkedIn UI redesigns.
+    Uses 3-layer detection for each field:
+      Layer 1 – Known stable attributes (fast)
+      Layer 2 – Semantic label / autocomplete scan
+      Layer 3 – JS DOM position analysis (future-proof)
+    Always falls back to pressing Enter on the password field.
     """
     task_input = task_input or {}
     email    = task_input.get("linkedin_email", "").strip()
@@ -627,28 +631,145 @@ def _login(page: Page, task_input: dict = None) -> bool:
     page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded")
     human_sleep(NAV_WAIT, NAV_WAIT + 2)
 
-    if email:
-        try:
-            email_input = page.locator("input#username, input[name='session_key']").first
-            if email_input.is_visible(timeout=3000):
-                human_type(page, email, locator=email_input)
-                print(f"  [LINKEDIN] Pre-filled email: {email}")
-        except Exception:
-            pass
+    def _find_email_input():
+        """Find the email/phone field — design-agnostic."""
+        # L1: known stable attributes (2000ms — React SPA needs time to hydrate)
+        for sel in [
+            "input#username", "input[name='session_key']",
+            "input[autocomplete='email']", "input[autocomplete='username']",
+            "input[autocomplete='webauthn']",
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=2000): return el
+            except Exception: pass
 
+        # L2: Playwright role/label matching
+        # Note: LinkedIn wraps label text in a <div> inside <label>, so we try
+        # get_by_role first (more robust), then get_by_label as fallback
+        for lbl in ["Email or phone", "Email", "Phone or email", "Username"]:
+            try:
+                el = page.get_by_role("textbox", name=lbl).first
+                if el.is_visible(timeout=1500): return el
+            except Exception: pass
+            try:
+                el = page.get_by_label(lbl).first
+                if el.is_visible(timeout=500): return el
+            except Exception: pass
+
+        # L3: JS DOM scan — find visible text/email/tel input before the password field
+        # Uses attribute selector [id="..."] instead of #id to handle React's
+        # dynamic IDs that contain colons (e.g. :r3:) which break CSS #id selectors
+        try:
+            sel_id = page.evaluate("""() => {
+                const pwd = document.querySelector('input[type="password"]');
+                const allInputs = Array.from(document.querySelectorAll('input'));
+                const pwdPos = pwd ? allInputs.indexOf(pwd) : 9999;
+                const candidates = allInputs.filter(el => {
+                    const t = (el.type || 'text').toLowerCase();
+                    const r = el.getBoundingClientRect();
+                    const pos = allInputs.indexOf(el);
+                    return (t === 'text' || t === 'email' || t === 'tel' || t === '')
+                        && el.offsetParent !== null
+                        && r.width > 40 && r.height > 10
+                        && pos < pwdPos;
+                });
+                return candidates.at(-1)?.id || null;
+            }""")
+            if sel_id:
+                # Use attribute selector — handles IDs with special chars like :r3:
+                el = page.locator(f'[id="{sel_id}"]').first
+                if el.is_visible(timeout=1000): return el
+        except Exception: pass
+
+        return None
+
+    def _find_submit_button():
+        """Find the sign-in submit button — design-agnostic."""
+        # L1: Playwright semantic role — most future-proof (works with any DOM shape)
+        try:
+            el = page.get_by_role("button", name="Sign in", exact=True).first
+            if el.is_visible(timeout=2000): return el
+        except Exception: pass
+        try:
+            el = page.get_by_role("button", name="Log in", exact=True).first
+            if el.is_visible(timeout=500): return el
+        except Exception: pass
+
+        # L2: known stable attribute selectors
+        for sel in [
+            "button[type='submit']", "input[type='submit']",
+            "button[data-litms-control-urn='login-submit']",
+            "button:text-is('Sign in')", "button:text-is('Log in')",
+            "button:text-is('Sign In')", "button:text-is('Log In')",
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=500): return el
+            except Exception: pass
+
+        # L3: JS scan — visible button with sign-in keywords, not an SSO provider
+        try:
+            clicked = page.evaluate("""() => {
+                const SSO   = ['google','microsoft','apple','facebook','github','twitter'];
+                const WORDS = ['sign in','log in','login','signin'];
+                const btn = Array.from(document.querySelectorAll(
+                    'button,[role="button"],input[type="submit"]'
+                )).find(el => {
+                    const txt = (el.innerText||el.value||el.getAttribute('aria-label')||'').trim().toLowerCase();
+                    const r = el.getBoundingClientRect();
+                    return el.offsetParent !== null && r.width > 40
+                        && WORDS.some(w => txt === w || txt.startsWith(w + ' '))
+                        && !SSO.some(w => txt.includes(w));
+                });
+                if (btn) { btn.click(); return true; }
+                return false;
+            }""")
+            return "JS_CLICKED" if clicked else None
+        except Exception: pass
+
+        return None
+
+    # ── Fill email ──
+    email_el = None
+    if email:
+        email_el = _find_email_input()
+        if email_el:
+            try:
+                email_el.click()
+                human_sleep(0.2, 0.4)
+                human_type(page, email, locator=email_el)
+                print(f"  [LINKEDIN] Email filled ✓")
+            except Exception as e:
+                print(f"  [LINKEDIN] Warning: email fill error: {e}")
+        else:
+            print("  [LINKEDIN] Warning: email field not found on page")
+
+    # ── Fill password + submit ──
     if email and password:
         try:
-            pwd_input = page.locator("input#password, input[name='session_password']").first
-            if pwd_input.is_visible(timeout=3000):
-                human_sleep(0.4, 1.0)   # natural pause between email → password
-                human_type(page, password, locator=pwd_input, typo_rate=0.0)
-            human_sleep(0.5, 1.5)       # brief hesitation before clicking Sign In
-            sign_in = page.locator("button[type='submit'], button[data-litms-control-urn='login-submit']").first
-            if sign_in.is_visible(timeout=2000):
-                human_click(page, locator=sign_in)
-                print("  [LINKEDIN] Auto-clicked Sign In")
-        except Exception:
-            pass
+            pwd_el = page.locator("input[type='password']").first
+            if pwd_el.is_visible(timeout=5000):
+                human_sleep(0.4, 1.0)
+                pwd_el.click()
+                human_sleep(0.1, 0.3)
+                human_type(page, password, locator=pwd_el, typo_rate=0.0)
+                print("  [LINKEDIN] Password filled ✓")
+            human_sleep(0.5, 1.5)
+
+            result = _find_submit_button()
+            if result == "JS_CLICKED":
+                print("  [LINKEDIN] Sign In clicked via JS ✓")
+            elif result:
+                human_click(page, locator=result)
+                print("  [LINKEDIN] Sign In clicked ✓")
+            else:
+                print("  [LINKEDIN] Submit button not found — pressing Enter")
+                pwd_el.press("Enter")
+        except Exception as e:
+            print(f"  [LINKEDIN] Warning: password/submit error: {e}")
+            try: page.keyboard.press("Enter")
+            except Exception: pass
     elif email:
         print("  [LINKEDIN] Email pre-filled — please enter password and click Sign In")
     else:
@@ -668,6 +789,8 @@ def _login(page: Page, task_input: dict = None) -> bool:
     except Exception as e:
         print(f"  [LINKEDIN] Login timed out or failed: {e}")
         return False
+
+
 
 
 def _fill_contact_fields(page: Page, task_input: dict):
@@ -2511,6 +2634,9 @@ def _dismiss_cookie_banner(pg, task_input: dict) -> None:
         "#onetrust-accept-btn-handler",
         "button#accept-all", "button#acceptAll", "button#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
         "[data-testid='cookie-policy-dialog-accept-button']",
+        # ATS / job-board specific cookie consent (Taleo, Oracle, etc.)
+        "button[data-ui='cookie-consent-accept-in-modal']",
+        "button[data-ui='cookie-consent-save-settings']",
         "button[aria-label*='Accept']", "button[aria-label*='accept']",
         "button:has-text('Accept all')", "button:has-text('Accept All')",
         "button:has-text('Allow all')", "button:has-text('Allow All')",
@@ -2530,10 +2656,552 @@ def _dismiss_cookie_banner(pg, task_input: dict) -> None:
             continue
 
 
+def _handle_captcha(ext_page, task_input: dict, max_wait: int = 25) -> bool:
+    """
+    Detect Cloudflare Turnstile (or similar CAPTCHA) and handle both modes:
+    - "managed" / auto mode: waits for silent auto-verification
+    - "interactive" checkbox mode: clicks the "Verify you are human" checkbox,
+      then waits for the #success state inside the iframe.
+
+    Returns True if cleared/not present, False if still blocked after timeout.
+    """
+    _CF_IFRAME_SEL = (
+        'iframe[src*="challenges.cloudflare.com"], '
+        'iframe[src*="cloudflare.com/cdn-cgi/challenge-platform"], '
+        'iframe[title*="Widget containing a Cloudflare security challenge"]'
+    )
+    try:
+        has_challenge = ext_page.evaluate("""() => {
+            return !!(
+                document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+                document.querySelector('iframe[src*="cloudflare.com/cdn-cgi/challenge-platform"]') ||
+                document.querySelector('[id^="turnstile-container"]') ||
+                document.querySelector('div[class*="cf-turnstile"]') ||
+                document.querySelector('iframe[title*="Cloudflare security challenge"]')
+            );
+        }""")
+    except Exception:
+        return True  # can't check — assume OK
+
+    if not has_challenge:
+        return True
+
+    _log(task_input,
+         "External apply: Cloudflare Turnstile detected — attempting to handle…",
+         "warning", "navigation")
+
+    # ── Strategy 1: Click the "Verify you are human" checkbox (interactive mode) ──
+    # Turnstile's checkbox challenge lives inside a cross-origin iframe.
+    # Playwright's frame_locator() can reach it as long as the frame is loaded.
+    _checkbox_clicked = False
+    try:
+        _cf_frame = ext_page.frame_locator(_CF_IFRAME_SEL).first
+        # The checkbox is inside label.cb-lb; click it to trigger server-side verification
+        _cb = _cf_frame.locator('label.cb-lb input[type="checkbox"], .cb-lb input[type="checkbox"]').first
+        if _cb.is_visible(timeout=4000):
+            # Use JS click inside the frame to avoid pointer interception issues
+            _cb.click(force=True)
+            _checkbox_clicked = True
+            _log(task_input,
+                 "External apply: Turnstile checkbox clicked — waiting for verification…",
+                 "info", "navigation")
+            time.sleep(1.5)  # give Cloudflare time to start verifying
+    except Exception:
+        pass  # iframe not accessible or checkbox not visible — fall through to auto-wait
+
+    # ── Strategy 2: Wait for verification to complete ──
+    for _i in range(max_wait):
+        time.sleep(1.0)
+        try:
+            # Check #success state inside the Turnstile iframe
+            if _checkbox_clicked:
+                try:
+                    _cf_frame2 = ext_page.frame_locator(_CF_IFRAME_SEL).first
+                    if _cf_frame2.locator('#success').first.is_visible(timeout=400):
+                        _log(task_input, "External apply: Turnstile checkbox verified ✓", "info", "navigation")
+                        time.sleep(0.5)
+                        return True
+                    # If fail/expired, try clicking the checkbox again once
+                    if _i == 5:
+                        try:
+                            _cb2 = _cf_frame2.locator('label.cb-lb input[type="checkbox"]').first
+                            if _cb2.is_visible(timeout=400):
+                                _cb2.click(force=True)
+                                _log(task_input, "External apply: Turnstile — retry click", "info", "navigation")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # Challenge clears when the iframe disappears OR form inputs appear
+            still_blocked = ext_page.evaluate("""() => {
+                const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]')
+                             || document.querySelector('iframe[src*="cloudflare.com/cdn-cgi/challenge-platform"]');
+                if (!iframe || !iframe.offsetParent) return false;
+                const formInputs = document.querySelectorAll(
+                    'form input:not([type="hidden"]), form select, form textarea'
+                ).length;
+                return formInputs < 2;
+            }""")
+            if not still_blocked:
+                _log(task_input, "External apply: Turnstile verified ✓", "info", "navigation")
+                return True
+        except Exception:
+            pass
+
+    _log(task_input,
+         "External apply: Turnstile not resolved after 25s — will attempt to continue anyway",
+         "warning", "navigation")
+    return False
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# External ATS portal shared helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+# LinkedIn SSO selectors tried in order on any login gate
+_LINKEDIN_SSO_SELECTORS = [
+    "#login-with-linkedin-button",
+    "[id*='linkedin-login']", "[id*='linkedin_login']",
+    "a:has-text('Apply with LinkedIn')",
+    "a:has-text('Login with LinkedIn')",
+    "a:has-text('Sign in with LinkedIn')",
+    "a:has-text('Continue with LinkedIn')",
+    "button:has-text('Apply with LinkedIn')",
+    "button:has-text('Login with LinkedIn')",
+    "button:has-text('Sign in with LinkedIn')",
+    "button:has-text('Continue with LinkedIn')",
+    "[class*='linkedin-login']", "[class*='linkedin-sso']", "[class*='lwli']",
+]
+
+
+def _handle_portal_login(ext_page, task_input: dict, orig_page=None) -> bool:
+    """
+    Detect and handle a login gate on an external ATS portal.
+
+    Strategy:
+      1. If page already shows ≥3 form inputs it is NOT a login wall → skip.
+      2. Detect login-page keywords in visible text.
+      3. Click LinkedIn SSO button and wait for the OAuth popup to auto-close
+         (works when the browser is already signed into LinkedIn).
+      4. If a password-only form remains, log and return False (can't automate).
+
+    Returns True if the login gate was cleared, False if not a login page
+    or if it could not be cleared.
+    """
+    try:
+        # Already on a real form?
+        try:
+            n = ext_page.evaluate(
+                "() => document.querySelectorAll("
+                "  'form input:not([type=\"hidden\"]):not([tabindex=\"-1\"]),"
+                "   form textarea, form select:not([tabindex=\"-1\"])'"
+                ").length"
+            )
+            if n >= 3:
+                return False
+        except Exception:
+            pass
+
+        try:
+            page_text = (ext_page.evaluate(
+                "() => (document.body && document.body.innerText) || ''"
+            ) or "").lower()
+        except Exception:
+            return False
+
+        is_login = any(kw in page_text for kw in [
+            "log in", "login", "sign in", "signin",
+            "create an account", "create account",
+            "forgot your password", "forgot password",
+        ])
+        if not is_login:
+            return False
+
+        # Try each LinkedIn SSO selector
+        for sel in _LINKEDIN_SSO_SELECTORS:
+            try:
+                btn = ext_page.locator(sel).first
+                if not btn.is_visible(timeout=700):
+                    continue
+                _log(task_input,
+                     f"Portal login: LinkedIn SSO found ({sel}) — clicking",
+                     "info", "navigation")
+                _pre_url = ext_page.url
+                btn.click()
+                time.sleep(1.5)
+
+                # Handle LinkedIn OAuth popup (auto-approves if already signed in)
+                all_pages = ext_page.context.pages
+                lk_popups = [
+                    p for p in all_pages
+                    if p is not ext_page and "linkedin.com/" in (p.url or "")
+                ]
+                if lk_popups:
+                    _log(task_input,
+                         "Portal login: LinkedIn OAuth popup detected — waiting for auto-approval...",
+                         "info", "navigation")
+                    oauth_p = lk_popups[-1]
+                    for _ in range(20):           # up to 20 s
+                        time.sleep(1.0)
+                        if oauth_p.is_closed() or ext_page.url != _pre_url:
+                            break
+                        # If OAuth needs manual Allow click
+                        try:
+                            for allow_sel in [
+                                "button:has-text('Allow')",
+                                "button:has-text('Authorize')",
+                                "button:has-text('Continue')",
+                                "button[type='submit']",
+                            ]:
+                                ab = oauth_p.locator(allow_sel).first
+                                if ab.is_visible(timeout=300):
+                                    ab.click()
+                                    time.sleep(1.0)
+                                    break
+                        except Exception:
+                            pass
+
+                try:
+                    ext_page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                human_sleep(1.5, 2.5)
+
+                # Verify we moved past the login gate
+                _post_url = ext_page.url
+                _has_form = False
+                try:
+                    _has_form = ext_page.evaluate(
+                        "() => document.querySelectorAll("
+                        "  'form input:not([type=\"hidden\"])'"
+                        ").length >= 2"
+                    )
+                except Exception:
+                    pass
+                if _post_url != _pre_url or _has_form:
+                    _log(task_input,
+                         "Portal login: successfully passed login gate via LinkedIn SSO",
+                         "success", "navigation")
+                    _dismiss_cookie_banner(ext_page, task_input)
+                    return True
+            except Exception:
+                continue
+
+        # Detect account-creation wall we can't bypass
+        try:
+            n_pwd = ext_page.evaluate(
+                "() => document.querySelectorAll('input[type=\"password\"]').length"
+            )
+            if n_pwd > 0:
+                _log(task_input,
+                     "Portal login: login/registration wall — no LinkedIn SSO available. "
+                     "Manual sign-in required.",
+                     "warning", "ai_decision")
+        except Exception:
+            pass
+
+        return False
+
+    except Exception as _e:
+        _log(task_input, f"Portal login handler error: {_e}", "warning", "navigation")
+        return False
+
+
+def _handle_application_method_chooser(ext_page, task_input: dict) -> bool:
+    """
+    Detect and handle "How would you like to apply?" screens.
+
+    Common patterns:
+      - Greenhouse  "Start Your Application" modal
+      - Lever / Ashby method chooser
+      - Generic "Apply with LinkedIn" / "Apply Manually" buttons
+
+    Preference order:
+      1. 'Apply with LinkedIn'  (auto-fills from profile — any chooser)
+      2. 'Use my last application' (Greenhouse one-click repeat apply)
+      3. 'Apply Manually' / 'Continue'  (plain form fallback)
+
+    Returns True if a method was chosen, False if no chooser detected.
+    """
+    try:
+        try:
+            page_text = (ext_page.evaluate(
+                "() => (document.body && document.body.innerText) || ''"
+            ) or "").lower()
+        except Exception:
+            return False
+
+        looks_like_chooser = any(kw in page_text for kw in [
+            "how would you like to apply",
+            "how do you want to apply",
+            "start your application",
+            "choose how you",
+            "select how you would like",
+            "apply using",
+        ])
+
+        # Also detect if a LinkedIn-method button is directly on the page
+        has_lk_btn = False
+        for sel in _LINKEDIN_SSO_SELECTORS:
+            try:
+                if ext_page.locator(sel).first.is_visible(timeout=400):
+                    has_lk_btn = True
+                    break
+            except Exception:
+                continue
+
+        if not looks_like_chooser and not has_lk_btn:
+            return False
+
+        # ── 1. Apply with LinkedIn (preferred) ────────────────────────────
+        for sel in _LINKEDIN_SSO_SELECTORS + [
+            "a:has-text('Apply with LinkedIn')",
+            "button:has-text('Apply with LinkedIn')",
+        ]:
+            try:
+                btn = ext_page.locator(sel).first
+                if not btn.is_visible(timeout=700):
+                    continue
+                _log(task_input,
+                     f"Method chooser: clicking 'Apply with LinkedIn' ({sel})",
+                     "info", "navigation")
+                btn.click()
+                time.sleep(1.2)
+
+                # Handle LinkedIn OAuth popup
+                all_pages = ext_page.context.pages
+                lk_popups = [
+                    p for p in all_pages
+                    if p is not ext_page and "linkedin.com/" in (p.url or "")
+                ]
+                if lk_popups:
+                    _log(task_input,
+                         "Method chooser: LinkedIn OAuth popup — waiting...",
+                         "info", "navigation")
+                    oauth_p = lk_popups[-1]
+                    for _ in range(20):
+                        time.sleep(1.0)
+                        if oauth_p.is_closed():
+                            break
+                        try:
+                            for allow_sel in [
+                                "button:has-text('Allow')",
+                                "button:has-text('Authorize')",
+                                "button[type='submit']",
+                            ]:
+                                ab = oauth_p.locator(allow_sel).first
+                                if ab.is_visible(timeout=300):
+                                    ab.click()
+                                    time.sleep(1.0)
+                                    break
+                        except Exception:
+                            pass
+
+                try:
+                    ext_page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                human_sleep(1.0, 2.0)
+                _dismiss_cookie_banner(ext_page, task_input)
+                return True
+            except Exception:
+                continue
+
+        # ── 2. Use last application (Greenhouse) ──────────────────────────
+        for sel in [
+            "button:has-text('Use my last application')",
+            "a:has-text('Use my last application')",
+            "button:has-text('Use Last Application')",
+        ]:
+            try:
+                btn = ext_page.locator(sel).first
+                if btn.is_visible(timeout=700):
+                    _log(task_input, f"Method chooser: '{sel}'", "info", "navigation")
+                    btn.click()
+                    try:
+                        ext_page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    human_sleep(1.0, 1.5)
+                    _dismiss_cookie_banner(ext_page, task_input)
+                    return True
+            except Exception:
+                continue
+
+        # ── 3. Manual / Continue fallback ──────────────────────────────────
+        for sel in [
+            "button:has-text('Apply Manually')",
+            "a:has-text('Apply Manually')",
+            "button:has-text('Continue')",
+            "a:has-text('Continue')",
+            "[data-qa='btn-apply-submit']",
+        ]:
+            try:
+                btn = ext_page.locator(sel).first
+                if btn.is_visible(timeout=700):
+                    _log(task_input,
+                         f"Method chooser: manual fallback ({sel})",
+                         "info", "navigation")
+                    btn.click()
+                    try:
+                        ext_page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    human_sleep(1.0, 1.5)
+                    _dismiss_cookie_banner(ext_page, task_input)
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    except Exception as _e:
+        _log(task_input,
+             f"Method chooser handler error: {_e}", "warning", "navigation")
+        return False
+
+
+def _unwrap_linkedin_apply_url(href: str) -> str:
+    """
+    Extract the real company URL from a LinkedIn safety/tracking redirect.
+
+    LinkedIn wraps external apply links in redirects like:
+      https://www.linkedin.com/safety/go?url=https%3A%2F%2Fcompany.com%2F...&_l=en_US
+
+    Design-agnostic: checks all known redirect query-param names so it works
+    even if LinkedIn renames the parameter in future redesigns.
+    Returns the original href unchanged if it's already a direct URL.
+    """
+    if not href:
+        return href
+    from urllib.parse import urlparse, parse_qs, unquote
+    try:
+        parsed = urlparse(href)
+        if "linkedin.com" not in (parsed.netloc or ""):
+            return href  # already a direct company URL — nothing to unwrap
+        params = parse_qs(parsed.query)
+        # Try all known redirect param names (LinkedIn may rename these):
+        for pname in ("url", "redirectUrl", "redirect_url", "destUrl", "dest", "target"):
+            if pname in params:
+                real = unquote(params[pname][0])
+                if real.startswith("http"):
+                    return real
+    except Exception:
+        pass
+    return href  # return original — safety-page handler will deal with it at runtime
+
+
+def _handle_linkedin_safety_redirect(ext_page, task_input: dict) -> None:
+    """
+    Called right after navigating to an apply URL.
+    If we landed on LinkedIn's safety/interstitial page instead of the real
+    company portal, this navigates through it to reach the destination.
+
+    Design-agnostic strategy (works regardless of future safety-page redesigns):
+      1. Try to extract destination from any external <a href> on the page
+      2. Click the most prominent "Continue" / "Proceed" button
+      3. Wait for JavaScript auto-redirect (LinkedIn sometimes auto-redirects)
+    """
+    try:
+        cur = ext_page.url
+        # Already on a non-LinkedIn page — nothing to do
+        if "linkedin.com" not in cur:
+            return
+        # Only act on known redirect/safety URL patterns
+        is_redirect_page = any(p in cur for p in (
+            "/safety/go", "/safety", "/redir/", "/redirect", "/checkpoint"
+        ))
+        if not is_redirect_page:
+            return
+
+        _log(task_input,
+             f"External apply: LinkedIn safety redirect detected ({cur[:70]}) — resolving…",
+             "info", "navigation")
+
+        # ── Strategy 1: extract real URL from any visible external link on page ──
+        # The safety page always shows the destination as a clickable link.
+        try:
+            real_url = ext_page.evaluate("""() => {
+                const links = Array.from(document.querySelectorAll('a[href]'));
+                const ext = links.find(a =>
+                    a.href &&
+                    !a.href.includes('linkedin.com') &&
+                    a.href.startsWith('http') &&
+                    !a.href.startsWith('javascript')
+                );
+                return ext ? ext.href : null;
+            }""")
+            if real_url:
+                _log(task_input,
+                     f"External apply: safety link extracted → {real_url[:80]}",
+                     "info", "navigation")
+                ext_page.goto(real_url, wait_until="load", timeout=30000)
+                try:
+                    ext_page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        # ── Strategy 2: click through the interstitial (design-agnostic button scan) ──
+        for sel in [
+            "a:has-text('Continue')", "button:has-text('Continue')",
+            "a:has-text('Proceed')", "button:has-text('Proceed')",
+            "a:has-text('Go to site')", "button:has-text('Go to site')",
+            "a:has-text('Yes, proceed')", "a:has-text('Yes, I agree')",
+            "[data-tracking-control-name*='continue']",
+            "[class*='safety'] a:not([href*='linkedin'])",
+        ]:
+            try:
+                btn = ext_page.locator(sel).first
+                if btn.is_visible(timeout=1200):
+                    btn.click()
+                    ext_page.wait_for_url(
+                        lambda url: "linkedin.com" not in url,
+                        timeout=12000
+                    )
+                    _log(task_input,
+                         f"External apply: safety redirect cleared → {ext_page.url[:80]}",
+                         "info", "navigation")
+                    return
+            except Exception:
+                continue
+
+        # ── Strategy 3: wait for JS auto-redirect ──
+        try:
+            ext_page.wait_for_url(
+                lambda url: "linkedin.com" not in url,
+                timeout=6000
+            )
+            _log(task_input,
+                 f"External apply: auto-redirect landed on {ext_page.url[:80]}",
+                 "info", "navigation")
+        except Exception:
+            _log(task_input,
+                 "External apply: safety page not resolved — will attempt to continue",
+                 "warning", "navigation")
+    except Exception:
+        pass
+
+
 def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
     """
-    Open the company application portal in a new browser tab and fill+submit
-    the form using Claude AI (profile + resume data).
+    Open the company application portal in a new browser tab, navigate to the
+    form, fill every field with Claude AI, and submit.
+
+    Handles ALL major ATS scenarios:
+      1. Direct form page (fields already visible → fill + submit)
+      2. Job-description page (click Apply CTA → form loads)
+      3. Application-method chooser (Greenhouse / Lever / Ashby)
+      4. LinkedIn SSO login wall (OAuth popup → auto-approves → form loads)
+      5. Account-creation / registration wall (logs warn, cannot auto-handle)
+      6. Upload-only screen (Cisco / Phenom) → upload resume, skip to form
+      7. Multi-step forms → fill each step, Next → … → Submit
+      8. Popup / new-tab form (switch to new tab, continue full flow there)
+
     Returns True if successfully submitted, False otherwise.
     """
     try:
@@ -2553,44 +3221,136 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             ext_page.wait_for_load_state("networkidle", timeout=12000)
         except Exception:
             pass  # timeout OK — continue with whatever rendered
+
+        # ── Handle LinkedIn safety/interstitial redirect page ──
+        # Navigating to a LinkedIn safety URL (linkedin.com/safety/go?url=...)
+        # lands on an interstitial. Resolve it to the real company portal first.
+        _handle_linkedin_safety_redirect(ext_page, task_input)
         human_sleep(1.5, 2.5)
 
         # ── Dismiss cookie / consent banners before doing anything ──
         _dismiss_cookie_banner(ext_page, task_input)
+
+        # ── Handle login walls (LinkedIn SSO, email/password, create-account screens) ──
+        _handle_portal_login(ext_page, task_input, orig_page=page)
+        human_sleep(0.5, 1.0)
+
+        # ── Handle Cloudflare Turnstile / CAPTCHA after login ──
+        _handle_captcha(ext_page, task_input)
+
+        # ── Handle "How would you like to apply?" chooser screens ──
+        _handle_application_method_chooser(ext_page, task_input)
+        human_sleep(0.3, 0.7)
 
         # ── If this is a job description page (no form yet), click 'Apply' CTA ──
         # e.g. Ashby, Lever, Greenhouse all show a description page with an
         # 'Apply for this Job' / 'Apply Now' button that leads to the actual form.
         _clicked_apply_cta = False
         for _cta_sel in [
+            # Text-based — most common across all portals
             "a:has-text('Apply for this Job')",
             "a:has-text('Apply for this Position')",
             "button:has-text('Apply for this Job')",
             "a:has-text('Apply Now')",
             "button:has-text('Apply Now')",
-            "a[href*='/application']",
-            "a[href*='/apply']",
+            "a:has-text('Apply Online')",
+            "button:has-text('Apply Online')",
+            "a:has-text('Apply Here')",
+            "button:has-text('Apply Here')",
+            "a:has-text('Apply Today')",
+            "button:has-text('Apply Today')",
+            "button:has-text('Apply To Job')",
+            "button:has-text('Apply to Job')",
+            "button:has-text('Apply for Job')",
+            "button:has-text('Apply for Position')",
+            "button:has-text('Start Application')",
+            "button:has-text('Begin Application')",
+            "a:has-text('Start Application')",
+            "button:has-text('Submit Application')",  # some portals use this as CTA
+            "a:has-text('Apply')",                    # broad fallback — links only (safer)
+            # Attribute-based — framework-agnostic
+            "button[data-job-id]",                    # custom career portals (Husky, etc.)
+            "button.openModal:has-text('Apply')",     # Bootstrap modal trigger
+            "[data-action*='apply']",                 # custom data-action attributes
+            "[data-testid*='apply-button']",
+            "[data-testid*='apply_button']",
+            "[data-testid='job-apply-button']",
+            "[aria-label*='Apply for']",
+            "[aria-label*='Apply Now']",
+            # href-based — exclude all social share URLs
+            "a[href*='/application']:not([href*='facebook']):not([href*='twitter']):not([href*='sharer']):not([href*='linkedin.com/share'])",
+            "a[href*='/apply']:not([href*='facebook']):not([href*='twitter']):not([href*='sharer']):not([href*='mailto'])",
         ]:
             try:
                 _cta = ext_page.locator(_cta_sel).first
                 if _cta.is_visible(timeout=1200):
                     _log(task_input, f"External apply: clicking apply CTA ({_cta_sel})", "info", "navigation")
+                    _pre_cta_url = ext_page.url
                     _cta.click()
-                    # Check if click opened a popup/new tab — switch to it
                     import time as _time; _time.sleep(0.8)
+                    # Check if click opened a popup/new tab — switch to it
                     _ctx_pages = page.context.pages
                     if len(_ctx_pages) > 1 and _ctx_pages[-1] is not ext_page:
                         _log(task_input, "External apply: CTA opened popup — switching to popup page", "info", "navigation")
                         ext_page = _ctx_pages[-1]
-                    try:
-                        ext_page.wait_for_load_state("networkidle", timeout=10000)
-                    except Exception:
-                        pass
-                    # Wait for at least one form element to appear (SPA renders async after networkidle)
-                    try:
-                        ext_page.wait_for_selector("input, textarea, select", state="visible", timeout=9000)
-                    except Exception:
-                        pass  # fall through to fixed sleep
+                        try:
+                            ext_page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            pass
+                        # Wait for at least one form element to appear (SPA renders async after networkidle)
+                        try:
+                            ext_page.wait_for_selector("input, textarea, select", state="visible", timeout=9000)
+                        except Exception:
+                            pass
+                    else:
+                        # Check if a modal appeared on the same page (modal-based portals)
+                        _modal_appeared = False
+                        _modal_sels = [
+                            # Role-based (most reliable)
+                            "[role='dialog']:not([aria-hidden='true'])",
+                            "[role='alertdialog']:not([aria-hidden='true'])",
+                            # Bootstrap / jQuery plugins
+                            ".modal.show",
+                            ".modal.fade.show",
+                            ".modal.in",
+                            ".modal.openModal",
+                            # Material UI / MUI
+                            ".MuiDialog-paper",
+                            # jQuery UI
+                            ".ui-dialog-content",
+                            # Foundation
+                            ".reveal",
+                            # Workday / Oracle
+                            "[data-automation-id*='modal']",
+                            "[data-automation-id*='dialog']",
+                            # Radix UI (many modern portals)
+                            "[data-radix-dialog-content]",
+                            "[data-state='open'][role='dialog']",
+                            # Generic patterns
+                            "[class*='modal-content']:not([aria-hidden='true'])",
+                            "[class*='modal-dialog']",
+                            # Named portal modals
+                            "#careerPortalModal",
+                        ]
+                        for _ms in _modal_sels:
+                            try:
+                                if ext_page.locator(_ms).first.is_visible(timeout=1500):
+                                    _modal_appeared = True
+                                    _log(task_input, f"External apply: modal appeared on same page ({_ms})", "info", "navigation")
+                                    break
+                            except Exception:
+                                continue
+                        if not _modal_appeared:
+                            # URL change means navigate (not modal) — wait for form
+                            if ext_page.url != _pre_cta_url:
+                                try:
+                                    ext_page.wait_for_load_state("networkidle", timeout=10000)
+                                except Exception:
+                                    pass
+                            try:
+                                ext_page.wait_for_selector("input, textarea, select", state="visible", timeout=9000)
+                            except Exception:
+                                pass
                     human_sleep(1.0, 1.8)
                     _dismiss_cookie_banner(ext_page, task_input)
                     _clicked_apply_cta = True
@@ -2605,8 +3365,13 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
         user_profile = {k: v for k, v in task_input.items()
                         if not k.startswith("_") and isinstance(v, (str, int, float))}
 
-        # JS that returns all interactive form fields including radio/checkbox groups
-        FIELD_JS = """() => {
+        # JS that returns all interactive form fields including radio/checkbox groups.
+        # Accepts an optional rootSel parameter — when a modal/dialog is open, pass its
+        # CSS selector so only the modal's fields are scanned (prevents filling background
+        # page search forms, job listing filters, etc.).
+        FIELD_JS = """(rootSel) => {
+            // Scope to active modal when one is open, otherwise scan whole document
+            const root = rootSel ? (document.querySelector(rootSel) || document) : document;
             const fields = [], seen = new Set();
             const isVisible = (el) => {
                 // Skip truly hidden elements — display:none, visibility:hidden, or detached
@@ -2625,11 +3390,36 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 const lid = el.getAttribute('aria-labelledby');
                 if (lid) { const l = document.getElementById(lid); if (l) return l.innerText.replace(/\\s+/g,' ').trim(); }
                 if (el.placeholder) return el.placeholder.trim();
-                const p = el.parentElement;
-                if (p) { const t=(p.innerText||'').replace(/\\s+/g,' ').trim(); if(t&&t.length<100) return t; }
+                // Walk up ancestors (8 levels) to find an associated <label> element.
+                // Handles Angular/custom components where the label is a cousin/uncle element,
+                // not a direct parent or pointed-to via `for`. E.g. Unstop, Workday, iCIMS.
+                let _anc = el.parentElement;
+                for (let _i = 0; _i < 8 && _anc; _i++) {
+                    // Direct <label> children of this ancestor that are not wrapping our input
+                    for (const _ch of _anc.children) {
+                        if (_ch.tagName === 'LABEL' && !_ch.contains(el)) {
+                            const _t = (_ch.innerText||_ch.textContent||'').replace(/[*]/g,'').replace(/\\s+/g,' ').trim();
+                            if (_t && _t.length < 100) return _t;
+                        }
+                    }
+                    // Within first 4 ancestor levels also check nested <label> elements
+                    if (_i < 4) {
+                        for (const _lbl of _anc.querySelectorAll('label')) {
+                            if (!_lbl.contains(el) && (!_lbl.htmlFor || _lbl.htmlFor === el.id)) {
+                                const _t = (_lbl.innerText||_lbl.textContent||'').replace(/[*]/g,'').replace(/\\s+/g,' ').trim();
+                                if (_t && _t.length < 100) return _t;
+                            }
+                        }
+                    }
+                    if (_anc.tagName === 'LABEL') {
+                        const _t = (_anc.innerText||'').replace(/[*]/g,'').replace(/\\s+/g,' ').trim();
+                        if (_t && _t.length < 100) return _t;
+                    }
+                    _anc = _anc.parentElement;
+                }
                 return '';
             };
-            for (const el of document.querySelectorAll(
+            for (const el of root.querySelectorAll(
                 'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select'
             )) {
                 if (!isVisible(el)) continue;  // skip hidden/invisible inputs
@@ -2638,15 +3428,18 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 const tag = el.tagName.toLowerCase();
                 // detect Oracle cx-select combobox vs plain text
                 const role = el.getAttribute('role') || '';
+                // detect Angular app-autocomplete (Unstop) — input with <ul.autocomplete-content> sibling
+                const _isAC = !!(el.closest('app-autocomplete') ||
+                    (el.parentElement && el.parentElement.querySelector('ul.autocomplete-content, ul[id*="_select_list"]')));
                 const type = tag==='select'?'select':tag==='textarea'?'textarea':
-                    (role==='combobox'?'combobox':(el.type||'text'));
+                    (role==='combobox'?'combobox':(_isAC?'ac_dropdown':(el.type||'text')));
                 const opts = type==='select' ? Array.from(el.options).filter(o=>o.value!=='').map(o=>o.text.trim()) : [];
                 fields.push({ id: key, name: el.name||'', label: getLabel(el), type, options: opts,
                               required: el.required||el.getAttribute('aria-required')==='true',
                               placeholder: el.placeholder||'' });
             }
             const groups = {};
-            for (const el of document.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
+            for (const el of root.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
                 if (!isVisible(el)) continue;  // skip hidden checkboxes/radios
                 const g = el.name || ('grp_'+el.id);
                 if (!g) continue;
@@ -2656,8 +3449,60 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 groups[g].options.push(optLbl||el.value);
             }
             for (const g of Object.values(groups)) { if (!seen.has(g.id)) fields.push(g); }
+            // ── ARIA custom radio groups (role="radiogroup" + role="radio" divs) ──
+            // Used by Lever, Ashby, and many modern ATS platforms instead of real <input type=radio>
+            for (const grp of root.querySelectorAll('[role="radiogroup"]')) {
+                if (!isVisible(grp)) continue;
+                const gid = grp.getAttribute('data-ui') || grp.id || grp.getAttribute('name') || grp.getAttribute('data-test') || ('aria_rg_' + fields.length);
+                const lblId = grp.getAttribute('aria-labelledby');
+                const lblEl = lblId ? document.getElementById(lblId) : null;
+                let label = lblEl ? lblEl.innerText.trim() : (grp.getAttribute('aria-label') || '');
+                // When label is missing (Angular un-radio-group has no aria-labelledby),
+                // walk up ancestors to find an associated <label> element
+                if (!label) {
+                    let _ganc = grp.parentElement;
+                    for (let _gi = 0; _gi < 5 && _ganc && !label; _gi++) {
+                        for (const _gch of _ganc.children) {
+                            if (_gch.tagName === 'LABEL' && !_gch.contains(grp)) {
+                                label = (_gch.innerText||_gch.textContent||'').replace(/[*]/g,'').replace(/\\s+/g,' ').trim();
+                                if (label && label.length < 100) break;
+                                else label = '';
+                            }
+                        }
+                        _ganc = _ganc.parentElement;
+                    }
+                }
+                if (!label) label = gid;  // final fallback: use name/data-test attribute
+                // Options: standard [role="radio"] (Lever/Ashby) OR native inputs (Angular un-radio-group)
+                const _ariaOpts = Array.from(grp.querySelectorAll('[role="radio"]'));
+                const options = _ariaOpts.length > 0
+                    ? _ariaOpts.map(opt => {
+                        const lblIds = (opt.getAttribute('aria-labelledby') || '').split(' ');
+                        const optLblEl = lblIds.map(id => document.getElementById(id)).find(el => el && el.innerText.trim());
+                        return optLblEl ? optLblEl.innerText.trim()
+                                       : (opt.getAttribute('aria-label') || opt.innerText.trim());
+                    }).filter(Boolean)
+                    : Array.from(grp.querySelectorAll('input[type="radio"]')).map(inp => {
+                        const lbl = inp.id ? document.querySelector('label[for="'+inp.id+'"]') : null;
+                        return lbl ? (lbl.innerText||lbl.textContent||'').replace(/[*]/g,'').replace(/\\s+/g,' ').trim() : inp.value;
+                    }).filter(Boolean);
+                const k = 'aria_rg_' + gid;
+                if (!seen.has(k) && options.length > 0) {
+                    seen.add(k);
+                    seen.add(gid);  // block standard radio/checkbox dup for same group name
+                    // Remove any already-added standard radio/checkbox group with this name
+                    for (let _di = fields.length - 1; _di >= 0; _di--) {
+                        if (fields[_di].name === gid && fields[_di].type !== 'aria_radio') {
+                            fields.splice(_di, 1); break;
+                        }
+                    }
+                    fields.push({ id: k, name: gid, label, type: 'aria_radio', options,
+                                  required: grp.getAttribute('aria-required') === 'true' || grp.hasAttribute('required'),
+                                  placeholder: '' });
+                }
+            }
             // ── Oracle Fusion / Taleo cx-select-pills (button-group pill selectors) ──
-            for (const ul of document.querySelectorAll('ul.cx-select-pills-container')) {
+            for (const ul of root.querySelectorAll('ul.cx-select-pills-container')) {
                 if (!isVisible(ul)) continue;
                 const label = (ul.getAttribute('aria-label') || '').trim();
                 if (!label) continue;
@@ -2670,7 +3515,7 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 }
             }
             // ── Oracle Fusion / Taleo — hidden required T&C / legal-disclaimer checkboxes ──
-            for (const inp of document.querySelectorAll('input[type="checkbox"].input-row__hidden-control')) {
+            for (const inp of root.querySelectorAll('input[type="checkbox"].input-row__hidden-control')) {
                 if (inp.checked) continue;  // already accepted
                 const lbl = inp.id ? document.querySelector('label[for="'+inp.id+'"]') : inp.closest('label');
                 const text = lbl ? (lbl.innerText||'').replace(/\\s+/g,' ').trim().substring(0,80) : (inp.id||'legal_checkbox');
@@ -2681,7 +3526,7 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 }
             }
             // ── intl-tel-input phone country selector (Greenhouse, Lever, etc.) ──
-            for (const btn of document.querySelectorAll('button.iti__selected-country')) {
+            for (const btn of root.querySelectorAll('button.iti__selected-country')) {
                 if (!isVisible(btn)) continue;
                 const container = btn.closest('.iti');
                 const phoneInp = container ? container.querySelector('input[type="tel"],input[type="phone"],input[name*="phone"],input[id*="phone"]') : null;
@@ -2694,14 +3539,87 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             return fields;
         }"""
 
+        # JS that detects an active modal/dialog on the page and returns its CSS selector.
+        # Covers: Bootstrap (.modal.show / .modal.in), Material UI (.MuiDialog-paper),
+        # jQuery UI (.ui-dialog-content), Foundation (.reveal), Workday, iCIMS,
+        # generic role="dialog", and custom portal containers.
+        MODAL_DETECT_JS = """() => {
+            const CANDIDATES = [
+                // Role-based (most reliable — framework-agnostic)
+                '[role="dialog"]:not([aria-hidden="true"])',
+                '[role="alertdialog"]:not([aria-hidden="true"])',
+                // Bootstrap / jQuery plugins
+                '.modal.show',
+                '.modal.fade.show',
+                '.modal.in',
+                '.modal.openModal',
+                // Material UI / MUI
+                '.MuiDialog-paper',
+                '.MuiModal-root:not([aria-hidden="true"])',
+                // jQuery UI
+                '.ui-dialog-content',
+                '.ui-dialog',
+                // Foundation
+                '.reveal',
+                '.reveal-overlay > .reveal',
+                // Workday
+                '[data-automation-id*="modal"]',
+                '[data-automation-id*="dialog"]',
+                // iCIMS
+                '.icims-form-modal',
+                '.icims-modal',
+                // Taleo / Oracle
+                '.oracle-modal',
+                // Radix UI (used by many modern portals)
+                '[data-radix-dialog-content]',
+                '[data-state="open"][role="dialog"]',
+                // Generic patterns
+                '[class*="modal"][class*="open"]:not([aria-hidden="true"])',
+                '[class*="dialog"][class*="open"]:not([aria-hidden="true"])',
+                '[class*="modal-content"]:not([aria-hidden="true"])',
+                '[class*="modal-dialog"]',
+                // Named portal modals
+                '#careerPortalModal',
+            ];
+            for (const sel of CANDIDATES) {
+                try {
+                    const el = document.querySelector(sel);
+                    if (!el) continue;
+                    if (el.offsetParent === null) continue;  // hidden
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 100 && r.height > 100) return sel;
+                } catch(e) { continue; }
+            }
+            return null;
+        }"""
+
         for step in range(8):
-            fields      = ext_page.evaluate(FIELD_JS)
+            # Check for CAPTCHA at start of each step (some ATSes inject Turnstile mid-flow)
+            _handle_captcha(ext_page, task_input)
+
+            # Detect if a modal/dialog is currently active — scope field scan to it so we
+            # don't accidentally fill background page inputs (search bars, job filters, etc.)
+            try:
+                _modal_root_sel = ext_page.evaluate(MODAL_DETECT_JS)
+            except Exception:
+                _modal_root_sel = None
+            if _modal_root_sel:
+                _log(task_input, f"External apply step {step+1}: scoping field scan to modal ({_modal_root_sel})", "info", "ai_decision")
+
+            fields      = ext_page.evaluate(FIELD_JS, _modal_root_sel)
             file_fields = [f for f in fields if f.get("type") == "file"]
             form_fields = [f for f in fields if f.get("type") not in ("file",)]
 
-            # Full visible page text — gives Claude full context on what the form is asking
+            # Full visible page text — gives Claude full context on what the form is asking.
+            # Scope to modal when active so Claude sees the form's own text, not the whole page.
             try:
-                page_text = ext_page.evaluate("() => (document.body && document.body.innerText) || ''")
+                if _modal_root_sel:
+                    page_text = ext_page.evaluate(
+                        """(sel) => { const el = document.querySelector(sel); return el ? (el.innerText || '') : (document.body && document.body.innerText) || ''; }""",
+                        _modal_root_sel
+                    )
+                else:
+                    page_text = ext_page.evaluate("() => (document.body && document.body.innerText) || ''")
             except Exception:
                 page_text = ""
 
@@ -2723,9 +3641,19 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                  f"External apply step {step+1}: {len(form_fields)} fields, {len(file_fields)} file input(s)",
                  "info", "ai_decision")
 
-            # Fill text/select/radio/checkbox fields via Claude
+            # Fill text/select/radio/checkbox fields via Claude with validation
             if form_fields:
+                from automation.external_form_filler import ExternalFormFiller
+
                 answers = _fill_fields(form_fields, user_profile, resume_text, jd_text, page_text=page_text)
+
+                # Create filler with proper validation
+                filler = ExternalFormFiller(
+                    ext_page,
+                    log_fn=lambda msg, lvl="info": _log(task_input, f"External apply: {msg}", lvl, "ai_decision")
+                )
+
+                # Separate field handling
                 for field in form_fields:
                     fid    = field.get("id", "")
                     fname  = field.get("name", "") or fid
@@ -2767,8 +3695,110 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                     # attribute selectors directly — always use JS getElementById/querySelector
                     def _has_css_special(s: str) -> bool:
                         return any(c in s for c in ("[", "]", ".", "#", ":", "(", ")", "!", "/"))
+
+                    # Use validated fill for standard field types
+                    if ftype in ("text", "textarea", "email", "tel", "number", "url", "search", "select", "radio", "checkbox"):
+                        result = filler._fill_one(field, answer)
+                        if result["settled"]:
+                            _log(task_input, f"External apply: ✓ field '{field.get('label','?')[:40]}' settled", "info", "ai_decision")
+                        else:
+                            _log(task_input, f"External apply: ⚠ field '{field.get('label','?')[:40]}' failed: {result.get('error_msg', 'no error msg')}", "warning", "ai_decision")
+                        human_sleep(0.1, 0.3)
+                        continue
+
                     try:
-                        if ftype == "iti_phone":
+                        if ftype == "aria_radio":
+                            # ARIA custom radio group — two sub-patterns:
+                            # 1. Standard: role="radiogroup" + role="radio" divs (Lever, Ashby, Taleo)
+                            #    → click the [role="radio"] wrapper div
+                            # 2. Angular: un-radio-group[role="radiogroup"] + native <input type="radio">
+                            #    with <label class="un-label"> (Unstop etc.)
+                            #    → click the <label> element (native input is visually hidden)
+                            _filled = ext_page.evaluate(
+                                """([name, val]) => {
+                                    // Locate group by data-ui, id, name, data-test, or first radiogroup
+                                    const grp = document.querySelector('[role="radiogroup"][data-ui="'+name+'"]')
+                                             || document.getElementById(name)
+                                             || document.querySelector('[role="radiogroup"][name="'+name+'"]')
+                                             || document.querySelector('[role="radiogroup"][data-test="'+name+'"]')
+                                             || document.querySelector('[role="radiogroup"]');
+                                    if (!grp) return false;
+                                    const vLo = val.trim().toLowerCase();
+                                    // Strategy 1: standard [role="radio"] elements (Lever/Ashby/Taleo)
+                                    for (const opt of grp.querySelectorAll('[role="radio"]')) {
+                                        const txt = (opt.innerText || opt.textContent || '').trim().toLowerCase();
+                                        if (txt === vLo || txt.startsWith(vLo) || vLo.startsWith(txt)) {
+                                            if (opt.getAttribute('aria-checked') !== 'true') opt.click();
+                                            return true;
+                                        }
+                                    }
+                                    // Strategy 2: Angular un-radio-group — native input[type="radio"] + label
+                                    for (const inp of grp.querySelectorAll('input[type="radio"]')) {
+                                        const lbl = inp.id ? document.querySelector('label[for="'+inp.id+'"]') : null;
+                                        const txt = lbl ? (lbl.innerText||lbl.textContent||'').replace(/[*]/g,'').replace(/\\s+/g,' ').trim().toLowerCase()
+                                                        : inp.value.toLowerCase();
+                                        if (txt === vLo || txt.startsWith(vLo) || vLo.startsWith(txt) || inp.value.toLowerCase() === vLo) {
+                                            if (!inp.checked) {
+                                                if (lbl) lbl.click();  // click label — native input may be visually hidden
+                                                else inp.click();
+                                            }
+                                            return true;
+                                        }
+                                    }
+                                    return false;
+                                }""",
+                                [fname, answer]
+                            )
+                            if _filled:
+                                _log(task_input,
+                                     f"External apply: ✓ ARIA radio '{field.get('label','?')[:40]}' = '{answer}'",
+                                     "info", "ai_decision")
+                            else:
+                                _log(task_input,
+                                     f"External apply: ⚠ ARIA radio '{field.get('label','?')[:40]}' — no option matched '{answer}'",
+                                     "warning", "ai_decision")
+                            human_sleep(0.2, 0.4)
+                            continue
+                        elif ftype == "ac_dropdown":
+                            # Angular app-autocomplete (Unstop) — type to trigger suggestions,
+                            # then click the matching <li> in the dropdown list.
+                            _inp_el = ext_page.locator(f'[id="{fid}"]').first if (fid and not _has_css_special(fid)) else ext_page.locator(f'[name="{fname}"]').first
+                            try:
+                                _inp_el.fill(answer)
+                                human_sleep(0.6, 1.0)  # wait for Angular to populate dropdown
+                                _picked = ext_page.evaluate(
+                                    """([id, name, val]) => {
+                                        const inp = document.getElementById(id) || document.querySelector('[name="'+name+'"]');
+                                        if (!inp) return false;
+                                        const vLo = val.trim().toLowerCase();
+                                        // Find the autocomplete <ul> — either sibling or in parent wrapper
+                                        const wrapper = inp.closest('app-autocomplete, .autocomplete-wrapper') || inp.parentElement;
+                                        const ul = wrapper && wrapper.querySelector('ul.autocomplete-content, ul[id*="_select_list"]');
+                                        if (!ul) return false;
+                                        // Find best matching <li> (skip "Cannot Find / Create One")
+                                        for (const li of ul.querySelectorAll('li[title]:not(.create-new), li:not(.create-new)')) {
+                                            const txt = (li.getAttribute('title') || li.innerText || li.textContent || '').trim();
+                                            if (!txt) continue;
+                                            if (txt.toLowerCase() === vLo || txt.toLowerCase().includes(vLo) || vLo.includes(txt.toLowerCase())) {
+                                                li.click(); return true;
+                                            }
+                                        }
+                                        // No match — click first available suggestion
+                                        const first = ul.querySelector('li[title]:not(.create-new), li:not(.create-new)');
+                                        if (first) { first.click(); return true; }
+                                        return false;
+                                    }""",
+                                    [fid, fname, answer]
+                                )
+                                if _picked:
+                                    _log(task_input, f"External apply: ✓ autocomplete '{field.get('label','?')[:40]}' = '{answer}'", "info", "ai_decision")
+                                else:
+                                    _log(task_input, f"External apply: ⚠ autocomplete '{field.get('label','?')[:40]}' — no dropdown match for '{answer}'", "warning", "ai_decision")
+                            except Exception as _ace:
+                                _log(task_input, f"External apply: autocomplete '{field.get('label','?')[:40]}' failed ({_ace})", "warning", "ai_decision")
+                            human_sleep(0.2, 0.5)
+                            continue
+                        elif ftype == "iti_phone":
                             # intl-tel-input phone country selector (Greenhouse, Lever, etc.)
                             country_code = (user_profile.get("phone_country_code") or "us").lower()
                             ext_page.evaluate(
@@ -2971,22 +4001,29 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             except Exception:
                 pass
 
-            # Try Submit — broad set of labels + type=submit fallback
+            # Try Submit — safe selectors only (avoid social-share/easy-apply buttons)
             _submitted = False
             for submit_sel in [
                 "button[type='submit']", "input[type='submit']",
-                "button:has-text('Submit')", "button:has-text('Submit Application')",
+                "button:has-text('Submit Application')",
+                "button:has-text('Submit')",
                 "button:has-text('Apply Now')", "button:has-text('Apply')",
                 "button:has-text('Send Application')", "button:has-text('Send')",
                 "button:has-text('Complete Application')", "button:has-text('Finish')",
                 "button:has-text('Done')", "button:has-text('Confirm')",
                 "a:has-text('Submit Application')", "a:has-text('Apply Now')",
-                "[data-testid*='submit']", "[data-testid*='apply']",
-                "[class*='submit']", "[class*='apply-btn']",
+                "[data-testid='submit-application']", "[data-testid='submit']",
+                "[class='apply-btn']", "button.submit-btn",
             ]:
                 try:
                     btn = ext_page.locator(submit_sel).first
                     if btn.is_visible(timeout=800):
+                        # Wait for disabled submit buttons to become enabled
+                        try:
+                            if btn.is_disabled():
+                                btn.wait_for(state="enabled", timeout=15000)
+                        except Exception:
+                            pass
                         _pre_url = ext_page.url
                         human_click(ext_page, locator=btn)
                         human_sleep(2.5, 4.0)
@@ -3035,6 +4072,17 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 try:
                     btn = ext_page.locator(next_sel).first
                     if btn.is_visible(timeout=800):
+                        # Modal forms (e.g. Husky Technologies) use disabled Next buttons
+                        # that only enable after required fields are filled + CAPTCHA passes.
+                        # Poll up to 15s for the button to become enabled before clicking.
+                        try:
+                            if btn.is_disabled():
+                                _log(task_input,
+                                     f"External apply: Next button disabled — waiting up to 15s for enable…",
+                                     "info", "navigation")
+                                btn.wait_for(state="enabled", timeout=15000)
+                        except Exception:
+                            pass  # timed out or error — try clicking anyway
                         human_click(ext_page, locator=btn)
                         human_sleep(1.5, 2.5)
                         # Re-dismiss any cookie banner that might appear on new step
@@ -3047,18 +4095,28 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
 
             if not advanced:
                 # Last resort: ask JS to find the most prominent non-back button
+                # Strictly exclude social share buttons/links to avoid opening Facebook/Twitter
                 try:
                     clicked = ext_page.evaluate("""() => {
-                        const candidates = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]'))
-                            .filter(el => {
-                                const txt = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().toLowerCase();
-                                const style = window.getComputedStyle(el);
-                                const rect = el.getBoundingClientRect();
-                                return el.offsetParent !== null
-                                    && rect.width > 40 && rect.height > 20
-                                    && !['back','cancel','close','decline','reject','dismiss','no thanks'].some(w=>txt.includes(w))
-                                    && (style.backgroundColor !== 'transparent' || el.type === 'submit');
-                            });
+                        const SOCIAL_SHARE = [
+                            'facebook.com/sharer','twitter.com/share','linkedin.com/shareArticle',
+                            'plus.google.com','pinterest.com/pin','mailto:','whatsapp://','t.me/'
+                        ];
+                        const SKIP_TEXT = ['back','cancel','close','decline','reject','dismiss',
+                                           'no thanks','share','tweet','post','facebook','twitter',
+                                           'linkedin','google','email','copy link','print'];
+                        const candidates = Array.from(document.querySelectorAll(
+                            'button[type="submit"], input[type="submit"], button.submit, button.next, button.continue'
+                        )).filter(el => {
+                            const txt = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().toLowerCase();
+                            const href = (el.href || '').toLowerCase();
+                            const rect = el.getBoundingClientRect();
+                            return el.offsetParent !== null
+                                && !el.disabled
+                                && rect.width > 40 && rect.height > 20
+                                && !SKIP_TEXT.some(w => txt.includes(w))
+                                && !SOCIAL_SHARE.some(s => href.includes(s));
+                        });
                         if (candidates.length > 0) { candidates[0].click(); return true; }
                         return false;
                     }""")
@@ -3443,8 +4501,10 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     if btn.is_visible(timeout=2000):
                         _href = btn.get_attribute("href") or ""
                         if _href:
+                            # Unwrap LinkedIn safety/tracking redirect to get real company URL
+                            _href = _unwrap_linkedin_apply_url(_href)
                             external_apply_href = _href
-                            print(f"  [LINKEDIN] External apply button found: {ext_sel}")
+                            print(f"  [LINKEDIN] External apply button found: {ext_sel} → {_href[:80]}")
                             break
                 except Exception:
                     continue
