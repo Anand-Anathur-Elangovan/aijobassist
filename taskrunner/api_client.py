@@ -617,3 +617,88 @@ def save_cover_letter(user_id: str, job_id: str | None,
         return resp.json()[0].get("id")
     return None
 
+
+def upload_file_to_storage(
+    file_path: str,
+    user_id: str,
+    filename: str = "",
+) -> str:
+    """
+    Upload a local file to Supabase Storage 'resumes' bucket.
+    Returns the public URL on success, or empty string on failure.
+    """
+    if not file_path or not os.path.isfile(file_path):
+        return ""
+    if not filename:
+        filename = os.path.basename(file_path)
+    ext = os.path.splitext(filename)[1].lower()
+    content_type = "application/pdf" if ext == ".pdf" else "application/octet-stream"
+    storage_path = f"{user_id}/{filename}"
+    try:
+        with open(file_path, "rb") as fh:
+            file_bytes = fh.read()
+        resp = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/resumes/{storage_path}",
+            headers={
+                "apikey": SUPABASE_API_KEY,
+                "Authorization": f"Bearer {SUPABASE_API_KEY}",
+                "Content-Type": content_type,
+                "x-upsert": "true",
+            },
+            data=file_bytes,
+        )
+        if resp.status_code in (200, 201):
+            public_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{storage_path}"
+            print(f"[API] Stored {filename} → {public_url[:80]}")
+            return public_url
+        print(f"[ERROR] upload_file_to_storage: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        print(f"[ERROR] upload_file_to_storage: {e}")
+    return ""
+
+
+def save_resume_version(
+    user_id: str,
+    version_name: str,
+    original_text: str,
+    tailored_text: str,
+    tailored_content: dict,
+    ats_score: int = None,
+    missing_skills: list = None,
+    resume_id: str = None,
+    job_id: str = None,
+    file_url: str = "",
+) -> str | None:
+    """
+    Persist a tailored resume version to the resume_versions table.
+    Optionally include a Supabase Storage file_url for direct download.
+    Returns the new version UUID, or None on failure.
+    """
+    content = dict(tailored_content or {})
+    if file_url:
+        content["file_url"] = file_url
+    payload = {
+        "user_id":          user_id,
+        "version_name":     version_name,
+        "original_text":    original_text,
+        "tailored_text":    tailored_text,
+        "tailored_content": content,
+        "ats_score":        ats_score,
+        "missing_skills":   missing_skills or [],
+    }
+    if resume_id:
+        payload["resume_id"] = resume_id
+    if job_id:
+        payload["job_id"] = job_id
+
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/resume_versions",
+        headers={**HEADERS, "Prefer": "return=representation"},
+        json=payload,
+    )
+    if resp.ok:
+        data = resp.json()
+        return data[0].get("id") if data else None
+    print(f"[ERROR] save_resume_version: {resp.status_code} {resp.text[:200]}")
+    return None
+

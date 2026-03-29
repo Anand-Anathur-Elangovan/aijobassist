@@ -4328,13 +4328,18 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             from automation.notifier import notify_manual_required
             _ss = task_input.get("_session_stats", {})
             _applied_so_far = _ss.get("easy_applied", 0) + _ss.get("external_applied", 0)
+            _manual_answers = dict(task_input.get("_last_external_answers") or {})
+            if task_input.get("_tailored_resume_url"):
+                _manual_answers["tailored_resume_pdf"] = task_input["_tailored_resume_url"]
+            if task_input.get("_tailored_resume_text"):
+                _manual_answers["tailored_resume_text_preview"] = task_input["_tailored_resume_text"][:500] + "…"
             notify_manual_required(
                 task_input   = task_input,
                 company      = task_input.get("_page_company") or task_input.get("company") or "Unknown Company",
                 job_title    = task_input.get("_page_job_title") or "Unknown Position",
                 apply_url    = apply_href,
                 stuck_reason = task_input.get("_ext_stuck_reason") or "Could not complete submission — no Submit/Next button found",
-                answers      = task_input.get("_last_external_answers") or {},
+                answers      = _manual_answers,
                 linkedin_url = task_input.get("_current_job_url") or "",
                 applied_today= _applied_so_far,
             )
@@ -4359,13 +4364,18 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             from automation.notifier import notify_manual_required
             _ss2 = task_input.get("_session_stats", {})
             _applied_so_far2 = _ss2.get("easy_applied", 0) + _ss2.get("external_applied", 0)
+            _manual_answers2 = dict(task_input.get("_last_external_answers") or {})
+            if task_input.get("_tailored_resume_url"):
+                _manual_answers2["tailored_resume_pdf"] = task_input["_tailored_resume_url"]
+            if task_input.get("_tailored_resume_text"):
+                _manual_answers2["tailored_resume_text_preview"] = task_input["_tailored_resume_text"][:500] + "…"
             notify_manual_required(
                 task_input   = task_input,
                 company      = task_input.get("_page_company") or task_input.get("company") or "Unknown Company",
                 job_title    = task_input.get("_page_job_title") or "Unknown Position",
                 apply_url    = apply_href,
                 stuck_reason = f"Automation error: {str(_e)[:120]}",
-                answers      = task_input.get("_last_external_answers") or {},
+                answers      = _manual_answers2,
                 linkedin_url = task_input.get("_current_job_url") or "",
                 applied_today= _applied_so_far2,
             )
@@ -4384,6 +4394,90 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 ext_page.close()
         except Exception:
             pass
+        return False
+
+
+def _li_tailor_and_persist(task_input: dict, jd_text: str) -> bool:
+    """
+    Run the tailoring refinement loop for the current job, then:
+    - Set task_input["resume_path"] / ["_tailored_pdf"] to the tailored PDF
+    - Set task_input["_tailored_resume_text"] for notifications
+    - Upload PDF to Supabase Storage and save version record to DB
+    Returns True if tailoring succeeded and resume_path was updated.
+    """
+    resume_path  = task_input.get("resume_path", "")
+    resume_text  = task_input.get("resume_text", "")
+    if not (resume_path or resume_text) or not jd_text.strip():
+        return False
+
+    company       = task_input.get("_page_company") or task_input.get("company") or ""
+    role          = task_input.get("_page_job_title") or task_input.get("role") or task_input.get("keywords") or ""
+    custom_prompt = task_input.get("tailor_custom_prompt", "")
+    match_thresh  = int(task_input.get("match_threshold", 70))
+    # Target must be strictly above smart-match threshold (and at least 75 %)
+    target_score  = max(match_thresh + 5, int(task_input.get("tailor_target_score", 90)))
+
+    source = resume_path if (resume_path and os.path.isfile(resume_path)) else resume_text
+    if not source:
+        return False
+
+    _log(task_input,
+         f"Tailoring resume for '{role or 'this role'}' at '{company or 'this company'}' "
+         f"(target {target_score}%)…",
+         "info", "tailor", {"company": company, "job_title": role, "target": target_score})
+    try:
+        from automation.resume_tailor import tailor_until_target
+        tr = tailor_until_target(
+            resume_source=source,
+            jd_text=jd_text,
+            target_score=target_score,
+            custom_prompt=custom_prompt,
+            company=company,
+            role=role,
+            max_attempts=3,
+        )
+        _log(task_input,
+             f"Tailoring done — {tr.score_before:.0f}%→{tr.score_after:.0f}% "
+             f"({'✅' if tr.score_after >= target_score else '⚠️ below target'})",
+             "success" if tr.score_after >= target_score else "warning", "tailor",
+             {"score": tr.score_after, "score_before": tr.score_before, "target": target_score,
+              "company": company, "job_title": role})
+
+        if tr.tailored_pdf_path and os.path.isfile(tr.tailored_pdf_path):
+            task_input["resume_path"]            = tr.tailored_pdf_path
+            task_input["_tailored_pdf"]          = tr.tailored_pdf_path
+        task_input["_tailored_resume_text"]      = tr.tailored_text
+
+        # ── Persist to Supabase ─────────────────────────────────────
+        _uid = task_input.get("user_id", "")
+        if _uid:
+            try:
+                from api_client import save_resume_version, upload_file_to_storage
+                _slug = lambda s: re.sub(r"[^a-zA-Z0-9]+", "_", s).strip("_")[:25]
+                _vname = (f"{_slug(company)}_{_slug(role)}" if (company or role) else "tailored").strip("_") or "tailored"
+                # Upload PDF to storage
+                _file_url = ""
+                if tr.tailored_pdf_path and os.path.isfile(tr.tailored_pdf_path):
+                    _fname = f"{_vname}.pdf"
+                    _file_url = upload_file_to_storage(tr.tailored_pdf_path, _uid, _fname)
+                save_resume_version(
+                    user_id=_uid, version_name=_vname,
+                    original_text=tr.original_text, tailored_text=tr.tailored_text,
+                    tailored_content={"bullets": tr.tailored_bullets, "summary": tr.tailored_summary,
+                                      "improvements": tr.improvements, "added_keywords": tr.added_keywords,
+                                      "missing_skills": tr.missing_skills, "score_before": tr.score_before,
+                                      "score_after": tr.score_after, "ats_score": tr.ats_score},
+                    ats_score=tr.ats_score, missing_skills=tr.missing_skills, file_url=_file_url,
+                )
+                if _file_url:
+                    task_input["_tailored_resume_url"] = _file_url
+                _log(task_input, f"Tailored resume saved: '{_vname}'" + (f" (PDF: {_file_url[:60]})" if _file_url else ""),
+                     "info", "tailor", {"version_name": _vname, "file_url": _file_url})
+            except Exception as _sve:
+                _log(task_input, f"Resume save failed ({_sve})", "warning", "tailor")
+        return True
+    except Exception as _te:
+        _log(task_input, f"Tailoring failed ({_te}) — using original resume", "warning", "tailor")
         return False
 
 
@@ -4672,40 +4766,6 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
         if jd_text:
             task_input["_current_jd_text"] = jd_text
 
-        # ── Tailor resume to this JD if requested ─────────────────
-        if task_input.get("tailor_resume"):
-            resume_path = task_input.get("resume_path", "")
-            if not resume_path or not os.path.isfile(resume_path):
-                _log(task_input, "⚠️  No resume file available — applying without tailoring. Upload a resume to enable tailoring.", "warn")
-            elif jd_text.strip():
-                    try:
-                        from automation.resume_tailor import tailor_resume_for_job
-                        company       = task_input.get("company", "")
-                        role          = task_input.get("role", task_input.get("keywords", ""))
-                        custom_prompt = task_input.get("tailor_custom_prompt", "")
-                        _log(task_input, f"Tailoring resume for {role or 'this role'} at {company or 'this company'}…", "info", "tailor", {"company": company, "job_title": role})
-                        result = tailor_resume_for_job(
-                            resume_source=resume_path,
-                            jd_text=jd_text,
-                            custom_prompt=custom_prompt,
-                            company=company,
-                            role=role,
-                            save_pdf=True,
-                        )
-                        _log(
-                            task_input,
-                            f"Resume tailored — ATS score {result.score_before:.0f}%→{result.score_after:.0f}%",
-                            "success", "tailor",
-                            {"company": company, "job_title": role, "score": result.score_after},
-                        )
-                        if result.tailored_pdf_path and os.path.isfile(result.tailored_pdf_path):
-                            task_input["resume_path"]   = result.tailored_pdf_path
-                            task_input["_tailored_pdf"] = result.tailored_pdf_path
-                    except Exception as _te:
-                        _log(task_input, f"Tailoring failed ({_te}) — applying with original resume", "warning", "tailor")
-            else:
-                _log(task_input, "Could not extract JD text — applying with original resume", "warning", "tailor")
-
         # ── Detect apply button type and route per user preference ──────────
         _linkedin_apply_types = task_input.get("linkedin_apply_types", "easy_apply_only")
 
@@ -4760,10 +4820,16 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             if not external_apply_href:
                 _log(task_input, "No external Apply button — skipping (preference: External Apply only)", "skip", "skip")
                 return False
+            # ── Tailor before external apply ──────────────────────────
+            if task_input.get("tailor_resume") and jd_text:
+                _li_tailor_and_persist(task_input, jd_text)
             task_input["_current_job_url"] = job_url
             return _apply_external_job(page, external_apply_href, task_input)
         else:  # "both" — prefer Easy Apply, fall back to external
             if easy_apply_btn is None and external_apply_href:
+                # ── Tailor before external apply ──────────────────────
+                if task_input.get("tailor_resume") and jd_text:
+                    _li_tailor_and_persist(task_input, jd_text)
                 task_input["_current_job_url"] = job_url
                 return _apply_external_job(page, external_apply_href, task_input)
             elif easy_apply_btn is None:
@@ -4773,6 +4839,29 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
 
         human_click(page, locator=easy_apply_btn)
         idle_jiggle(page, duration=random.uniform(3.0, 5.5))   # jiggle while modal loads
+
+        # ── Easy Apply: tailor only if a resume upload field exists in the modal ──
+        if task_input.get("tailor_resume") and jd_text:
+            _li_has_upload = False
+            try:
+                human_sleep(1.0, 2.0)   # wait briefly for modal DOM to settle
+                for _usel in [
+                    "input[id*='jobs-document-upload-file-input-upload-resume']",
+                    "input[type='file'][name*='resume']",
+                    "input[type='file']",
+                ]:
+                    try:
+                        if page.locator(_usel).first.count() > 0:
+                            _li_has_upload = True
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            if _li_has_upload:
+                _li_tailor_and_persist(task_input, jd_text)
+            else:
+                _log(task_input, "Easy Apply: no resume upload field — applying with original resume", "info", "tailor")
 
         # ── Multi-step apply loop (up to 10 steps) ────────────────
         for step in range(10):

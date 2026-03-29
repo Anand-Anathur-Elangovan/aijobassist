@@ -156,6 +156,8 @@ export default function DashboardPage() {
   // Smart Match — AI resume vs JD scoring gate
   const [smartMatch, setSmartMatch] = useState(false);
   const [matchThreshold, setMatchThreshold] = useState(70);
+  // Tailor target — minimum ATS score to aim for when tailoring
+  const [tailorTargetScore, setTailorTargetScore] = useState(90);
   // Auto Cover Letter — generate AI cover letter per application
   const [autoCoverLetter, setAutoCoverLetter] = useState(true);
   // Smart Apply Scheduler — only apply within a time window
@@ -184,6 +186,8 @@ export default function DashboardPage() {
     added_keywords: string[];
   } | null>(null);
   const [tailorLoading, setTailorLoading] = useState(false);
+  const [suggestingKeywords, setSuggestingKeywords] = useState(false);
+  const [suggestedKeywords, setSuggestedKeywords] = useState<string[]>([]);
   const [resumeText, setResumeText] = useState("");
   const [jdText, setJdText] = useState("");
   const [editedResume, setEditedResume] = useState("");
@@ -298,6 +302,7 @@ export default function DashboardPage() {
         if (p.auto_cover_letter !== undefined) setAutoCoverLetter(p.auto_cover_letter as boolean);
         if (p.smart_match !== undefined) setSmartMatch(p.smart_match as boolean);
         if (p.match_threshold) setMatchThreshold(p.match_threshold as number);
+        if (p.tailor_target_score) setTailorTargetScore(p.tailor_target_score as number);
         if (p.schedule_enabled !== undefined) setScheduleEnabled(p.schedule_enabled as boolean);
         if (p.schedule_start_hour !== undefined) setScheduleStartHour(p.schedule_start_hour as number);
         if (p.schedule_end_hour !== undefined) setScheduleEndHour(p.schedule_end_hour as number);
@@ -312,6 +317,9 @@ export default function DashboardPage() {
         if (p.naukri_job_type) setNaukriJobType(p.naukri_job_type as "all" | "fullTime" | "partTime" | "contract" | "temporary");
         if (p.naukri_apply_types) setNaukriApplyTypes(p.naukri_apply_types as "both" | "direct_only" | "company_site_only");
         if (p.linkedin_apply_types) setLinkedinApplyTypes(p.linkedin_apply_types as "easy_apply_only" | "external_only" | "both");
+        // Credentials
+        if (p.linkedin_email) setLinkedinEmail(p.linkedin_email as string);
+        if (p.linkedin_password) setLinkedinPassword(p.linkedin_password as string);
       }
       setProfileLoaded(true);
     });
@@ -389,6 +397,28 @@ export default function DashboardPage() {
     }
   };
 
+  const suggestKeywordsFromResume = async () => {
+    setSuggestingKeywords(true);
+    setSuggestedKeywords([]);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) throw new Error("Not authenticated");
+      const res = await fetch("/api/ai/suggest-keywords", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to suggest keywords");
+      setSuggestedKeywords(data.keywords ?? []);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to generate keywords");
+    } finally {
+      setSuggestingKeywords(false);
+    }
+  };
+
   const saveProfile = async (silent = false) => {
     const { data: userData } = await supabase.auth.getUser();
     const u = userData.user;
@@ -435,6 +465,7 @@ export default function DashboardPage() {
       auto_cover_letter: autoCoverLetter,
       smart_match: smartMatch,
       match_threshold: matchThreshold,
+      tailor_target_score: tailorTargetScore,
       schedule_enabled: scheduleEnabled,
       schedule_start_hour: scheduleStartHour,
       schedule_end_hour: scheduleEndHour,
@@ -449,6 +480,9 @@ export default function DashboardPage() {
       naukri_job_type: naukriJobType,
       naukri_apply_types: naukriApplyTypes,
       linkedin_apply_types: linkedinApplyTypes,
+      // Credentials — persisted so Railway cloud launch can use them
+      ...(linkedinEmail.trim() && { linkedin_email: linkedinEmail.trim() }),
+      ...(linkedinPassword.trim() && { linkedin_password: linkedinPassword.trim() }),
     };
     const { error } = await supabase.from("user_profiles").upsert(
       { user_id: u.id, job_preferences: prefs, updated_at: new Date().toISOString() },
@@ -498,6 +532,7 @@ export default function DashboardPage() {
           manual_urls: urls,
           tailor_resume: urlTailor,
           ...(urlTailor && tailorPrompt.trim() && { tailor_custom_prompt: tailorPrompt.trim() }),
+          ...(urlTailor && { tailor_target_score: tailorTargetScore }),
           ...(smartMatch && { smart_match: true, match_threshold: matchThreshold }),
           // Profile / form-fill fields
           phone,
@@ -597,6 +632,7 @@ export default function DashboardPage() {
         ...(applyMode === "tailor" && {
           tailor_resume: true,
           tailor_custom_prompt: tailorPrompt,
+          tailor_target_score: tailorTargetScore,
         }),
         ...(favCompanies.length > 0 && { favorite_companies: favCompanies }),
         ...(platform === "naukri" && {
@@ -1103,6 +1139,27 @@ export default function DashboardPage() {
                 When you start a run, the bot reads each job&apos;s description directly from LinkedIn and tailors your uploaded resume automatically — no pasting needed.
                 Use the preview below to test the AI on any specific JD before launching.
               </p>
+              {/* Tailor target score */}
+              <div className="space-y-1.5 p-2.5 rounded-lg border border-amber-400/20 bg-amber-400/5">
+                <div className="flex items-center justify-between">
+                  <label className="font-mono text-xs text-slate-400">
+                    Target ATS score after tailoring
+                  </label>
+                  <span className="font-mono text-sm font-bold text-amber-400">{tailorTargetScore}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={70}
+                  max={98}
+                  step={5}
+                  value={tailorTargetScore}
+                  onChange={(e) => setTailorTargetScore(Number(e.target.value))}
+                  className="w-full accent-amber-500"
+                />
+                <p className="font-body text-xs text-slate-500">
+                  The bot will tailor your resume to hit this score before applying. Each tailored resume is saved automatically as <span className="text-amber-400/80">Company — Role</span>.
+                </p>
+              </div>
               {/* Preview section */}
               <div className="space-y-2">
                 <div>
@@ -1760,6 +1817,44 @@ export default function DashboardPage() {
               Use the button above to force a re-evaluation without changing your resume.
             </p>
           </div>
+          {/* AI Keyword Suggester */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-xs text-slate-500">Need ideas? Let AI suggest keywords from your resume.</span>
+              <button
+                type="button"
+                disabled={suggestingKeywords}
+                onClick={suggestKeywordsFromResume}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-mono text-xs font-semibold bg-violet-600/20 text-violet-300 border border-violet-600/40 hover:bg-violet-600/30 transition-colors disabled:opacity-50"
+              >
+                {suggestingKeywords ? "Generating…" : "✨ AI Suggest Keywords"}
+              </button>
+            </div>
+            {suggestedKeywords.length > 0 && (
+              <div className="p-3 rounded-lg border border-violet-500/20 bg-violet-500/5 space-y-2">
+                <p className="font-mono text-xs text-slate-400">Click a keyword to use it:</p>
+                <div className="flex flex-wrap gap-2">
+                  {suggestedKeywords.map((kw, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => {
+                        if (!keywords.trim()) { setKeywords(kw); }
+                        else if (!keywords2.trim()) { setKeywords2(kw); }
+                        else if (!keywords3.trim()) { setKeywords3(kw); }
+                        setSuggestedKeywords(prev => prev.filter((_, idx) => idx !== i));
+                      }}
+                      className="px-2 py-1 rounded-md text-xs font-mono bg-slate-700 text-slate-300 hover:bg-violet-700 hover:text-white border border-slate-600 hover:border-violet-500 transition-colors"
+                    >
+                      {kw}
+                    </button>
+                  ))}
+                </div>
+                <p className="font-mono text-xs text-slate-600">Fills Keyword 1 → 2 → 3 in order. Max 3 slots.</p>
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block font-mono text-xs text-slate-400 mb-1">Keyword 1 <span className="text-red-400">*</span></label>

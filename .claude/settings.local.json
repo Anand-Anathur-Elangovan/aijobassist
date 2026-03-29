@@ -15,7 +15,17 @@
       "Bash(grep -rn \"user_profiles\\\\|CREATE TABLE.*profile\\\\|ALTER TABLE.*user_profile\" '/c/Users/Anand/Desktop/project Idea/aijobassist/' --include=*.sql)",
       "Bash(ls '/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/')",
       "Bash(cat '/c/Users/Anand/Desktop/project Idea/aijobassist/app/\\(protected\\)/layout.tsx')",
-      "Bash(grep -E \"^d|\\\\.py$|\\\\.sql$|\\\\.env|\\\\.json|\\\\.yaml|\\\\.yml\")"
+      "Bash(grep -E \"^d|\\\\.py$|\\\\.sql$|\\\\.env|\\\\.json|\\\\.yaml|\\\\.yml\")",
+      "Bash(ls:*)",
+      "Bash(npx tsc:*)",
+      "Bash(node -e \":*)",
+      "Bash(cat \"app/\\(protected\\)/dashboard/page.tsx\")",
+      "Bash(grep -r \"smart_match\\\\|match_threshold\" automation/ taskrunner/ --include=*.py)",
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "Bash(wc:*)",
+      "Bash(find '/c/Users/Anand/Desktop/project Idea/aijobassist' -type f \\\\\\(-name *schema* -o -name *migration* -o -name *database* \\\\\\))",
+      "Bash(python -m py_compile automation/naukri.py)"
     ]
   }
 }

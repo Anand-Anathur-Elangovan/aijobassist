@@ -688,3 +688,51 @@ def tailor_resume_for_job(
         tailored_pdf_path= pdf_path,
         version_name     = version_name,
     )
+
+
+def tailor_until_target(
+    resume_source: str,
+    jd_text: str,
+    target_score: float = 90.0,
+    custom_prompt: str = "",
+    company: str = "",
+    role: str = "",
+    max_attempts: int = 3,
+) -> "TailorResult":
+    """
+    Iteratively refine a resume until score_after >= target_score or max_attempts hit.
+    Each round feeds the previous tailored text as input so quality improves progressively.
+    PDF is generated only once for the final best result.
+    Returns the TailorResult with the highest score_after.
+    """
+    max_attempts = max(1, max_attempts)
+    best: TailorResult | None = None
+    current_source = resume_source
+
+    for attempt in range(max_attempts):
+        result = tailor_resume_for_job(
+            resume_source=current_source,
+            jd_text=jd_text,
+            custom_prompt=custom_prompt,
+            company=company,
+            role=role,
+            save_pdf=False,   # no PDF during refinement — generate once at the end
+        )
+        print(f"  [TAILOR] Attempt {attempt + 1}/{max_attempts}: score {result.score_after:.0f}% (target {target_score:.0f}%)")
+        if best is None or result.score_after > best.score_after:
+            best = result
+
+        if result.score_after >= target_score:
+            break
+
+        if attempt < max_attempts - 1:
+            current_source = result.tailored_text   # refine from the latest output
+
+    # Generate PDF for the winning result
+    if best and not best.tailored_pdf_path:
+        try:
+            best.tailored_pdf_path = text_to_pdf(best.tailored_text)
+        except Exception as _pe:
+            print(f"  [TAILOR] PDF generation failed ({_pe})")
+
+    return best  # type: ignore[return-value]

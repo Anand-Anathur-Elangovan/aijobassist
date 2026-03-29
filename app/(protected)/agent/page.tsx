@@ -44,6 +44,9 @@ export default function AgentPage() {
   const [railwayStopping,    setRailwayStopping]     = useState(false);
   const [stoppingTask,       setStoppingTask]        = useState(false);
   const [showScreenshot,     setShowScreenshot]      = useState(true);
+  const [cloudAutoScroll, setCloudAutoScroll] = useState(true);
+  const [userProfilePrefs, setUserProfilePrefs] = useState<Record<string, unknown> | null>(null);
+  const [taskOutput, setTaskOutput] = useState<Record<string, unknown> | null>(null);
   const logsEndRef        = useRef<HTMLDivElement>(null);
   const cloudPollRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cloudStoppedRef   = useRef(false);
@@ -149,10 +152,12 @@ export default function AgentPage() {
     };
   }, [user]);
 
-  // Auto-scroll logs
+  // Auto-scroll cloud logs (only when enabled)
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [railwayLogs]);
+    if (cloudAutoScroll) {
+      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [railwayLogs, cloudAutoScroll]);
 
   async function fetchKey() {
     if (!user) return;
@@ -177,14 +182,17 @@ export default function AgentPage() {
     const token   = session.data.session?.access_token;
     if (!token) return;
 
-    // Fetch user profile for railway_configured + preferred_execution_mode
+    // Fetch user profile for railway_configured + preferred_execution_mode + job_preferences
     const { data: profile } = await supabase
       .from("user_profiles")
-      .select("railway_configured, preferred_execution_mode")
+      .select("railway_configured, preferred_execution_mode, job_preferences")
       .eq("user_id", user.id)
       .single();
 
     if (profile) {
+      if (profile.job_preferences) {
+        setUserProfilePrefs(profile.job_preferences as Record<string, unknown>);
+      }
       setPreferredMode((profile.preferred_execution_mode as ExecutionMode) ?? "own_machine");
       if (profile.railway_configured) {
         setRailwayConfigured(true);
@@ -270,6 +278,92 @@ export default function AgentPage() {
     const token   = session.data.session?.access_token;
     if (!token) return;
 
+    // Build task input from saved profile preferences
+    const p = userProfilePrefs ?? {};
+    const pStr = (k: string) => p[k] ? String(p[k]) : undefined;
+    const pVal = (k: string) => p[k];
+    const locList = Array.isArray(p.location_list) ? p.location_list as string[] : [];
+    const location = [...(p.remote_enabled ? ["Remote"] : []), ...locList].join(",");
+
+    const taskInput: Record<string, unknown> = {
+      platform:         p.platform ?? "linkedin",
+      keywords:         p.keywords ?? "",
+      location,
+      max_apply:        p.max_apply ?? 5,
+      years_experience: p.years_experience ?? 0,
+      skill_rating:     p.skill_rating ?? 8,
+      notice_period:    p.notice_period ?? 0,
+      full_name:        [p.first_name, p.last_name].filter(Boolean).join(" ") || user.email?.split("@")[0] || "",
+      email:            user.email ?? "",
+      semi_auto:        p.semi_auto ?? false,
+      auto_cover_letter: p.auto_cover_letter ?? false,
+    };
+
+    // Optional string fields
+    const strFields: Array<[string, string]> = [
+      ["keywords2", "keywords2"], ["keywords3", "keywords3"],
+      ["first_name", "first_name"], ["last_name", "last_name"],
+      ["phone", "phone"], ["phone_country", "phone_country"], ["phone_country_code", "phone_country_code"],
+      ["current_city", "current_city"], ["linkedin_url", "linkedin_url"],
+      ["github_url", "github_url"], ["portfolio_url", "portfolio_url"],
+      ["highest_education", "highest_education"], ["work_authorization", "work_authorization"],
+      ["nationality", "nationality"], ["gender", "gender"], ["disability_status", "disability_status"],
+      ["veteran_status", "veteran_status"], ["ethnicity", "ethnicity"],
+      ["linkedin_email", "linkedin_email"], ["linkedin_password", "linkedin_password"],
+    ];
+    for (const [src, dst] of strFields) {
+      const v = pStr(src);
+      if (v) taskInput[dst] = v;
+    }
+
+    // Optional non-string fields
+    if (pVal("salary_expectation")) taskInput.salary_expectation = pVal("salary_expectation");
+    if (pVal("current_ctc"))        taskInput.current_ctc        = pVal("current_ctc");
+    if (pVal("employments"))        taskInput.employments        = pVal("employments");
+    if (pVal("educations"))         taskInput.educations         = pVal("educations");
+    if (pVal("projects"))           taskInput.projects           = pVal("projects");
+    if (pVal("fav_companies"))      taskInput.favorite_companies = pVal("fav_companies");
+    if (pVal("smart_match")) {
+      taskInput.smart_match     = true;
+      taskInput.match_threshold = p.match_threshold ?? 70;
+    }
+    if (pVal("schedule_enabled")) {
+      taskInput.schedule_start_hour = p.schedule_start_hour;
+      taskInput.schedule_end_hour   = p.schedule_end_hour;
+    }
+
+    // Tailor settings (TAILOR_AND_APPLY only)
+    if (taskType === "TAILOR_AND_APPLY") {
+      taskInput.tailor_resume        = true;
+      taskInput.tailor_custom_prompt = p.tailor_prompt ?? "";
+      taskInput.tailor_target_score  = p.tailor_target_score ?? 90;
+    }
+
+    // Platform-specific filters
+    if (p.platform === "naukri") {
+      taskInput.apply_types = p.naukri_apply_types ?? "both";
+      if (p.naukri_date_posted && p.naukri_date_posted !== "any") taskInput.freshness_days = Number(p.naukri_date_posted);
+      if (p.naukri_work_mode && p.naukri_work_mode !== "any") taskInput.work_mode = p.naukri_work_mode;
+      else if (p.remote_enabled) taskInput.work_mode = "remote";
+      if (p.naukri_job_type && p.naukri_job_type !== "all") taskInput.naukri_job_type = p.naukri_job_type;
+    } else {
+      taskInput.linkedin_date_posted  = p.linkedin_date_posted ?? "any";
+      taskInput.linkedin_remote       = p.remote_enabled ?? false;
+      taskInput.linkedin_apply_types  = p.linkedin_apply_types ?? "easy_apply_only";
+      if (p.linkedin_exp_level && p.linkedin_exp_level !== "all") taskInput.linkedin_exp_level = p.linkedin_exp_level;
+      if (p.linkedin_job_type  && p.linkedin_job_type  !== "all") taskInput.linkedin_job_type  = p.linkedin_job_type;
+    }
+
+    // Validate minimum required fields
+    if (!taskInput.keywords) {
+      alert("No keywords saved. Please go to Dashboard and fill in your job search keywords before using Cloud Quick Launch.");
+      return;
+    }
+    if (!taskInput.linkedin_email) {
+      alert("No platform credentials saved. Please go to Dashboard, enter your LinkedIn/Naukri email and password, then click Save Profile before using Cloud Quick Launch.");
+      return;
+    }
+
     // Create a task row first, then trigger Railway
     const { data: newTask, error: taskErr } = await supabase
       .from("tasks")
@@ -278,7 +372,7 @@ export default function AgentPage() {
         type:           taskType,
         status:         "PENDING",
         execution_mode: "railway",
-        input:          {},
+        input:          taskInput,
       })
       .select("id")
       .single();
@@ -297,8 +391,8 @@ export default function AgentPage() {
       body: JSON.stringify({
         task_id:    newTask.id,
         task_type:  taskType,
-        task_input: {},
-      }), 
+        task_input: {},   // task.input already has the full data; trigger just injects session_id
+      }),
     });
 
     if (!res.ok) {
@@ -315,6 +409,7 @@ export default function AgentPage() {
     setLiveScreenshot(null);
     setRailwayProgress(0);
     setRailwayCurrentJob(null);
+    setTaskOutput(null);
 
     // Refresh quota
     await fetchRailwayInfo();
@@ -348,10 +443,10 @@ export default function AgentPage() {
         setLiveScreenshot(`data:image/jpeg;base64,${sess.latest_screenshot}`);
       }
 
-      // Fetch task (logs + progress)
+      // Fetch task (logs + progress + output)
       const { data: task } = await supabase
         .from("tasks")
-        .select("status, progress, current_job, logs")
+        .select("status, progress, current_job, logs, output")
         .eq("id", taskId)
         .single();
 
@@ -375,6 +470,7 @@ export default function AgentPage() {
       const ended = ["completed", "failed", "stopped"].includes(sess?.status ?? "") ||
                     ["DONE", "FAILED"].includes(task?.status ?? "");
       if (ended) {
+        if (task?.output) setTaskOutput(task.output as Record<string, unknown>);
         setRailwayStatus("done");
         setRailwayLogs((prev) => [
           ...prev,
@@ -802,6 +898,24 @@ export default function AgentPage() {
                   Daily limit reached. Upgrade your plan for more cloud minutes.
                 </p>
               )}
+              {!userProfilePrefs?.keywords && (
+                <p className="text-xs text-amber-400 mt-2 text-center">
+                  ⚠️ No keywords saved.{" "}
+                  <Link href="/dashboard" className="underline hover:text-amber-300">
+                    Fill in your Dashboard profile
+                  </Link>{" "}
+                  and save before launching.
+                </p>
+              )}
+              {userProfilePrefs?.keywords && !userProfilePrefs?.linkedin_email && (
+                <p className="text-xs text-amber-400 mt-2 text-center">
+                  ⚠️ No credentials saved.{" "}
+                  <Link href="/dashboard" className="underline hover:text-amber-300">
+                    Enter your LinkedIn/Naukri email &amp; password on Dashboard
+                  </Link>{" "}
+                  and save.
+                </p>
+              )}
             </>
           ) : (
             /* ── Local machine info ── */
@@ -867,6 +981,16 @@ export default function AgentPage() {
                   <span className="text-xs text-slate-400">{railwayProgress}%</span>
                 </div>
               )}
+              {/* Auto-scroll toggle */}
+              <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={cloudAutoScroll}
+                  onChange={e => setCloudAutoScroll(e.target.checked)}
+                  className="rounded"
+                />
+                Auto-scroll
+              </label>
               {/* Screenshot toggle */}
               <button
                 onClick={toggleScreenshot}
@@ -886,7 +1010,7 @@ export default function AgentPage() {
                 </button>
               ) : (
                 <button
-                  onClick={() => { stopCloudPoll(); setRailwayStatus("idle"); setRailwaySessionId(null); setRailwayTaskId(null); setLiveScreenshot(null); setRailwayLogs([]); }}
+                  onClick={() => { stopCloudPoll(); setRailwayStatus("idle"); setRailwaySessionId(null); setRailwayTaskId(null); setLiveScreenshot(null); setRailwayLogs([]); setTaskOutput(null); }}
                   className="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 rounded-lg transition-colors"
                 >
                   Close
@@ -949,6 +1073,48 @@ export default function AgentPage() {
                 }
               />
             </div>
+
+            {/* Completion report (shown after session ends) */}
+            {railwayStatus === "done" && taskOutput && (
+              <div className="border-t border-slate-800 p-4 space-y-3">
+                <p className="font-mono text-xs font-semibold text-slate-300">Session Report</p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { label: "Applied", value: taskOutput.applied_count ?? taskOutput.applied ?? 0, color: "text-emerald-400" },
+                    { label: "Skipped", value: taskOutput.skipped_count ?? taskOutput.skipped ?? 0, color: "text-amber-400" },
+                    { label: "Failed",  value: taskOutput.failed_count  ?? taskOutput.failed  ?? 0, color: "text-red-400"  },
+                    { label: "Duration", value: taskOutput.duration_seconds
+                        ? `${Math.round(Number(taskOutput.duration_seconds) / 60)}m`
+                        : "—", color: "text-slate-300" },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} className="p-3 rounded-lg bg-slate-800/50 text-center">
+                      <p className={`font-mono text-xl font-bold ${color}`}>{String(value)}</p>
+                      <p className="font-mono text-xs text-slate-500 mt-0.5">{label}</p>
+                    </div>
+                  ))}
+                </div>
+                {Array.isArray(taskOutput.applications) && taskOutput.applications.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="font-mono text-xs text-slate-500">Applied jobs:</p>
+                    {(taskOutput.applications as Array<{ title?: string; company?: string; status?: string; url?: string }>)
+                      .slice(0, 10)
+                      .map((app, i) => (
+                        <div key={i} className="flex items-center justify-between gap-2 text-xs py-1 border-b border-slate-800 last:border-0">
+                          <span className="text-slate-300 truncate">{app.company ? `${app.company} — ` : ""}{app.title ?? "Role"}</span>
+                          <span className={`shrink-0 font-mono ${app.status === "applied" ? "text-emerald-400" : "text-slate-500"}`}>
+                            {app.status ?? "applied"}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                )}
+                <div className="flex justify-end">
+                  <Link href="/applications" className="text-xs text-violet-400 hover:text-violet-300 font-mono">
+                    View all in Applications →
+                  </Link>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

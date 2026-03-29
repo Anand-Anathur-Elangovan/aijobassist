@@ -143,6 +143,9 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
             task_input = dict(task_input)
             task_input["resume_path"] = _resume_tmp_path
             print(f"  [NAUKRI] Using parsed_text as resume source: {_resume_tmp_path}")
+    # Track original resume path so we can restore Naukri profile at end of run
+    if task_input.get("resume_path") and not task_input.get("_naukri_original_resume_path"):
+        task_input["_naukri_original_resume_path"] = task_input["resume_path"]
 
     # ── Enrich keywords with top skills from the resume ────────
     resume_text_raw = task_input.get("resume_text", "").strip()
@@ -160,6 +163,7 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
         except Exception as e:
             print(f"  [NAUKRI] Keyword enrichment skipped ({e})")
 
+    _session_start = time.time()
     print("  [NAUKRI] Launching browser…")
     _headless = os.environ.get("TASK_RUNNER_ENV") == "railway"
     with sync_playwright() as p:
@@ -305,6 +309,36 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
 
             print(f"  [NAUKRI] Run complete — applied: {applied}, skipped: {skipped}")
             _log(task_input, f"Run complete — applied: {applied}, skipped: {skipped}", "success", "system", {"applied": applied, "skipped": skipped})
+
+            # ── Send session summary notification ─────────────────────────
+            try:
+                from automation.notifier import notify_session_summary
+                _nk_duration = max(1, int((time.time() - _session_start) / 60))
+                _nk_sstats = task_input.get("_session_stats", {})
+                notify_session_summary(task_input, {
+                    "applied":          applied,
+                    "easy_applied":     _nk_sstats.get("easy_applied", -1),
+                    "external_applied": _nk_sstats.get("external_applied", 0),
+                    "manual_needed":    _nk_sstats.get("manual_needed", 0),
+                    "skipped":          skipped,
+                    "errors":           _nk_sstats.get("errors", 0),
+                    "duration_minutes": _nk_duration,
+                    "manual_jobs":      _nk_sstats.get("manual_jobs", []),
+                    "jobs":             _report,
+                })
+            except Exception as _sne:
+                print(f"  [NOTIFY] Summary notification failed: {_sne}")
+
+            # ── Restore original Naukri profile resume after tailored run ──────
+            _nk_orig_path = task_input.get("_naukri_original_resume_path", "")
+            if task_input.get("tailor_resume") and _nk_orig_path and os.path.isfile(_nk_orig_path):
+                try:
+                    print("  [NAUKRI] Restoring original Naukri profile resume…")
+                    _replace_naukri_profile_resume(page, _nk_orig_path, task_input)
+                    print("  [NAUKRI] Original profile resume restored ✅")
+                except Exception as _rpe:
+                    print(f"  [NAUKRI] Could not restore original resume: {_rpe}")
+
             return {
                 "applied_count": applied,
                 "skipped_count": skipped,
@@ -653,6 +687,134 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
     return job_links
 
 
+def _nk_tailor_and_persist(task_input: dict, jd_text: str) -> bool:
+    """
+    Run the tailoring refinement loop for the current Naukri job.
+    Sets task_input["resume_path"] / ["_tailored_pdf"] / ["_tailored_resume_text"].
+    Uploads PDF to Supabase Storage and saves version to DB.
+    Returns True on success.
+    """
+    resume_path = task_input.get("resume_path", "")
+    resume_text = task_input.get("resume_text", "")
+    if not (resume_path or resume_text) or not jd_text.strip():
+        return False
+
+    company       = task_input.get("_page_company") or task_input.get("company") or ""
+    role          = task_input.get("_page_job_title") or task_input.get("keywords") or ""
+    custom_prompt = task_input.get("tailor_custom_prompt", "")
+    match_thresh  = int(task_input.get("match_threshold", 70))
+    target_score  = max(match_thresh + 5, int(task_input.get("tailor_target_score", 90)))
+
+    source = resume_path if (resume_path and os.path.isfile(resume_path)) else resume_text
+    if not source:
+        return False
+
+    print(f"  [NAUKRI] ✨ Tailoring for '{role or 'this role'}' at '{company or 'this company'}' (target {target_score}%)…")
+    try:
+        from automation.resume_tailor import tailor_until_target
+        tr = tailor_until_target(
+            resume_source=source,
+            jd_text=jd_text,
+            target_score=target_score,
+            custom_prompt=custom_prompt,
+            company=company,
+            role=role,
+            max_attempts=3,
+        )
+        print(f"  [NAUKRI] Tailoring done — {tr.score_before:.0f}%→{tr.score_after:.0f}% "
+              f"({'✅' if tr.score_after >= target_score else '⚠️ below target'})")
+        if tr.tailored_pdf_path and os.path.isfile(tr.tailored_pdf_path):
+            task_input["resume_path"]   = tr.tailored_pdf_path
+            task_input["_tailored_pdf"] = tr.tailored_pdf_path
+        task_input["_tailored_resume_text"] = tr.tailored_text
+
+        # Persist to Supabase
+        _uid = task_input.get("user_id", "")
+        if _uid:
+            try:
+                import re as _nk_re2
+                from api_client import save_resume_version, upload_file_to_storage
+                _slug = lambda s: _nk_re2.sub(r"[^a-zA-Z0-9]+", "_", s).strip("_")[:25]
+                _vname = (f"{_slug(company)}_{_slug(role)}" if (company or role) else "tailored").strip("_") or "tailored"
+                _file_url = ""
+                if tr.tailored_pdf_path and os.path.isfile(tr.tailored_pdf_path):
+                    _file_url = upload_file_to_storage(tr.tailored_pdf_path, _uid, f"{_vname}.pdf")
+                save_resume_version(
+                    user_id=_uid, version_name=_vname,
+                    original_text=tr.original_text, tailored_text=tr.tailored_text,
+                    tailored_content={"bullets": tr.tailored_bullets, "summary": tr.tailored_summary,
+                                      "improvements": tr.improvements, "added_keywords": tr.added_keywords,
+                                      "missing_skills": tr.missing_skills, "score_before": tr.score_before,
+                                      "score_after": tr.score_after, "ats_score": tr.ats_score},
+                    ats_score=tr.ats_score, missing_skills=tr.missing_skills, file_url=_file_url,
+                )
+                if _file_url:
+                    task_input["_tailored_resume_url"] = _file_url
+                print(f"  [NAUKRI] Tailored resume saved: '{_vname}'" + (f" — {_file_url[:60]}" if _file_url else ""))
+            except Exception as _sve:
+                print(f"  [NAUKRI] Resume save failed: {_sve}")
+        return True
+    except Exception as _te:
+        print(f"  [NAUKRI] ⚠️  Tailoring failed ({_te}) — using original resume")
+        return False
+
+
+def _replace_naukri_profile_resume(page: Page, pdf_path: str, task_input: dict) -> bool:
+    """
+    Navigate to the Naukri profile resume section and upload pdf_path as the new resume.
+    Navigates back to the current page afterwards.
+    Returns True if upload appeared to succeed.
+    """
+    if not pdf_path or not os.path.isfile(pdf_path):
+        return False
+    return_url = page.url
+    try:
+        print("  [NAUKRI] Updating profile resume…")
+        page.goto("https://www.naukri.com/mnjuser/profile", wait_until="domcontentloaded", timeout=18000)
+        time.sleep(2.5)
+
+        uploaded = False
+        for _file_sel in [
+            "input[type='file'][accept*='pdf']",
+            "input[type='file'][name*='resume']",
+            "input[type='file'][id*='resume']",
+            "input[type='file']",
+        ]:
+            try:
+                fi = page.locator(_file_sel).first
+                if fi.count() > 0:
+                    fi.set_input_files(pdf_path)
+                    time.sleep(2.0)
+                    for _save_sel in [
+                        "button:has-text('Save')", "button:has-text('Upload')",
+                        "button:has-text('Update')", "button[type='submit']",
+                    ]:
+                        try:
+                            btn = page.locator(_save_sel).first
+                            if btn.is_visible(timeout=2000):
+                                btn.click()
+                                time.sleep(2.0)
+                                break
+                        except Exception:
+                            pass
+                    uploaded = True
+                    print(f"  [NAUKRI] Profile resume updated: {os.path.basename(pdf_path)}")
+                    break
+            except Exception:
+                continue
+
+        page.goto(return_url, wait_until="domcontentloaded", timeout=15000)
+        time.sleep(2.0)
+        return uploaded
+    except Exception as _rpe:
+        print(f"  [NAUKRI] Profile resume replacement failed: {_rpe}")
+        try:
+            page.goto(return_url, wait_until="domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        return False
+
+
 # ──────────────────────────────────────────────────────────────
 # Per-job application
 # ──────────────────────────────────────────────────────────────
@@ -777,33 +939,9 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             else:
                 print("  [NAUKRI] ⚠️  Smart match skipped — no resume text available")
 
-        # ── Tailor resume to this JD if requested ─────────────────
+        # ── Tailor resume to this JD (refinement loop) ────────────
         if task_input.get("tailor_resume") and jd_text:
-            resume_path = task_input.get("resume_path", "")
-            if not resume_path or not os.path.isfile(resume_path):
-                print("  [NAUKRI] ⚠️  No resume file for tailoring — applying with original")
-            else:
-                try:
-                    from automation.resume_tailor import tailor_resume_for_job
-                    company       = task_input.get("company", "")
-                    role          = task_input.get("keywords", "")
-                    custom_prompt = task_input.get("tailor_custom_prompt", "")
-                    print(f"  [NAUKRI] ✨ Tailoring resume for '{role or 'this role'}' at '{company or 'this company'}'…")
-                    result = tailor_resume_for_job(
-                        resume_source=resume_path,
-                        jd_text=jd_text,
-                        custom_prompt=custom_prompt,
-                        company=company,
-                        role=role,
-                        save_pdf=True,
-                    )
-                    print(f"  [NAUKRI] Match: {result.score_before:.0f}% → {result.score_after:.0f}%  ATS: {result.ats_score}")
-                    if result.tailored_pdf_path and os.path.isfile(result.tailored_pdf_path):
-                        task_input = dict(task_input)
-                        task_input["resume_path"]   = result.tailored_pdf_path
-                        task_input["_tailored_pdf"] = result.tailored_pdf_path
-                except Exception as _te:
-                    print(f"  [NAUKRI] ⚠️  Tailoring failed ({_te}) — applying with original resume")
+            _nk_tailor_and_persist(task_input, jd_text)
 
         # ── Store JD text + company/role for cover letter generation ────────────
         if jd_text:
@@ -840,8 +978,33 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                     task_input["_last_skip_reason"] = "mode_skip"
                     return False
                 print("  [NAUKRI] 'Apply on company site' — attempting external apply...")
-                result = _apply_company_site(page, company_btn, task_input, naukri_job_url=job_url)
-                return result
+                try:
+                    result = _apply_company_site(page, company_btn, task_input, naukri_job_url=job_url)
+                    return result
+                except Exception as _cse:
+                    print(f"  [NAUKRI] Company-site apply crashed: {_cse}")
+                    try:
+                        from automation.notifier import notify_manual_required
+                        _ss = task_input.get("_session_stats", {})
+                        _applied = _ss.get("easy_applied", 0) + _ss.get("external_applied", 0)
+                        _manual_answers: dict = {}
+                        if task_input.get("_tailored_resume_url"):
+                            _manual_answers["tailored_resume_pdf"] = task_input["_tailored_resume_url"]
+                        if task_input.get("_tailored_resume_text"):
+                            _manual_answers["tailored_resume_text_preview"] = str(task_input["_tailored_resume_text"])[:500] + "…"
+                        notify_manual_required(
+                            task_input    = task_input,
+                            company       = task_input.get("_page_company") or "Unknown Company",
+                            job_title     = task_input.get("_page_job_title") or "Unknown Position",
+                            apply_url     = job_url,
+                            stuck_reason  = f"Automation error on company site: {str(_cse)[:120]}",
+                            answers       = _manual_answers,
+                            linkedin_url  = job_url,
+                            applied_today = _applied,
+                        )
+                    except Exception:
+                        pass
+                    return False
         except Exception:
             pass
 
@@ -883,6 +1046,13 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             print("  [NAUKRI] Direct-apply job — skipped (company_site_only mode)")
             task_input["_last_skip_reason"] = "mode_skip"
             return False
+
+        # ── If tailoring is on, pre-update Naukri profile resume so that
+        #    jobs which skip the upload dialog still use the tailored version ──
+        if (task_input.get("tailor_resume") and
+                task_input.get("_tailored_pdf") and
+                os.path.isfile(task_input["_tailored_pdf"])):
+            _replace_naukri_profile_resume(page, task_input["_tailored_pdf"], task_input)
 
         url_before = page.url
         human_click(page, locator=apply_btn)
@@ -1795,7 +1965,37 @@ def _fill_and_submit_external(page: Page, task_input: dict, use_ai: bool = False
         print("  [NAUKRI] 🤖 Form filled by Claude but no submit button found — marking as best-effort")
         return True
 
-    print("  [NAUKRI] Company site: no submit button found — skipping")
+    # No submit button found — notify user so they can complete manually
+    print("  [NAUKRI] Company site: no submit button found — sending manual notification")
+    _company_site_url = (target_page.url if target_page else None) or naukri_job_url or ""
+    try:
+        from automation.notifier import notify_manual_required
+        _ss = task_input.get("_session_stats", {})
+        _applied_so_far = _ss.get("easy_applied", 0) + _ss.get("external_applied", 0)
+        _manual_answers: dict = {}
+        if task_input.get("_tailored_resume_url"):
+            _manual_answers["tailored_resume_pdf"] = task_input["_tailored_resume_url"]
+        if task_input.get("_tailored_resume_text"):
+            _manual_answers["tailored_resume_text_preview"] = str(task_input["_tailored_resume_text"])[:500] + "…"
+        notify_manual_required(
+            task_input    = task_input,
+            company       = task_input.get("_page_company") or task_input.get("company") or "Unknown Company",
+            job_title     = task_input.get("_page_job_title") or "Unknown Position",
+            apply_url     = _company_site_url,
+            stuck_reason  = "Could not find a Submit button on the company career site — please complete the application manually",
+            answers       = _manual_answers,
+            linkedin_url  = naukri_job_url,
+            applied_today = _applied_so_far,
+        )
+        # Track in session stats
+        _ss["manual_needed"] = _ss.get("manual_needed", 0) + 1
+        _ss.setdefault("manual_jobs", []).append({
+            "company": task_input.get("_page_company") or "Unknown",
+            "title":   task_input.get("_page_job_title") or "Unknown",
+            "url":     _company_site_url,
+        })
+    except Exception as _ne:
+        print(f"  [NAUKRI][NOTIFY] Failed to send stuck notification: {_ne}")
     return False
 
 

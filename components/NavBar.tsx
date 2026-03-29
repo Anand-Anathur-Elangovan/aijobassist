@@ -22,6 +22,7 @@ const JOB_SEEKER_LINKS = [
   { href: "/notifications",   label: "Notifications" },
   { href: "/upload-resume",   label: "Resume" },
   { href: "/billing",         label: "Billing" },
+  { href: "/docs",            label: "Docs" },
 ];
 
 const STUDENT_LINKS = [

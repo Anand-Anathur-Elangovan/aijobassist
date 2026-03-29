@@ -970,6 +970,105 @@ function placementFallback(input: PlacementPrepInput): PlacementPrepResult {
   };
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// 6. analyzeResume — Detailed resume analysis against JD
+// ═════════════════════════════════════════════════════════════════════════
+
+export interface AnalyzeResumeImprovement {
+  section: "experience" | "skills" | "summary" | "education" | "projects";
+  issue: string;
+  suggestion: string;
+  example: string;
+}
+
+export interface AnalyzeResumeResult {
+  score: number;
+  missing_skills: string[];
+  recommended_skills: string[];
+  improvements: AnalyzeResumeImprovement[];
+  certifications: string[];
+  role_changes: string[];
+  keywords_to_add: string[];
+}
+
+export async function analyzeResume(
+  resumeText: string,
+  jdText: string,
+): Promise<AnalyzeResumeResult> {
+  if (hasApiKey()) {
+    const prompt = `You are an expert ATS resume consultant. Analyze this resume against the job description.
+Return ONLY valid JSON with no extra text:
+{
+  "score": number (0-100 ATS + JD match),
+  "missing_skills": string[],
+  "recommended_skills": string[],
+  "improvements": [
+    {
+      "section": "experience" | "skills" | "summary" | "education" | "projects",
+      "issue": string,
+      "suggestion": string,
+      "example": string
+    }
+  ],
+  "certifications": string[],
+  "role_changes": string[],
+  "keywords_to_add": string[]
+}
+
+Resume:
+${resumeText}
+
+Job Description:
+${jdText}`;
+    try {
+      return parseJSON<AnalyzeResumeResult>(await callClaude(prompt, 2048, SONNET_MODEL));
+    } catch (err) {
+      console.error("[analyzeResume] AI parse error:", err);
+      // fall through to mock
+    }
+  }
+  // ── Mock fallback ──────────────────────────────────────────────────────
+  const ms = await matchScore(resumeText, jdText);
+  const jd = await analyzeJD(jdText);
+  const topMatch   = ms.matching_skills.slice(0, 3);
+  const topMissing = ms.missing_skills.slice(0, 3);
+  return {
+    score: ms.score,
+    missing_skills: ms.missing_skills.slice(0, 8),
+    recommended_skills: jd.nice_to_have.slice(0, 6),
+    improvements: [
+      {
+        section: "summary",
+        issue: "Summary does not reflect JD keywords",
+        suggestion: "Rewrite summary to align with JD using key skill terms",
+        example: `Results-driven engineer with expertise in ${topMatch.join(", ")}. Proven track record delivering scalable solutions.`,
+      },
+      {
+        section: "experience",
+        issue: "Bullet points lack quantified impact",
+        suggestion: "Add metrics (%, $, ×) to every achievement",
+        example: "Reduced API latency by 40% through caching layer optimisation",
+      },
+      {
+        section: "skills",
+        issue: `Missing JD skills: ${topMissing.join(", ")}`,
+        suggestion: "Add any skills you have from the missing list to your skills section",
+        example: `Technical Skills: ${[...topMatch, ...topMissing.slice(0, 2)].join(", ")}`,
+      },
+    ],
+    certifications: ms.missing_skills
+      .filter((s) => ["aws", "gcp", "azure", "kubernetes", "docker"].includes(s))
+      .slice(0, 3)
+      .map((s) => `${s.toUpperCase()} Certification`),
+    role_changes:
+      jd.seniority !== "mid"
+        ? [`Position yourself as a "${jd.seniority.charAt(0).toUpperCase() + jd.seniority.slice(1)} Engineer"`]
+        : [],
+    keywords_to_add: ms.missing_skills.slice(0, 10),
+  };
+}
+
+
 export async function predictPlacement(input: PlacementPrepInput): Promise<PlacementPrepResult> {
   if (!hasApiKey()) {
     return placementFallback(input);
@@ -1003,5 +1102,36 @@ Rules:
   } catch (err) {
     console.error("[predictPlacement] AI parse error:", err);
     return placementFallback(input);
+  }
+}
+
+// ── Suggest job search keywords from resume ───────────────────────────────
+
+export async function suggestKeywords(resumeText: string): Promise<string[]> {
+  if (!hasApiKey()) {
+    return ["Software Engineer", "Backend Developer", "Full Stack Engineer"];
+  }
+  const prompt = `You are an expert job search strategist. Based on the resume below, suggest exactly 10 job search keywords/titles that this candidate should use on LinkedIn and Naukri to find the most relevant openings.
+
+Rules:
+- Return ONLY a JSON array of 10 strings, no extra text or explanation
+- Each keyword should be a job title or role category (e.g. "Senior React Developer", "ML Engineer", "Product Manager")
+- Order from most to least relevant to the candidate's background
+- Be specific — avoid generic terms like "Developer" alone
+- Mix seniority levels appropriate to the candidate's experience
+
+Resume:
+${resumeText.slice(0, 6000)}
+
+Return format: ["keyword1", "keyword2", ..., "keyword10"]`;
+
+  try {
+    const raw = await callClaude(prompt, 512, HAIKU_MODEL);
+    const parsed = parseJSON<string[]>(raw);
+    if (Array.isArray(parsed)) return parsed.slice(0, 10);
+    return [];
+  } catch (err) {
+    console.error("[suggestKeywords] AI error:", err);
+    return [];
   }
 }
