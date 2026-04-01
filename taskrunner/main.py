@@ -2,6 +2,7 @@ import time
 import os
 import sys
 import requests
+import concurrent.futures
 from datetime import datetime, timezone, timedelta
 
 # ── Load .env from project root ─────────────────────────────
@@ -17,6 +18,9 @@ from task_runner import run_task
 
 POLL_INTERVAL  = 10   # seconds between task polls
 GMAIL_INTERVAL = 86400  # 24 hours in seconds
+# Maximum wall-clock time a single task may run before being force-failed.
+# Default 2 hours; override via TASK_TIMEOUT_SECONDS env var.
+TASK_TIMEOUT   = int(os.environ.get("TASK_TIMEOUT_SECONDS", 7200))
 
 
 def _is_in_schedule_window(task: dict) -> bool:
@@ -119,7 +123,19 @@ def main():
                         pass
 
             try:
-                output = run_task(task)
+                # ── Run task in a thread so we can enforce a hard timeout ──────
+                # If the Railway pod doesn't crash but gets stuck (e.g. infinite
+                # Playwright wait), the future times out and we force-fail the task.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exec:
+                    _future = _exec.submit(run_task, task)
+                    try:
+                        output = _future.result(timeout=TASK_TIMEOUT)
+                    except concurrent.futures.TimeoutError:
+                        _future.cancel()
+                        raise TimeoutError(
+                            f"Task exceeded {TASK_TIMEOUT}s timeout — force-failed"
+                        )
+
                 update_task(task_id, "DONE", output=output)
                 print(f"[STATUS] {task_id} → DONE  output={output}")
                 ran_any_task = True
@@ -147,6 +163,20 @@ def main():
                 update_task(task_id, "FAILED", error=error_msg)
                 print(f"[STATUS] {task_id} → FAILED  error={error_msg}")
                 ran_any_task = True
+
+                # On timeout: also mark the railway_session as timed_out
+                if isinstance(e, TimeoutError) and is_railway:
+                    _s_id = (task.get("input") or {}).get("session_id", "")
+                    if _s_id:
+                        try:
+                            requests.patch(
+                                f"{SUPABASE_URL}/rest/v1/railway_sessions?id=eq.{_s_id}",
+                                headers={**HEADERS, "Prefer": "return=minimal"},
+                                json={"status": "timed_out",
+                                      "ended_at": datetime.now(timezone.utc).isoformat()},
+                            )
+                        except Exception:
+                            pass
 
                 # Record Railway minutes even on failure (user still consumed time)
                 if is_railway:

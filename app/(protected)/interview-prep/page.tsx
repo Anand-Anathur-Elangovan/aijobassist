@@ -4,6 +4,7 @@ import { useState, useRef } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import type { LearningResource, SkillGapResult } from "@/lib/ai";
+import type { FeedbackResult, HistoryEntry } from "@/app/api/ai/interview-prep/feedback/route";
 
 type Question = {
   category: "Technical" | "Behavioral" | "Situational" | "Role-specific";
@@ -40,35 +41,194 @@ const PLATFORM_ICONS: Record<string, string> = {
   "FreeCodeCamp":             "🆓",
 };
 
-function QuestionCard({ q, idx }: { q: Question; idx: number }) {
-  const [open, setOpen] = useState(false);
+// ── Interactive Practice Card ─────────────────────────────────────────────
+function PracticeCard({
+  q, idx, history, jdText, company, role, resumeText, token,
+  onAnswered,
+}: {
+  q: Question;
+  idx: number;
+  history: HistoryEntry[];
+  jdText: string;
+  company: string;
+  role: string;
+  resumeText: string;
+  onAnswered: (entry: HistoryEntry) => void;
+}) {
   const colorClass = CATEGORY_COLORS[q.category] ?? "bg-slate-700/30 border-slate-600/30 text-slate-400";
+  const [open,        setOpen       ] = useState(false);
+  const [showSuggest, setShowSuggest] = useState(false);
+  const [userAnswer,  setUserAnswer ] = useState("");
+  const [feedback,    setFeedback   ] = useState<FeedbackResult | null>(null);
+  const [submitting,  setSubmitting ] = useState(false);
+  const [error,       setError      ] = useState<string | null>(null);
+
+  const practiced = history.some((h) => h.question === q.question);
+
+  const submitAnswer = async () => {
+    if (!userAnswer.trim()) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const tok = session?.access_token ?? "";
+      const res = await fetch("/api/ai/interview-prep/feedback", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+        },
+        body: JSON.stringify({
+          question:    q.question,
+          user_answer: userAnswer,
+          jd_text:     jdText,
+          company,
+          role,
+          resume_text: resumeText,
+          history,     // full session history for context-aware feedback
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to get feedback");
+      setFeedback(data as FeedbackResult);
+      onAnswered({ question: q.question, user_answer: userAnswer, ai_feedback: data.feedback });
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Something went wrong.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const scoreColor = !feedback ? "" :
+    feedback.score >= 8 ? "text-emerald-400" :
+    feedback.score >= 5 ? "text-amber-400" : "text-red-400";
 
   return (
-    <div className="card p-0 overflow-hidden">
+    <div className={`card p-0 overflow-hidden ${practiced ? "border-emerald-500/20" : ""}`}>
+      {/* Header row */}
       <button
         className="w-full text-left p-4 flex items-start gap-3 hover:bg-slate-800/40 transition-colors"
         onClick={() => setOpen((v) => !v)}
       >
         <span className="font-mono text-xs text-slate-600 mt-0.5 shrink-0 w-5">{idx + 1}.</span>
         <div className="flex-1 min-w-0">
-          <span className={`inline-block text-[10px] font-mono px-1.5 py-0.5 rounded border mb-1.5 ${colorClass}`}>
-            {q.category}
-          </span>
+          <div className="flex items-center gap-2 flex-wrap mb-1.5">
+            <span className={`inline-block text-[10px] font-mono px-1.5 py-0.5 rounded border ${colorClass}`}>
+              {q.category}
+            </span>
+            {practiced && (
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border bg-emerald-500/10 border-emerald-500/30 text-emerald-400">
+                ✓ Practiced
+              </span>
+            )}
+          </div>
           <p className="font-body text-sm text-white leading-snug">{q.question}</p>
         </div>
         <span className={`text-slate-500 transition-transform shrink-0 mt-0.5 ${open ? "rotate-180" : ""}`}>▾</span>
       </button>
+
       {open && (
-        <div className="px-4 pb-4 pt-0 border-t border-slate-800">
-          <p className="font-mono text-[10px] text-slate-500 uppercase tracking-wider mb-2 mt-3">Suggested Answer</p>
-          <p className="font-body text-sm text-slate-300 leading-relaxed whitespace-pre-line">{q.answer}</p>
+        <div className="border-t border-slate-800 px-4 pb-4 pt-3 space-y-4">
+          {/* Suggested answer (collapsible) */}
+          <div>
+            <button
+              onClick={() => setShowSuggest((v) => !v)}
+              className="font-mono text-[10px] text-slate-500 uppercase tracking-wider flex items-center gap-1"
+            >
+              {showSuggest ? "▾" : "▸"} Suggested answer
+            </button>
+            {showSuggest && (
+              <p className="mt-2 font-body text-sm text-slate-300 leading-relaxed whitespace-pre-line">
+                {q.answer}
+              </p>
+            )}
+          </div>
+
+          {/* Practice input */}
+          {!feedback ? (
+            <div className="space-y-2">
+              <p className="font-mono text-[10px] text-amber-400 uppercase tracking-wider">
+                🎤 Practice — type your answer
+              </p>
+              <textarea
+                rows={4}
+                value={userAnswer}
+                onChange={(e) => setUserAnswer(e.target.value)}
+                placeholder="Type your answer here… AI will evaluate it in context of your full session."
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white font-body resize-none focus:outline-none focus:border-amber-400/50 placeholder-slate-600"
+              />
+              {error && <p className="text-xs text-red-400 font-mono">{error}</p>}
+              <button
+                onClick={submitAnswer}
+                disabled={submitting || !userAnswer.trim()}
+                className="btn-primary text-xs px-4 py-2 disabled:opacity-50"
+              >
+                {submitting ? (
+                  <span className="flex items-center gap-2">
+                    <span className="w-3 h-3 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />
+                    Getting feedback…
+                  </span>
+                ) : "Get AI Feedback →"}
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {/* Score */}
+              <div className="flex items-center gap-3">
+                <div className={`font-mono font-bold text-2xl ${scoreColor}`}>
+                  {feedback.score}<span className="text-sm text-slate-500">/10</span>
+                </div>
+                <p className="text-sm text-slate-300 font-body flex-1">{feedback.feedback}</p>
+              </div>
+
+              {/* Strengths */}
+              {feedback.strengths.length > 0 && (
+                <div>
+                  <p className="font-mono text-[10px] text-emerald-400 uppercase tracking-wider mb-1">Strengths</p>
+                  <ul className="space-y-0.5">
+                    {feedback.strengths.map((s, i) => (
+                      <li key={i} className="text-xs text-slate-300 font-body">✓ {s}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Improvements */}
+              {feedback.improvements.length > 0 && (
+                <div>
+                  <p className="font-mono text-[10px] text-amber-400 uppercase tracking-wider mb-1">Improve</p>
+                  <ul className="space-y-0.5">
+                    {feedback.improvements.map((s, i) => (
+                      <li key={i} className="text-xs text-slate-300 font-body">→ {s}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Follow-up question */}
+              {feedback.follow_up && (
+                <div className="bg-slate-800/50 rounded-lg px-3 py-2 border border-slate-700/50">
+                  <p className="font-mono text-[10px] text-blue-400 uppercase tracking-wider mb-1">Likely follow-up</p>
+                  <p className="text-xs text-slate-200 font-body italic">&ldquo;{feedback.follow_up}&rdquo;</p>
+                </div>
+              )}
+
+              {/* Re-try */}
+              <button
+                onClick={() => { setFeedback(null); setUserAnswer(""); }}
+                className="text-xs font-mono text-slate-500 hover:text-white border border-slate-700 px-3 py-1 rounded transition-colors"
+              >
+                Try again
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
+// ── Skill Gap card (unchanged) ─────────────────────────────────────────────
 function SkillCard({ resource }: { resource: LearningResource }) {
   const [open, setOpen] = useState(false);
   const priorityClass = PRIORITY_COLORS[resource.priority] ?? PRIORITY_COLORS.Low;
@@ -108,6 +268,7 @@ function SkillCard({ resource }: { resource: LearningResource }) {
   );
 }
 
+// ── Main Page ─────────────────────────────────────────────────────────────
 export default function InterviewPrepPage() {
   const { user } = useAuth();
 
@@ -117,11 +278,15 @@ export default function InterviewPrepPage() {
   const [role,      setRole     ] = useState("");
   const [jdText,    setJdText   ] = useState("");
   const [useResume, setUseResume] = useState(true);
+  const [resumeText, setResumeText] = useState("");  // cached once loaded
 
   // Interview questions mode
-  const [loading, setLoading] = useState(false);
-  const [result,  setResult ] = useState<PrepResult | null>(null);
-  const [error,   setError  ] = useState<string | null>(null);
+  const [loading,  setLoading ] = useState(false);
+  const [result,   setResult  ] = useState<PrepResult | null>(null);
+  const [error,    setError   ] = useState<string | null>(null);
+
+  // Session memory: accumulates as user practices questions
+  const [sessionHistory, setSessionHistory] = useState<HistoryEntry[]>([]);
 
   // Skill gap mode
   const [sgLoading, setSgLoading] = useState(false);
@@ -133,6 +298,7 @@ export default function InterviewPrepPage() {
   // ── Shared resume loader ──────────────────────────────────────────────
   async function loadResume(): Promise<string> {
     if (!useResume || !user) return "";
+    if (resumeText) return resumeText;  // cached
     try {
       const { data } = await supabase
         .from("resumes")
@@ -141,7 +307,9 @@ export default function InterviewPrepPage() {
         .order("created_at", { ascending: false })
         .limit(1)
         .single();
-      return (data as { parsed_text?: string })?.parsed_text ?? "";
+      const text = (data as { parsed_text?: string })?.parsed_text ?? "";
+      setResumeText(text);
+      return text;
     } catch { return ""; }
   }
 
@@ -159,7 +327,8 @@ export default function InterviewPrepPage() {
     setError(null);
     setLoading(true);
     setResult(null);
-    const resumeText = await loadResume();
+    setSessionHistory([]);  // reset session when regenerating
+    const loadedResume = await loadResume();
     const token = await getToken();
     try {
       const res = await fetch("/api/ai/interview-prep", {
@@ -168,7 +337,7 @@ export default function InterviewPrepPage() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ jd_text: jdText, resume_text: resumeText, company, role }),
+        body: JSON.stringify({ jd_text: jdText, resume_text: loadedResume, company, role }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to generate questions");
@@ -190,7 +359,7 @@ export default function InterviewPrepPage() {
     setSgError(null);
     setSgLoading(true);
     setSgResult(null);
-    const resumeText = await loadResume();
+    const loadedResume = await loadResume();
     const token = await getToken();
     if (!token) {
       setSgError("Please log in to use Skill Gap Analysis.");
@@ -201,7 +370,7 @@ export default function InterviewPrepPage() {
       const res = await fetch("/api/ai/skill-gap", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ jd_text: jdText, resume_text: resumeText }),
+        body: JSON.stringify({ jd_text: jdText, resume_text: loadedResume }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to analyze skill gap");
@@ -212,6 +381,19 @@ export default function InterviewPrepPage() {
     } finally {
       setSgLoading(false);
     }
+  };
+
+  const handleAnswered = (entry: HistoryEntry) => {
+    setSessionHistory((prev) => {
+      // Replace if already practiced, else append
+      const exists = prev.findIndex((h) => h.question === entry.question);
+      if (exists >= 0) {
+        const next = [...prev];
+        next[exists] = entry;
+        return next;
+      }
+      return [...prev, entry];
+    });
   };
 
   const grouped = result
@@ -351,16 +533,43 @@ export default function InterviewPrepPage() {
                 </div>
               </div>
             )}
+
+            {/* Session progress bar */}
+            {result.questions.length > 0 && (
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-emerald-500 rounded-full transition-all"
+                    style={{ width: `${(sessionHistory.length / result.questions.length) * 100}%` }}
+                  />
+                </div>
+                <span className="font-mono text-xs text-slate-500 shrink-0">
+                  {sessionHistory.length}/{result.questions.length} practiced
+                </span>
+              </div>
+            )}
+
             {Object.entries(grouped).map(([cat, qs]) => (
               <div key={cat}>
                 <p className="font-mono text-xs text-slate-400 uppercase tracking-wider mb-3">{cat} Questions</p>
                 <div className="space-y-2">
                   {qs.map((q, i) => (
-                    <QuestionCard key={i} q={q} idx={result.questions.indexOf(q)} />
+                    <PracticeCard
+                      key={i}
+                      q={q}
+                      idx={result.questions.indexOf(q)}
+                      history={sessionHistory}
+                      jdText={jdText}
+                      company={company}
+                      role={role}
+                      resumeText={resumeText}
+                      onAnswered={handleAnswered}
+                    />
                   ))}
                 </div>
               </div>
             ))}
+
             {result.preparation_tips?.length > 0 && (
               <div className="card bg-amber-400/5 border-amber-400/20">
                 <p className="font-mono text-xs text-amber-400 uppercase tracking-wider mb-3">💡 Preparation Tips</p>
@@ -369,6 +578,28 @@ export default function InterviewPrepPage() {
                     <li key={i} className="text-slate-300 text-sm font-body">→ {tip}</li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {/* Session summary when all practiced */}
+            {sessionHistory.length === result.questions.length && result.questions.length > 0 && (
+              <div className="card bg-emerald-500/5 border-emerald-500/20">
+                <p className="font-mono text-xs text-emerald-400 uppercase tracking-wider mb-2">
+                  🎉 Session Complete — {result.questions.length} questions practiced
+                </p>
+                <p className="text-sm text-slate-300 font-body">
+                  Average score:{" "}
+                  <strong className="text-emerald-400">
+                    {/* We don&apos;t store scores in history, shown per-card */}
+                    {result.questions.length} / {result.questions.length} answered
+                  </strong>
+                </p>
+                <button
+                  onClick={() => { setResult(null); setSessionHistory([]); }}
+                  className="mt-3 text-xs font-mono text-slate-400 hover:text-white border border-slate-700 px-3 py-1 rounded"
+                >
+                  Start new session
+                </button>
               </div>
             )}
           </div>
@@ -458,7 +689,6 @@ export default function InterviewPrepPage() {
             )}
           </div>
         )}
-
       </div>
     </div>
   );

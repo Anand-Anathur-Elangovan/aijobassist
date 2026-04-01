@@ -9,7 +9,9 @@ Starts the Supabase polling loop in a background thread on first /trigger call.
 import os
 import sys
 import threading
+import time as _time
 import requests as _req
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify
 
 # ── Path setup ──────────────────────────────────────────────
@@ -26,6 +28,53 @@ def _authorized(req) -> bool:
         return True  # no token configured — open (dev mode)
     token = req.headers.get("Authorization", "").removeprefix("Bearer ").strip()
     return token == RAILWAY_API_TOKEN
+
+# ── Session health watchdog ──────────────────────────────────
+# If Railway pod restarts silently, sessions stuck in "running" would
+# stay that way forever.  This watchdog runs every 5 minutes and marks
+# any session (and its associated task) that has been running for longer
+# than SESSION_STALE_SECONDS as failed.
+SESSION_STALE_SECONDS = int(os.environ.get("SESSION_STALE_SECONDS", 7200))  # 2 hours
+_WATCHDOG_INTERVAL    = 300   # check every 5 minutes
+
+def _session_watchdog():
+    """Background thread: heal stale railway_sessions and their tasks."""
+    while True:
+        _time.sleep(_WATCHDOG_INTERVAL)
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=SESSION_STALE_SECONDS)).isoformat()
+            # Find sessions running longer than the stale threshold
+            resp = _req.get(
+                f"{SUPABASE_URL}/rest/v1/railway_sessions"
+                f"?status=eq.running&started_at=lte.{cutoff}&select=id,task_id",
+                headers=HEADERS,
+            )
+            if not resp.ok or not resp.json():
+                continue
+            stale = resp.json()
+            print(f"[watchdog] Found {len(stale)} stale session(s) — marking failed")
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for row in stale:
+                sid = row.get("id", "")
+                tid = row.get("task_id", "")
+                # Mark session failed
+                _req.patch(
+                    f"{SUPABASE_URL}/rest/v1/railway_sessions?id=eq.{sid}",
+                    headers={**HEADERS, "Prefer": "return=minimal"},
+                    json={"status": "failed", "ended_at": now_iso},
+                )
+                # Mark associated task failed (only if still RUNNING)
+                if tid:
+                    _req.patch(
+                        f"{SUPABASE_URL}/rest/v1/tasks?id=eq.{tid}&status=eq.RUNNING",
+                        headers={**HEADERS, "Prefer": "return=minimal"},
+                        json={"status": "FAILED",
+                              "error": "Session watchdog: pod became unresponsive",
+                              "completed_at": now_iso},
+                    )
+        except Exception as _we:
+            print(f"[watchdog] Error: {_we}")
+
 
 # ── Polling thread management ────────────────────────────────
 _poll_thread: threading.Thread | None = None
@@ -90,5 +139,10 @@ if __name__ == "__main__":
 
     # Start polling loop immediately on boot (picks up any PENDING tasks)
     _ensure_polling_thread()
+
+    # Start session health watchdog
+    _wdog = threading.Thread(target=_session_watchdog, daemon=True, name="session-watchdog")
+    _wdog.start()
+    print("[server] Session health watchdog started")
 
     app.run(host="0.0.0.0", port=port, threaded=True)

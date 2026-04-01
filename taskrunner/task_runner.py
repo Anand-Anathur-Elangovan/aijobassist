@@ -138,6 +138,7 @@ def _handle_url_apply(task_input: dict) -> dict:
             content = resume.get("content") or {}
             task_input["resume_url"]      = content.get("file_url", "")
             task_input["resume_filename"] = content.get("file_name", resume.get("title", "resume.pdf"))
+            task_input["resume_id"]       = resume.get("id", "")   # for application tracking
             if resume.get("parsed_text") and not task_input.get("resume_text"):
                 task_input["resume_text"] = resume["parsed_text"]
             print(f"  [URL_APPLY] Resume: {task_input['resume_filename']}")
@@ -274,6 +275,7 @@ def _handle_auto_apply(task_input: dict) -> dict:
             content = resume.get("content") or {}
             task_input["resume_url"]      = content.get("file_url", "")
             task_input["resume_filename"] = content.get("file_name", resume.get("title", "resume.pdf"))
+            task_input["resume_id"]       = resume.get("id", "")   # for application tracking
             if resume.get("parsed_text") and not task_input.get("resume_text"):
                 task_input["resume_text"] = resume["parsed_text"]
             print(f"  [RUNNER] Resume: {task_input['resume_filename']}")

@@ -216,9 +216,37 @@ def record_railway_usage(user_id: str, session_id: str, duration_seconds: int, s
     print(f"[USAGE] Railway {minutes_used:.1f} min recorded for user {user_id[:8]}… session {session_id[:8]}…")
 
 
+def check_already_applied(user_id: str, job_url: str) -> bool:
+    """
+    Return True if the user already has an application record for this job URL.
+    Used as a pre-check guard before submitting to avoid duplicate applications.
+    """
+    if not user_id or not job_url:
+        return False
+    try:
+        job_resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/jobs"
+            f"?user_id=eq.{user_id}&url=eq.{requests.utils.quote(job_url, safe='')}&select=id&limit=1",
+            headers=HEADERS,
+        )
+        if not job_resp.ok or not job_resp.json():
+            return False
+        job_id = job_resp.json()[0]["id"]
+        app_resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/applications"
+            f"?user_id=eq.{user_id}&job_id=eq.{job_id}&select=id&limit=1",
+            headers=HEADERS,
+        )
+        return bool(app_resp.ok and app_resp.json())
+    except Exception as e:
+        print(f"[WARN] check_already_applied: {e}")
+        return False
+
+
 def record_application(user_id: str, company: str, role: str, job_url: str,
                         followup_days: int = 3, ats_score: int = None,
-                        resume_id: str = None) -> str | None:
+                        resume_id: str = None,
+                        resume_version_id: str = None) -> str | None:
     """
     Upsert a job row then insert an application row.
     Returns the application id, or None on failure.
@@ -258,6 +286,8 @@ def record_application(user_id: str, company: str, role: str, job_url: str,
         payload["ats_score"] = ats_score
     if resume_id:
         payload["resume_id"] = resume_id
+    if resume_version_id:
+        payload["resume_version_id"] = resume_version_id
 
     app_resp = requests.post(
         f"{SUPABASE_URL}/rest/v1/applications",

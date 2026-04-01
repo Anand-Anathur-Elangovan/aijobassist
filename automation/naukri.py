@@ -10,6 +10,7 @@ import sys
 import time
 import random
 import tempfile
+import threading
 import requests as http_req
 from playwright.sync_api import sync_playwright, Page
 from automation.human import (
@@ -171,6 +172,7 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
         context = browser.new_context(**stealth_context_options())
         page    = context.new_page()
         inject_stealth(page)
+        _crashed = _attach_crash_handler(page)
 
         try:
             if not _login(page, task_input):
@@ -255,6 +257,42 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                 if applied >= max_apply:
                     print(f"  [NAUKRI] Reached limit of {max_apply}. Run again to continue from the next batch.")
                     break
+
+                # ── Feature: Browser crash guard ──────────────────
+                if _crashed[0]:
+                    raise RuntimeError("Chromium crashed mid-run — aborting task")
+
+                # ── Feature: Session expiry detection + re-auth ───
+                if _is_session_expired(page):
+                    _log(task_input, "⚠️ Session expired — attempting re-login…", "warning", "system")
+                    _reauth_ok = _login(page, task_input)
+                    if not _reauth_ok:
+                        _log(task_input,
+                             "❌ Re-authentication failed — session cookie expired. "
+                             "Please log in again and restart the task.",
+                             "error", "system")
+                        raise RuntimeError(
+                            "Naukri session expired mid-run and re-login failed. "
+                            "Please update your credentials and retry."
+                        )
+                    _log(task_input, "✅ Re-authenticated successfully", "success", "system")
+
+                # ── Feature: Duplicate application guard ──────────
+                if _user_id:
+                    try:
+                        from api_client import check_already_applied as _check_dup_nk
+                        if _check_dup_nk(_user_id, job_url):
+                            _log(task_input, f"⏭ Already applied — skipping {job_url}", "skip", "skip",
+                                 {"url": job_url, "skip_reason": "duplicate"})
+                            skipped += 1
+                            _report.append({"company": _company_from_url(job_url) or "—",
+                                             "job_title": "—", "url": job_url,
+                                             "score": None, "status": "skipped",
+                                             "skip_reason": "duplicate"})
+                            continue
+                    except Exception as _de:
+                        print(f"  [NAUKRI] Duplicate check error (non-fatal): {_de}")
+
                 task_input["_last_skip_reason"]   = "skipped"  # reset before each job
                 task_input["_last_skip_metadata"] = {}
                 success = _apply_to_job(page, job_url, task_input)
@@ -356,6 +394,38 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                     os.unlink(_resume_tmp_path)
                 except Exception:
                     pass
+
+
+# ──────────────────────────────────────────────────────────────
+# Session expiry + crash helpers
+# ──────────────────────────────────────────────────────────────
+def _is_session_expired(page: Page) -> bool:
+    """Return True if Naukri has redirected us to a login screen mid-run."""
+    try:
+        url = page.url or ""
+        if any(kw in url for kw in ("/login", "/nlogin", "login?", "authwall")):
+            return True
+        # Check for visible login drawer / modal
+        if page.locator("a#login_Layer, a.nI-gNb-lg-rg__login").first.is_visible(timeout=800):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _attach_crash_handler(page: Page) -> list:
+    """
+    Attach a crash handler to the page.
+    Returns a [False] flag list; flag is flipped to True on crash.
+    """
+    crashed = [False]
+
+    def _on_crash():
+        crashed[0] = True
+        print("  [NAUKRI] ⚠️  Chromium page crashed!")
+
+    page.on("crash", _on_crash)
+    return crashed
 
 
 # ──────────────────────────────────────────────────────────────
@@ -739,7 +809,7 @@ def _nk_tailor_and_persist(task_input: dict, jd_text: str) -> bool:
                 _file_url = ""
                 if tr.tailored_pdf_path and os.path.isfile(tr.tailored_pdf_path):
                     _file_url = upload_file_to_storage(tr.tailored_pdf_path, _uid, f"{_vname}.pdf")
-                save_resume_version(
+                _ver_id = save_resume_version(
                     user_id=_uid, version_name=_vname,
                     original_text=tr.original_text, tailored_text=tr.tailored_text,
                     tailored_content={"bullets": tr.tailored_bullets, "summary": tr.tailored_summary,
@@ -748,6 +818,8 @@ def _nk_tailor_and_persist(task_input: dict, jd_text: str) -> bool:
                                       "score_after": tr.score_after, "ats_score": tr.ats_score},
                     ats_score=tr.ats_score, missing_skills=tr.missing_skills, file_url=_file_url,
                 )
+                if _ver_id:
+                    task_input["_resume_version_id"] = _ver_id   # passed to record_application
                 if _file_url:
                     task_input["_tailored_resume_url"] = _file_url
                 print(f"  [NAUKRI] Tailored resume saved: '{_vname}'" + (f" — {_file_url[:60]}" if _file_url else ""))
@@ -2238,6 +2310,8 @@ def _record_application(task_input: dict, job_url: str, company_hint: str = "") 
             job_url=job_url,
             followup_days=followup_days,
             ats_score=int(ats_score) if ats_score is not None else None,
+            resume_id=task_input.get("resume_id") or None,
+            resume_version_id=task_input.get("_resume_version_id") or None,
         )
     except Exception as e:
         print(f"  [NAUKRI] Could not record application: {e}")

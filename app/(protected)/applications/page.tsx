@@ -9,6 +9,8 @@ import Link from "next/link";
 const STAGES = ["APPLIED", "SCREENING", "INTERVIEW", "OFFER", "REJECTED"] as const;
 type Stage = (typeof STAGES)[number];
 
+type ResumeVersion = { id: string; version_name: string };
+
 type ApplicationRow = {
   id:         string;
   stage:      Stage;
@@ -17,6 +19,8 @@ type ApplicationRow = {
   updated_at: string;
   ats_score:  number | null;
   follow_up_at: string | null;
+  resume_id:  string | null;
+  resume_version_id: string | null;
   jobs: {
     company:  string;
     role:     string;
@@ -24,6 +28,7 @@ type ApplicationRow = {
     metadata: Record<string, unknown>;
   } | null;
   email_threads?: { classification: string; received_at: string; subject: string }[];
+  resumes?: { title: string } | null;
 };
 
 const STAGE_COLORS: Record<Stage, string> = {
@@ -34,8 +39,29 @@ const STAGE_COLORS: Record<Stage, string> = {
   REJECTED:  "bg-red-500/15 text-red-400 border-red-500/30",
 };
 
+const STALE_DAYS = 30; // applications stuck in APPLIED for 30+ days are stale
+
 function daysSince(iso: string) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+}
+
+function isStale(app: ApplicationRow) {
+  return app.stage === "APPLIED" && daysSince(app.applied_at) >= STALE_DAYS;
+}
+
+// Detect duplicates: same company + role combination applied more than once
+function getDuplicateIds(apps: ApplicationRow[]): Set<string> {
+  const seen = new Map<string, string>(); // key → first app id
+  const dupes = new Set<string>();
+  for (const app of apps) {
+    const key = `${(app.jobs?.company ?? "").toLowerCase()}||${(app.jobs?.role ?? "").toLowerCase()}`;
+    if (seen.has(key)) {
+      dupes.add(app.id);
+    } else {
+      seen.set(key, app.id);
+    }
+  }
+  return dupes;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -43,21 +69,37 @@ export default function ApplicationsPage() {
   const { user } = useAuth();
 
   const [apps,           setApps          ] = useState<ApplicationRow[]>([]);
+  const [resumeVersions, setResumeVersions] = useState<Map<string, ResumeVersion>>(new Map());
   const [loading,        setLoading       ] = useState(true);
-  const [filter,         setFilter        ] = useState<Stage | "ALL">("ALL");
+  const [filter,         setFilter        ] = useState<Stage | "ALL" | "STALE" | "DUPLICATE">("ALL");
   const [updating,       setUpdating      ] = useState<string | null>(null);
   const [editNotes,      setEditNotes     ] = useState<{ id: string; text: string } | null>(null);
   const [gmailChecking,  setGmailChecking ] = useState(false);
   const [gmailMsg,       setGmailMsg      ] = useState<{ ok: boolean; text: string } | null>(null);
+  const [clearingStale,  setClearingStale ] = useState(false);
 
   const load = useCallback(async () => {
     if (!user) return;
     const { data } = await supabase
       .from("applications")
-      .select("*, jobs(company, role, url, metadata), email_threads(classification, received_at, subject)")
+      .select("*, jobs(company, role, url, metadata), email_threads(classification, received_at, subject), resumes(title)")
       .eq("user_id", user.id)
       .order("applied_at", { ascending: false });
     if (data) setApps(data as ApplicationRow[]);
+
+    // Load resume versions for any version IDs referenced
+    const versionIds = (data as ApplicationRow[] ?? [])
+      .map((a) => a.resume_version_id)
+      .filter(Boolean) as string[];
+    if (versionIds.length > 0) {
+      const { data: versions } = await supabase
+        .from("resume_versions")
+        .select("id, version_name")
+        .in("id", versionIds);
+      if (versions) {
+        setResumeVersions(new Map((versions as ResumeVersion[]).map((v) => [v.id, v])));
+      }
+    }
     setLoading(false);
   }, [user]);
 
@@ -83,6 +125,17 @@ export default function ApplicationsPage() {
     setApps((prev) => prev.filter((a) => a.id !== id));
   };
 
+  const clearStaleApps = async () => {
+    const staleIds = apps.filter(isStale).map((a) => a.id);
+    if (staleIds.length === 0) return;
+    if (!confirm(`Remove ${staleIds.length} stale application(s) with no response after ${STALE_DAYS}+ days?`)) return;
+    setClearingStale(true);
+    await supabase.from("applications").delete().in("id", staleIds);
+    setApps((prev) => prev.filter((a) => !staleIds.includes(a.id)));
+    setClearingStale(false);
+    setFilter("ALL");
+  };
+
   const checkGmailNow = async () => {
     setGmailChecking(true);
     setGmailMsg(null);
@@ -96,7 +149,6 @@ export default function ApplicationsPage() {
       const json = await res.json();
       if (res.ok) {
         setGmailMsg({ ok: true, text: json.already_running ? json.message : `✓ ${json.message}` });
-        // Reload apps after a short delay so new stages show up
         if (!json.already_running) setTimeout(() => load(), 5000);
       } else {
         setGmailMsg({ ok: false, text: json.error ?? "Failed to trigger" });
@@ -108,7 +160,16 @@ export default function ApplicationsPage() {
     }
   };
 
-  const filtered = filter === "ALL" ? apps : apps.filter((a) => a.stage === filter);
+  const duplicateIds = getDuplicateIds(apps);
+  const staleCount     = apps.filter(isStale).length;
+  const duplicateCount = duplicateIds.size;
+
+  const filtered = (() => {
+    if (filter === "STALE")     return apps.filter(isStale);
+    if (filter === "DUPLICATE") return apps.filter((a) => duplicateIds.has(a.id));
+    if (filter === "ALL")       return apps;
+    return apps.filter((a) => a.stage === filter);
+  })();
 
   // Stage counts for summary
   const counts = STAGES.reduce<Record<Stage, number>>((acc, s) => {
@@ -128,7 +189,7 @@ export default function ApplicationsPage() {
             Track every application, update status, and manage follow-ups.
           </p>
         </div>
-        {/* Gmail Check Now */}
+        {/* Actions */}
         <div className="flex flex-col items-end gap-2">
           <button
             onClick={checkGmailNow}
@@ -152,7 +213,7 @@ export default function ApplicationsPage() {
       </div>
 
       {/* Stage summary bar */}
-      <div className="grid grid-cols-5 gap-2 mb-8">
+      <div className="grid grid-cols-5 gap-2 mb-6">
         {STAGES.map((s) => (
           <button
             key={s}
@@ -166,6 +227,48 @@ export default function ApplicationsPage() {
           </button>
         ))}
       </div>
+
+      {/* Stale / Duplicate management bar */}
+      {(staleCount > 0 || duplicateCount > 0) && (
+        <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-slate-900/60 border border-slate-700/50 rounded-xl">
+          <span className="font-mono text-xs text-slate-400 uppercase tracking-wider">Cleanup</span>
+
+          {staleCount > 0 && (
+            <>
+              <button
+                onClick={() => setFilter(filter === "STALE" ? "ALL" : "STALE")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono border transition-colors ${
+                  filter === "STALE"
+                    ? "bg-orange-500/20 text-orange-300 border-orange-500/40"
+                    : "text-orange-400 border-orange-500/30 hover:bg-orange-500/10"
+                }`}
+              >
+                ⏰ {staleCount} Stale (30+ days, no update)
+              </button>
+              <button
+                onClick={clearStaleApps}
+                disabled={clearingStale}
+                className="px-3 py-1.5 rounded-lg text-xs font-mono border border-red-500/30 text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
+              >
+                {clearingStale ? "Clearing…" : `Clear ${staleCount} stale`}
+              </button>
+            </>
+          )}
+
+          {duplicateCount > 0 && (
+            <button
+              onClick={() => setFilter(filter === "DUPLICATE" ? "ALL" : "DUPLICATE")}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono border transition-colors ${
+                filter === "DUPLICATE"
+                  ? "bg-yellow-500/20 text-yellow-300 border-yellow-500/40"
+                  : "text-yellow-400 border-yellow-500/30 hover:bg-yellow-500/10"
+              }`}
+            >
+              ⚠ {duplicateCount} Duplicate{duplicateCount !== 1 ? "s" : ""} (same company + role)
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Filter chips */}
       <div className="flex flex-wrap gap-2 mb-4">
@@ -202,7 +305,7 @@ export default function ApplicationsPage() {
           <p className="text-slate-500 font-body text-sm">
             {apps.length === 0
               ? "No applications tracked yet. Start applying from the Job Search page."
-              : `No applications with status "${filter}".`}
+              : `No applications match the current filter.`}
           </p>
         </div>
       ) : (
@@ -212,6 +315,13 @@ export default function ApplicationsPage() {
             const needFollowUp = app.follow_up_at
               ? new Date(app.follow_up_at) <= new Date() && app.stage === "APPLIED"
               : days >= 7 && app.stage === "APPLIED";
+            const stale        = isStale(app);
+            const isDuplicate  = duplicateIds.has(app.id);
+
+            // Resume version label
+            const resumeVersionLabel = app.resume_version_id
+              ? resumeVersions.get(app.resume_version_id)?.version_name ?? "Tailored"
+              : app.resumes?.title ?? null;
 
             // Latest email thread
             const latestEmail = (app.email_threads ?? []).sort(
@@ -227,7 +337,14 @@ export default function ApplicationsPage() {
             };
 
             return (
-              <div key={app.id} className={`card transition-all ${needFollowUp ? "border-amber-400/20" : ""}`}>
+              <div
+                key={app.id}
+                className={`card transition-all ${
+                  stale ? "border-orange-500/20" :
+                  isDuplicate ? "border-yellow-500/20" :
+                  needFollowUp ? "border-amber-400/20" : ""
+                }`}
+              >
                 <div className="flex flex-wrap items-start gap-4">
                   {/* Company / Role */}
                   <div className="flex-1 min-w-[200px]">
@@ -239,7 +356,17 @@ export default function ApplicationsPage() {
                         <a href={app.jobs.url} target="_blank" rel="noopener noreferrer"
                           className="text-xs text-blue-400 hover:underline">↗</a>
                       )}
-                      {needFollowUp && (
+                      {stale && (
+                        <span className="text-xs font-mono bg-orange-500/10 text-orange-400 border border-orange-500/30 px-2 py-0.5 rounded-full">
+                          ⏰ Stale
+                        </span>
+                      )}
+                      {isDuplicate && (
+                        <span className="text-xs font-mono bg-yellow-500/10 text-yellow-400 border border-yellow-500/30 px-2 py-0.5 rounded-full">
+                          ⚠ Duplicate
+                        </span>
+                      )}
+                      {needFollowUp && !stale && (
                         <span className="text-xs font-mono bg-amber-400/10 text-amber-400 border border-amber-400/30 px-2 py-0.5 rounded-full">
                           ⏰ Follow up
                         </span>
@@ -251,18 +378,23 @@ export default function ApplicationsPage() {
                       )}
                     </div>
                     <p className="text-slate-400 text-sm">{app.jobs?.role ?? "—"}</p>
-                    <p className="font-mono text-xs text-slate-600 mt-0.5">
-                      Applied {days === 0 ? "today" : `${days}d ago`}
-                      {app.ats_score != null && <span className="ml-3 text-emerald-500">ATS {app.ats_score}%</span>}
+                    <p className="font-mono text-xs text-slate-600 mt-0.5 flex flex-wrap gap-x-3">
+                      <span>Applied {days === 0 ? "today" : `${days}d ago`}</span>
+                      {app.ats_score != null && <span className="text-emerald-500">ATS {app.ats_score}%</span>}
+                      {resumeVersionLabel && (
+                        <span className="text-blue-400/70" title={app.resume_version_id ? "Tailored resume version" : "Original resume"}>
+                          📄 {resumeVersionLabel}
+                        </span>
+                      )}
                       {app.follow_up_at && app.stage === "APPLIED" && (
-                        <span className="ml-3 text-amber-600">
+                        <span className="text-amber-600">
                           Follow-up {new Date(app.follow_up_at) <= new Date() ? "overdue" : `in ${Math.ceil((new Date(app.follow_up_at).getTime() - Date.now()) / 86_400_000)}d`}
                         </span>
                       )}
                     </p>
                   </div>
 
-                  {/* Stage selector */}
+                  {/* Stage selector + actions */}
                   <div className="flex flex-col items-end gap-2 shrink-0">
                     <select
                       value={app.stage}
