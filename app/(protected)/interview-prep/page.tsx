@@ -43,7 +43,7 @@ const PLATFORM_ICONS: Record<string, string> = {
 
 // ── Interactive Practice Card ─────────────────────────────────────────────
 function PracticeCard({
-  q, idx, history, jdText, company, role, resumeText, token,
+  q, idx, history, jdText, company, role, resumeText,
   onAnswered,
 }: {
   q: Question;
