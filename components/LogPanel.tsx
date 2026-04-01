@@ -30,7 +30,7 @@ interface Props {
 export default function LogPanel({ logs, isRunning }: Props) {
   const [filter,     setFilter]     = useState<LogLevel | 'all'>('all')
   const [expanded,   setExpanded]   = useState<Set<number>>(new Set())
-  const [autoScroll, setAutoScroll] = useState(true)
+  const [autoScroll, setAutoScroll] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
