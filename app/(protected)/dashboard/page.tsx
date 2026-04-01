@@ -2014,12 +2014,16 @@ export default function DashboardPage() {
             <div>
               <label className="block font-mono text-xs text-slate-400 mb-1">
                 Max Applications
-                <span className="ml-1 text-slate-500 font-normal">(max 100 per run — run again to continue)</span>
+                <span className="ml-1 text-slate-500 font-normal">(max 10 per run — testing mode)</span>
               </label>
               <input
-                type="number" min="1" max="100" placeholder="e.g. 5"
+                type="number" min="1" max="10" placeholder="e.g. 5"
                 value={maxApply}
-                onChange={(e) => setMaxApply(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === "") { setMaxApply(""); return; }
+                  setMaxApply(String(Math.max(1, Math.min(10, Number(value)))));
+                }}
                 className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
               />
             </div>
@@ -2607,10 +2611,10 @@ export default function DashboardPage() {
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={liveScreenshot} alt="Live automation screenshot" className="w-full object-contain" />
                 ) : (
-                  <div className="flex flex-col items-center gap-3 text-slate-600">
-                    {railwayStatus === "running" ? (
-                      <><span className="w-8 h-8 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" /><p className="text-xs">Waiting for first screenshot…</p></>
-                    ) : <p className="text-xs">No screenshot available</p>}
+                  <div className="flex flex-col items-center gap-3 text-slate-600 px-6 text-center">
+                    <span className="text-2xl">🖥️</span>
+                    <p className="text-xs text-slate-500 font-mono">Live screenshot preview is currently under testing</p>
+                    <p className="text-[10px] text-slate-600">Your automation is running — check the activity log for real-time progress</p>
                   </div>
                 )}
                 {liveScreenshot && <div className="absolute bottom-2 right-2 bg-black/60 text-xs text-slate-400 px-2 py-0.5 rounded">Live</div>}
