@@ -217,7 +217,11 @@ export default function AgentPage() {
       }
     }
 
-    // Fetch today's Railway quota directly from Supabase
+    // Fetch today's Railway quota
+    const SUPER_ADMINS = ["kaviyasaravanan01@gmail.com", "anandanathurelangovan94@gmail.com"];
+    const isAdmin = !!(user.email && SUPER_ADMINS.includes(user.email));
+    const adminLimit = 120;
+
     const today = new Date().toISOString().split("T")[0];
     const { data: usageRow } = await supabase
       .from("railway_daily_usage")
@@ -226,24 +230,28 @@ export default function AgentPage() {
       .eq("usage_date", today)
       .maybeSingle();
     const used = Number(usageRow?.minutes_used ?? 0);
-    // Get plan limit
-    const { data: sub } = await supabase
-      .from("subscriptions")
-      .select("plan_id")
-      .eq("user_id", user.id)
-      .in("status", ["active", "past_due"])
-      .maybeSingle();
-    let limit = 5;
-    if (sub?.plan_id) {
-      const { data: pl } = await supabase
-        .from("plan_limits")
-        .select("daily_limit")
-        .eq("plan_id", sub.plan_id)
-        .eq("action_type", "railway_minutes")
+
+    if (isAdmin) {
+      setRailwayQuota({ used, limit: adminLimit, remaining: Math.max(0, adminLimit - used) });
+    } else {
+      const { data: sub } = await supabase
+        .from("subscriptions")
+        .select("plan_id")
+        .eq("user_id", user.id)
+        .in("status", ["active", "past_due"])
         .maybeSingle();
-      if (pl) limit = pl.daily_limit;
+      let limit = 5;
+      if (sub?.plan_id) {
+        const { data: pl } = await supabase
+          .from("plan_limits")
+          .select("daily_limit")
+          .eq("plan_id", sub.plan_id)
+          .eq("action_type", "railway_minutes")
+          .maybeSingle();
+        if (pl) limit = pl.daily_limit;
+      }
+      setRailwayQuota({ used, limit, remaining: Math.max(0, limit - used) });
     }
-    setRailwayQuota({ used, limit, remaining: Math.max(0, limit - used) });
   }
 
   function openExecutionModal(taskType: "AUTO_APPLY" | "TAILOR_AND_APPLY") {
