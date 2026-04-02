@@ -162,6 +162,7 @@ def vnc_static(path):
     return send_from_directory(novnc_dir, path)
 
 
+@sock.route("/vnc/vnc-ws")  # noVNC resolves path relative to /vnc/ → /vnc/vnc-ws
 @sock.route("/vnc-ws")
 def vnc_ws_proxy(ws):
     """

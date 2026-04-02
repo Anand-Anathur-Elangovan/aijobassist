@@ -1328,18 +1328,26 @@ def _login(page: Page, task_input: dict = None) -> bool:
                         print("  [LINKEDIN] Pressed Enter on email field to advance")
                 except Exception:
                     pass
-            # Wait for password field to appear after the step transition
-            human_sleep(1.5, 2.5)
+            # Wait for page navigation / DOM settle after step transition
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=8000)
+            except Exception:
+                pass
+            human_sleep(2.5, 4.0)
 
     # ── Fill password + submit ──
     if email and password:
         try:
             pwd_el = page.locator("input[type='password']").first
-            if not pwd_el.is_visible(timeout=8000):
-                print("  [LINKEDIN] Password field still not visible after 8s — attempting Enter fallback")
+            if not pwd_el.is_visible(timeout=12000):
+                print("  [LINKEDIN] Password field still not visible after 12s — attempting Enter fallback")
                 try: page.keyboard.press("Enter")
                 except Exception: pass
-                human_sleep(1, 2)
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
+                human_sleep(2, 3)
 
             if pwd_el.is_visible(timeout=3000):
                 pwd_el.click()

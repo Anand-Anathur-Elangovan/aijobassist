@@ -178,13 +178,12 @@ export default function AgentPage() {
 
   async function fetchRailwayInfo() {
     if (!user) return;
-
+    try {
     // ── 1. Quota ─────────────────────────────────────────────────
-    // Use getUser() (authoritative) — session user may have null email in some flows
-    const SUPER_ADMINS = ["kaviyasaravanan01@gmail.com", "anandanathurelangovan94@gmail.com"];
-    const { data: { user: fullUser } } = await supabase.auth.getUser();
-    const userEmail = fullUser?.email ?? user.email ?? "";
-    const isAdmin = SUPER_ADMINS.includes(userEmail);
+    const SUPER_ADMIN_EMAILS = ["kaviyasaravanan01@gmail.com", "anandanathurelangovan94@gmail.com"];
+    const SUPER_ADMIN_IDS    = ["7488cae8-328b-4ffc-8136-42a0c18ed06d"];
+    // user.email from useAuth() is always populated (same pattern used by SubscriptionGuard)
+    const isAdmin = SUPER_ADMIN_EMAILS.includes(user.email ?? "") || SUPER_ADMIN_IDS.includes(user.id);
 
     const today = new Date().toISOString().split("T")[0];
     const { data: usageRow } = await supabase
@@ -253,6 +252,7 @@ export default function AgentPage() {
         } catch { /* Railway unreachable — stay false */ }
       }
     }
+    } catch (e) { console.error("[fetchRailwayInfo] error:", e); }
   }
 
   function openExecutionModal(taskType: "AUTO_APPLY" | "TAILOR_AND_APPLY") {
