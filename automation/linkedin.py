@@ -38,12 +38,48 @@ MAX_APPLY          = 5
 # Retry helpers
 # ──────────────────────────────────────────────────────────────
 def _safe_goto(page: Page, url: str, max_retries: int = 3) -> bool:
-    """Navigate to url with exponential backoff. Returns True on success."""
+    """Navigate to url with exponential backoff. Returns True on success.
+
+    Playwright throws ERR_HTTP_RESPONSE_CODE_FAILURE and ERR_TOO_MANY_REDIRECTS
+    on LinkedIn's redirect chains even when the final page loaded fine.
+    After any error we check page.url — if the browser landed on a real page
+    (not about:blank) we treat it as success.
+    Detects HTTP 429 (rate-limit) and backs off 60 s before retrying.
+    """
     for attempt in range(max_retries):
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            # Check for 429 even on a "successful" navigation (LinkedIn serves it as 200 HTML)
+            try:
+                if page.locator("text=HTTP ERROR 429").is_visible(timeout=1000):
+                    raise Exception("HTTP 429 rate-limit page")
+            except Exception as _chk:
+                if "429" in str(_chk):
+                    raise
             return True
         except Exception as e:
+            # If rate-limited, wait 60 s before retrying
+            if "429" in str(e):
+                wait = 60
+                print(f"  [LINKEDIN] Rate-limited (429) — waiting {wait}s before retry {attempt+1}/{max_retries}")
+                time.sleep(wait)
+                continue
+            # Check if the page actually loaded despite the Playwright navigation error
+            try:
+                landed = page.url or ""
+                if landed and "about:blank" not in landed and not landed.startswith("data:"):
+                    # Still check for 429 content on the landed page
+                    try:
+                        if page.locator("text=HTTP ERROR 429").is_visible(timeout=500):
+                            wait = 60
+                            print(f"  [LINKEDIN] Rate-limited (429) on landed page — waiting {wait}s")
+                            time.sleep(wait)
+                            continue
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                pass
             wait = 2 ** attempt  # 1s, 2s, 4s
             print(f"  [LINKEDIN] Navigation failed (attempt {attempt+1}/{max_retries}): {e} — retrying in {wait}s")
             time.sleep(wait)
@@ -94,6 +130,202 @@ def _push_screenshot(task_input: dict, page) -> None:
         push_screenshot(session_id, page)
     except Exception:
         pass
+
+
+# ── Telegram real-time reply helpers ──────────────────────────────────────────
+
+def _get_telegram_update_offset(bot_token: str, chat_id: str) -> int:
+    """Return the update_id of the most recent Telegram update (so we only see NEW replies)."""
+    if not bot_token:
+        return 0
+    try:
+        resp = http_req.get(
+            f"https://api.telegram.org/bot{bot_token}/getUpdates",
+            params={"limit": 1, "offset": -1},
+            timeout=8,
+        )
+        updates = resp.json().get("result", [])
+        return updates[-1]["update_id"] if updates else 0
+    except Exception:
+        return 0
+
+
+def _poll_telegram_for_reply(bot_token: str, chat_id: str,
+                              last_update_id: int) -> tuple:
+    """
+    Non-blocking poll for new Telegram messages from chat_id after last_update_id.
+    Returns (reply_text_lower_or_None, new_last_update_id).
+    """
+    if not bot_token or not chat_id:
+        return None, last_update_id
+    try:
+        resp = http_req.get(
+            f"https://api.telegram.org/bot{bot_token}/getUpdates",
+            params={"offset": last_update_id + 1, "timeout": 0, "limit": 10},
+            timeout=8,
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            return None, last_update_id
+        new_last = last_update_id
+        for update in data.get("result", []):
+            upd_id = update.get("update_id", last_update_id)
+            new_last = max(new_last, upd_id)
+            msg = update.get("message", {})
+            if str(msg.get("chat", {}).get("id", "")) == str(chat_id):
+                text = (msg.get("text") or "").strip().lower()
+                if text:
+                    return text, new_last
+        return None, new_last
+    except Exception:
+        return None, last_update_id
+
+
+def _wait_for_resolution(page: Page, task_input: dict, tg_message: str,
+                          wait_minutes: int = 10,
+                          check_url_exit: bool = False) -> str:
+    """
+    Send a Telegram notification, then poll every 5 s waiting for one of:
+      • User replies  "skip" / "s" / "next"       → returns "skip"
+      • User replies  "stop" / "quit"              → returns "stop"
+      • User replies  "ok" / "done" / "resume"     → returns "resolved"
+      • URL leaves login/checkpoint (check_url_exit=True) → returns "resolved"
+      • wait_minutes elapsed with no response      → returns "timeout"
+
+    The caller is responsible for building `tg_message` (already contains
+    the VNC URL or screen instruction).  This function only adds the reply
+    instructions footer if they are not already present.
+    """
+    from automation.notifier import _tg_send, _cfg
+    bot_token = _cfg(task_input, "telegram_bot_token", "TELEGRAM_BOT_TOKEN")
+    chat_id   = _cfg(task_input, "telegram_chat_id",   "TELEGRAM_CHAT_ID")
+
+    # Append reply-hint if not already there
+    _footer = "\n\nReply <b>done</b> when finished · <b>skip</b> to skip this job · <b>stop</b> to stop all"
+    full_msg = tg_message if "<b>done</b>" in tg_message or "<b>skip</b>" in tg_message else tg_message + _footer
+
+    if bot_token and chat_id:
+        try:
+            _tg_send(bot_token, chat_id, full_msg)
+        except Exception as _te:
+            print(f"  [LINKEDIN] Telegram send failed: {_te}")
+
+    _push_screenshot(task_input, page)
+
+    # Snapshot update offset AFTER sending so only NEW replies are seen
+    last_upd = _get_telegram_update_offset(bot_token, chat_id)
+
+    deadline = time.time() + wait_minutes * 60
+    while time.time() < deadline:
+        time.sleep(5)
+
+        # ── Telegram reply check ─────────────────────────────────
+        if bot_token and chat_id:
+            try:
+                reply, last_upd = _poll_telegram_for_reply(bot_token, chat_id, last_upd)
+                if reply:
+                    if reply in ("skip", "s", "next", "n"):
+                        _log(task_input, "⏭ User replied 'skip' via Telegram", "skip", "stuck")
+                        try: _tg_send(bot_token, chat_id, "⏭ Skipping this job and continuing with the rest…")
+                        except Exception: pass
+                        return "skip"
+                    elif reply in ("stop", "quit", "q"):
+                        _log(task_input, "🛑 User replied 'stop' via Telegram", "error", "stuck")
+                        try: _tg_send(bot_token, chat_id, "🛑 Stopping the session as requested.")
+                        except Exception: pass
+                        return "stop"
+                    elif reply in ("ok", "done", "continue", "c", "resume", "r", "yes", "y", "d"):
+                        _log(task_input, "▶️ User replied 'done' — resuming", "success", "stuck")
+                        try: _tg_send(bot_token, chat_id, "▶️ Got it — resuming now!")
+                        except Exception: pass
+                        return "resolved"
+            except Exception:
+                pass
+
+        # ── URL-exit check (login / checkpoint pages only) ────────
+        if check_url_exit:
+            try:
+                url = page.url or ""
+                _still_blocked = any(kw in url for kw in (
+                    "/checkpoint/", "/challenge/", "/uas/login", "linkedin.com/login",
+                ))
+                if not _still_blocked and url and "about:blank" not in url:
+                    _log(task_input, f"✅ Verification resolved — URL: {url[:80]}", "success", "stuck")
+                    try:
+                        _tg_send(bot_token, chat_id, "✅ Verification complete! Resuming job applications…")
+                    except Exception:
+                        pass
+                    return "resolved"
+            except Exception:
+                continue
+
+    # Timeout
+    _log(task_input, f"⏰ Wait timed out after {wait_minutes} min", "error", "stuck")
+    try:
+        _tg_send(bot_token, chat_id,
+                 f"⏰ No response for {wait_minutes} min — skipping this job and continuing.")
+    except Exception:
+        pass
+    return "timeout"
+
+
+def _handle_verification(page: Page, task_input: dict) -> bool:
+    """
+    Called when LinkedIn shows a security challenge (OTP, push-notification, CAPTCHA).
+    Builds an appropriate Telegram message (with noVNC URL on Railway, or screen
+    instruction locally) then delegates to _wait_for_resolution.
+    Returns True if resolved (URL left the challenge page), False otherwise.
+    """
+    _is_railway = os.environ.get("TASK_RUNNER_ENV") == "railway"
+    app_url = (
+        os.environ.get("RAILWAY_STATIC_URL", "")
+        or os.environ.get("NEXT_PUBLIC_APP_URL", "")
+    ).rstrip("/")
+
+    current_url = ""
+    try:
+        current_url = page.url or ""
+    except Exception:
+        pass
+
+    _hint = "identity verification (check LinkedIn mobile app for a push notification, or look for an OTP)"
+    if "otp" in current_url or "pin" in current_url or "phone" in current_url:
+        _hint = "OTP / PIN code (check your phone or email)"
+    elif "captcha" in current_url or "puzzle" in current_url:
+        _hint = "CAPTCHA / image puzzle"
+
+    if _is_railway and app_url:
+        _vnc = f"{app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+        tg_msg = (
+            f"🔐 <b>LinkedIn Verification Required</b>\n\n"
+            f"<b>Type:</b> {_hint}\n\n"
+            f"👉 <b>Open the live browser:</b>\n{_vnc}\n\n"
+            f"Complete the check — I'll detect it and resume automatically.\n"
+            f"Or reply <b>skip</b> to skip · <b>stop</b> to stop all.\n"
+            f"⏳ Waiting up to <b>10 minutes</b>."
+        )
+        print(f"  [LINKEDIN] ⚠️  Verification required (cloud) — noVNC link sent via Telegram.")
+    else:
+        tg_msg = (
+            f"🔐 <b>LinkedIn Verification Required</b>\n\n"
+            f"<b>Type:</b> {_hint}\n\n"
+            f"👉 Complete it in the <b>browser window on your screen</b>.\n\n"
+            f"• OTP / PIN → check email or phone\n"
+            f"• Push notification → tap <i>Approve</i> on LinkedIn mobile app\n"
+            f"• CAPTCHA → solve the puzzle\n\n"
+            f"Or reply <b>skip</b> to skip · <b>stop</b> to stop all.\n"
+            f"⏳ Waiting up to <b>10 minutes</b> — auto-resumes when done."
+        )
+        print(f"  [LINKEDIN] ⚠️  Verification required — Telegram notification sent. Complete in browser.")
+
+    _log(task_input,
+         f"🔐 Verification required ({_hint}) — URL: {current_url[:80]}",
+         "warning", "verification",
+         {"url": current_url, "vnc_available": bool(_is_railway and app_url)})
+
+    result = _wait_for_resolution(page, task_input, tg_msg,
+                                  wait_minutes=10, check_url_exit=True)
+    return result == "resolved"
 
 
 def _check_control(task_input: dict) -> dict:
@@ -356,10 +588,38 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             print("  [LINKEDIN] ⚠️  Tailor mode requested but no resume available — tailoring will be skipped")
 
     print("  [LINKEDIN] Launching browser…")
-    _headless = os.environ.get("TASK_RUNNER_ENV") == "railway"
+    # Always run headed:
+    #   - Local:   real display on your machine
+    #   - Railway: Xvfb virtual display (:99) started by server.py on boot
+    # This allows the user to see and interact with any verification challenge
+    # via the noVNC live-view at /vnc/ (Railway) or directly on screen (local).
+    _headless  = False
+    _user_id   = task_input.get("user_id", "anonymous")
+
+    # ── Persistent profile directory ──────────────────────────────────────────
+    # Each user gets their own Chromium profile stored on disk.
+    # LinkedIn sees the SAME browser fingerprint on every run → session is never
+    # invalidated due to fingerprint mismatch.
+    # Local:   SESSION_DIR=./sessions  (default)
+    # Railway: SESSION_DIR=/sessions   (mounted volume — set in Railway env vars)
+    _session_base    = os.environ.get("SESSION_DIR", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "sessions"))
+    _user_data_dir   = os.path.join(_session_base, _user_id)
+    os.makedirs(_user_data_dir, exist_ok=True)
+    print(f"  [LINKEDIN] Profile dir: {_user_data_dir}")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=_headless, args=stealth_launch_args())
-        context = browser.new_context(**stealth_context_options())
+        # launch_persistent_context = browser + context in a single call.
+        # The profile directory persists cookies, localStorage, and cache
+        # across every run so the session survives restarts and redeploys.
+        # Fingerprint is deterministic per user_id so LinkedIn always sees
+        # the same browser.
+        context = p.chromium.launch_persistent_context(
+            _user_data_dir,
+            headless=_headless,
+            args=stealth_launch_args(),
+            **stealth_context_options(_user_id),
+        )
         page    = context.new_page()
         inject_stealth(page)
         _crashed = _attach_crash_handler(page)
@@ -629,6 +889,10 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                             task_input.pop("_page_company", None)
                             task_input.pop("company", None)  # clear stale discovered company from previous job
                             success = _apply_to_job(page, ej_url, task_input)
+                            # If user replied "stop" via Telegram during stuck handling
+                            if task_input.get("_stop_requested"):
+                                _log(task_input, "🛑 Session stopped by user via Telegram", "error", "system")
+                                break
                             if _li_user_id:
                                 try:
                                     from api_client import record_seen_job as _li_record_seen2
@@ -712,7 +976,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             print(f"  [LINKEDIN] ERROR: {e}")
             raise
         finally:
-            browser.close()
+            context.close()  # closes both context and the underlying browser
             # Clean up the base resume temp file (tailored PDFs are in versioned output dirs)
             if _resume_tmp_path and os.path.isfile(_resume_tmp_path):
                 try:
@@ -729,6 +993,10 @@ def _login(page: Page, task_input: dict = None) -> bool:
     """
     Open the LinkedIn login page and sign in.
 
+    Tries cookie-based login first (li_at) — much more reliable in cloud/headless
+    environments because it bypasses LinkedIn's bot-detection on the login form.
+    Falls back to email+password if no cookie is provided.
+
     Design-agnostic: works regardless of LinkedIn UI redesigns.
     Uses 3-layer detection for each field:
       Layer 1 – Known stable attributes (fast)
@@ -739,9 +1007,168 @@ def _login(page: Page, task_input: dict = None) -> bool:
     task_input = task_input or {}
     email    = task_input.get("linkedin_email", "").strip()
     password = task_input.get("linkedin_password", "").strip()
+    li_at   = task_input.get("linkedin_cookie", "").strip()
+    user_id = task_input.get("user_id", "").strip()
 
+    # ── Strategy 0: Persistent profile already has a valid session ────────────
+    # launch_persistent_context restores cookies + localStorage from the profile
+    # directory automatically. Just navigate to feed and verify — if we land
+    # there we're already logged in and no credentials are needed at all.
+    #
+    # Cold-start (new Railway container / empty profile): try restoring the
+    # storage_state saved in Supabase Storage from a previous run first.
+    print("  [LINKEDIN] Checking for existing session in profile…")
+    _session_base    = os.environ.get("SESSION_DIR", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "sessions"))
+    _user_data_dir   = os.path.join(_session_base, user_id) if user_id else ""
+    _profile_has_data = any(True for _ in os.scandir(_user_data_dir)) if (_user_data_dir and os.path.isdir(_user_data_dir)) else False
+    if not _profile_has_data and user_id:
+        print("  [LINKEDIN] Profile empty — attempting cold-start restore from Supabase Storage…")
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+            from api_client import load_linkedin_session
+            _saved_state = load_linkedin_session(user_id)
+            if _saved_state and _saved_state.get("cookies"):
+                try:
+                    page.goto("https://www.linkedin.com", wait_until="domcontentloaded", timeout=60_000)
+                except Exception:
+                    pass
+                try:
+                    page.context.add_cookies([
+                        {"name": c["name"], "value": c["value"],
+                         "domain": c.get("domain", ".linkedin.com"), "path": c.get("path", "/")}
+                        for c in _saved_state["cookies"]
+                        if "linkedin.com" in c.get("domain", "")
+                    ])
+                    print(f"  [LINKEDIN] Restored {len(_saved_state['cookies'])} cookies from Supabase Storage")
+                except Exception as _ce:
+                    print(f"  [LINKEDIN] Cookie restore warning: {_ce}")
+            else:
+                print("  [LINKEDIN] No saved session found in Supabase Storage")
+        except Exception as _re:
+            print(f"  [LINKEDIN] Cold-start restore failed: {_re}")
+    try:
+        try:
+            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60_000)
+        except Exception:
+            pass
+        human_sleep(2, 3)
+        _url = page.url or ""
+        _bad = (
+            "/login" in _url or
+            "linkedin.com/checkpoint" in _url or
+            _url.rstrip("/") == "https://www.linkedin.com"
+        )
+        if not _bad:
+            print(f"  [LINKEDIN] Existing session valid ✅  URL: {_url}")
+            return True
+        print(f"  [LINKEDIN] No valid session in profile (landed: {_url}) — proceeding with login")
+    except Exception as e:
+        print(f"  [LINKEDIN] Session check error: {e} — proceeding with login")
+
+    def _save_session():
+        """
+        After a successful login:
+        1. Save full storage_state to Supabase Storage (survives Railway redeploys).
+        2. Save li_at + email/password to DB (fallback for profile rebuild).
+        """
+        if not user_id:
+            return
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "taskrunner"))
+            from api_client import save_linkedin_credentials, save_linkedin_session
+            # Save storage_state to Supabase Storage
+            try:
+                state = page.context.storage_state()
+                ok = save_linkedin_session(user_id, state)
+                if ok:
+                    print("  [LINKEDIN] Session saved to Supabase Storage ✅ (survives redeploys)")
+                else:
+                    print("  [LINKEDIN] Warning: session storage upload failed — check 'sessions' bucket exists in Supabase")
+            except Exception as se:
+                print(f"  [LINKEDIN] Warning: could not save session state: {se}")
+            # Also save li_at to DB as a last-resort fallback
+            live_li_at = None
+            try:
+                for cookie in page.context.cookies():
+                    if cookie.get("name") == "li_at":
+                        live_li_at = cookie.get("value")
+                        break
+            except Exception:
+                pass
+            save_linkedin_credentials(
+                user_id,
+                linkedin_cookie=live_li_at or li_at or None,
+                linkedin_email=email or None,
+                linkedin_password=password or None,
+            )
+        except Exception as e:
+            print(f"  [LINKEDIN] Warning: could not save session: {e}")
+
+    # ── Strategy 1: Cookie-based login — DISABLED ─────────────────────────────
+    # LinkedIn revokes li_at when it detects a fingerprint change (new IP / browser).
+    # Going straight to email+password is more reliable; if verification is needed
+    # the bot will wait and notify via Telegram / noVNC.
+    if False and li_at:
+        print("  [LINKEDIN] Attempting cookie-based login (li_at)…")
+        try:
+            page.goto("https://www.linkedin.com", wait_until="domcontentloaded", timeout=60_000)
+
+            # Restore the full saved cookie set if available (prevents 302 on /jobs/search/)
+            all_saved_cookies = task_input.get("linkedin_cookies")
+            if all_saved_cookies and isinstance(all_saved_cookies, list):
+                try:
+                    page.context.add_cookies(all_saved_cookies)
+                    print(f"  [LINKEDIN] Restored {len(all_saved_cookies)} saved cookies")
+                except Exception as _ce:
+                    print(f"  [LINKEDIN] Warning: could not restore all cookies: {_ce}")
+                    # Fall back to just li_at
+                    page.context.add_cookies([{"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"}])
+            else:
+                page.context.add_cookies([{"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"}])
+
+            # Navigate to feed — ignore 302 errors, just check the final URL
+            try:
+                page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60_000)
+            except Exception:
+                pass
+            human_sleep(2, 3)
+            url = page.url
+            _bad = (
+                "/login" in url or
+                "linkedin.com/checkpoint" in url or
+                # Public homepage = LinkedIn rejected the cookie and redirected us back
+                url.rstrip("/") == "https://www.linkedin.com"
+            )
+            if not _bad:
+                print(f"  [LINKEDIN] Cookie login confirmed ✅  URL: {url}")
+                _save_session()
+                return True
+            # If LinkedIn wants a verification challenge even with the cookie, handle it
+            if "linkedin.com/checkpoint" in url or "/challenge/" in url:
+                print(f"  [LINKEDIN] Cookie login hit a verification challenge (URL: {url})")
+                if _handle_verification(page, task_input):
+                    _save_session()
+                    return True
+                # Verification timed out — fall through to password strategy
+            else:
+                print(f"  [LINKEDIN] Cookie rejected by LinkedIn (landed: {url}). "
+                      f"Session was revoked — trying email/password login.")
+        except Exception as e:
+            print(f"  [LINKEDIN] Cookie login error: {e} — falling back to email/password")
+
+        # Clear any cookies that may have been set during the failed cookie attempt,
+        # otherwise the stale li_at causes ERR_TOO_MANY_REDIRECTS on the login page.
+        try:
+            page.context.clear_cookies()
+        except Exception:
+            pass
+
+    # ── Strategy 2: Email + Password login ────────────────────────────────────
     print("  [LINKEDIN] Opening login page...")
-    page.goto(LINKEDIN_LOGIN_URL, wait_until="domcontentloaded")
+    if not _safe_goto(page, LINKEDIN_LOGIN_URL):
+        print("  [LINKEDIN] Could not load login page after retries")
+        return False
     human_sleep(NAV_WAIT, NAV_WAIT + 2)
 
     def _find_email_input():
@@ -850,7 +1277,10 @@ def _login(page: Page, task_input: dict = None) -> bool:
         if email_el:
             try:
                 email_el.click()
-                human_sleep(0.2, 0.4)
+                human_sleep(0.3, 0.6)
+                # Clear any pre-filled value first
+                email_el.triple_click()
+                human_sleep(0.1, 0.2)
                 human_type(page, email, locator=email_el)
                 print(f"  [LINKEDIN] Email filled ✓")
             except Exception as e:
@@ -858,27 +1288,74 @@ def _login(page: Page, task_input: dict = None) -> bool:
         else:
             print("  [LINKEDIN] Warning: email field not found on page")
 
+    # ── Handle two-step login: click Continue/Next if password not yet visible ──
+    # LinkedIn sometimes shows email → Continue → password on separate "steps".
+    if email and password:
+        try:
+            pwd_visible = page.locator("input[type='password']").first.is_visible(timeout=2000)
+        except Exception:
+            pwd_visible = False
+
+        if not pwd_visible:
+            print("  [LINKEDIN] Password field not visible — looking for Continue/Next button…")
+            # Try clicking a Continue/Next button that appears after email entry
+            _continued = False
+            for _sel in [
+                "button:text-is('Continue')", "button:text-is('Next')",
+                "button[type='submit']", "input[type='submit']",
+            ]:
+                try:
+                    _btn = page.locator(_sel).first
+                    if _btn.is_visible(timeout=1500):
+                        human_click(page, locator=_btn)
+                        print(f"  [LINKEDIN] Clicked '{_sel}' to proceed to password step")
+                        _continued = True
+                        break
+                except Exception:
+                    pass
+            if not _continued:
+                # Press Enter on the email field as fallback
+                try:
+                    if email_el:
+                        email_el.press("Enter")
+                        print("  [LINKEDIN] Pressed Enter on email field to advance")
+                except Exception:
+                    pass
+            # Wait for password field to appear after the step transition
+            human_sleep(1.5, 2.5)
+
     # ── Fill password + submit ──
     if email and password:
         try:
             pwd_el = page.locator("input[type='password']").first
-            if pwd_el.is_visible(timeout=5000):
-                human_sleep(0.4, 1.0)
+            if not pwd_el.is_visible(timeout=8000):
+                print("  [LINKEDIN] Password field still not visible after 8s — attempting Enter fallback")
+                try: page.keyboard.press("Enter")
+                except Exception: pass
+                human_sleep(1, 2)
+
+            if pwd_el.is_visible(timeout=3000):
                 pwd_el.click()
-                human_sleep(0.1, 0.3)
+                human_sleep(0.2, 0.5)
+                # Clear any auto-filled value
+                pwd_el.triple_click()
+                human_sleep(0.1, 0.2)
                 human_type(page, password, locator=pwd_el, typo_rate=0.0)
                 print("  [LINKEDIN] Password filled ✓")
-            human_sleep(0.5, 1.5)
+                human_sleep(0.6, 1.2)
 
-            result = _find_submit_button()
-            if result == "JS_CLICKED":
-                print("  [LINKEDIN] Sign In clicked via JS ✓")
-            elif result:
-                human_click(page, locator=result)
-                print("  [LINKEDIN] Sign In clicked ✓")
+                result = _find_submit_button()
+                if result == "JS_CLICKED":
+                    print("  [LINKEDIN] Sign In clicked via JS ✓")
+                elif result:
+                    human_click(page, locator=result)
+                    print("  [LINKEDIN] Sign In clicked ✓")
+                else:
+                    print("  [LINKEDIN] Submit button not found — pressing Enter on password field")
+                    pwd_el.press("Enter")
             else:
-                print("  [LINKEDIN] Submit button not found — pressing Enter")
-                pwd_el.press("Enter")
+                print("  [LINKEDIN] Password field not found — pressing Enter as fallback")
+                page.keyboard.press("Enter")
         except Exception as e:
             print(f"  [LINKEDIN] Warning: password/submit error: {e}")
             try: page.keyboard.press("Enter")
@@ -892,16 +1369,55 @@ def _login(page: Page, task_input: dict = None) -> bool:
         print("  [LINKEDIN]  (You have 3 minutes to log in)             ")
         print("  [LINKEDIN] ============================================")
 
-    try:
-        page.wait_for_url(
-            lambda url: "linkedin.com/login" not in url and "linkedin.com/checkpoint" not in url,
-            timeout=180_000
+    # ── Wait for successful navigation away from login/checkpoint ────────────
+    # Poll every 2 s for up to 3 minutes.
+    # Real verification challenges (OTP, CAPTCHA, push-notification) have URLs
+    # like /checkpoint/challenge/, /checkpoint/verify/, /checkpoint/wam/.
+    # "/checkpoint/lg/login" is just LinkedIn's login-error page — NOT a challenge.
+    _REAL_CHALLENGE_MARKERS = (
+        "/checkpoint/challenge",
+        "/checkpoint/verify",
+        "/checkpoint/wam",
+        "/challenge/",
+    )
+    _deadline = time.time() + 180
+    _verif_triggered = False
+    while time.time() < _deadline:
+        try:
+            _url = page.url or ""
+        except Exception:
+            time.sleep(2)
+            continue
+        # ── Success: URL left all login/checkpoint pages ─────────────────────
+        _still_on_login = (
+            "linkedin.com/login" in _url or
+            "linkedin.com/checkpoint" in _url or
+            "/uas/login" in _url
         )
-        print(f"  [LINKEDIN] Login confirmed ✅  URL: {page.url}")
-        return True
-    except Exception as e:
-        print(f"  [LINKEDIN] Login timed out or failed: {e}")
-        return False
+        if not _still_on_login:
+            print(f"  [LINKEDIN] Login confirmed ✅  URL: {_url}")
+            _save_session()
+            return True
+        # ── Real verification challenge (OTP / CAPTCHA / push notification) ──
+        # Only trigger once — don't re-enter _handle_verification every loop.
+        if not _verif_triggered and any(m in _url for m in _REAL_CHALLENGE_MARKERS):
+            _verif_triggered = True
+            if _handle_verification(page, task_input):
+                _save_session()
+                return True
+            else:
+                _log(task_input,
+                     "⚠️ Login failed — verification not completed within 10 minutes. "
+                     "Please restart the job agent and complete the LinkedIn security check promptly.",
+                     "error", "system")
+                return False
+        # ── Login error page (e.g. /checkpoint/lg/login?errorKey=...) ────────
+        # Just a LinkedIn error — keep waiting; the user can retry in the browser.
+        time.sleep(2)
+    # Timed out waiting for login
+    _push_screenshot(task_input, page)
+    print(f"  [LINKEDIN] Login timed out. Final URL: {page.url}")
+    return False
 
 
 
@@ -2677,8 +3193,16 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
         start = page_num * 25
         search_url = f"{base_url}&start={start}"
         print(f"  [LINKEDIN] Page {page_num + 1} URL: {search_url}")
-        page.goto(search_url, wait_until="domcontentloaded")
+        if not _safe_goto(page, search_url):
+            print(f"  [LINKEDIN] Failed to load search page {page_num + 1} — stopping pagination")
+            break
         human_sleep(NAV_WAIT + 1, NAV_WAIT + 4)
+        # Verify we actually landed on a jobs page, not the homepage/feed
+        _landed = page.url or ""
+        if "/jobs/" not in _landed:
+            print(f"  [LINKEDIN] ⚠️ Redirected away from jobs search (landed: {_landed[:80]}). "
+                  f"Session may have expired — stopping search.")
+            break
         human_scroll_down(page, steps=random.randint(2, 4))   # browse-style scroll
 
         before = len(job_links)
@@ -4429,6 +4953,41 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             task_input.pop("_ext_stuck_reason", None)
         except Exception as _ne:
             print(f"  [NOTIFY] Notification send failed: {_ne}")
+
+        # ── Wait for user to complete manually or skip ────────────
+        _ext_is_rail = os.environ.get("TASK_RUNNER_ENV") == "railway"
+        _ext_app_url = (os.environ.get("RAILWAY_STATIC_URL", "") or
+                        os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
+        if _ext_is_rail and _ext_app_url:
+            _ext_vnc = f"{_ext_app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+            _ext_wait_msg = (
+                f"👆 <b>Action needed</b> — open the live browser to complete it:\n{_ext_vnc}\n\n"
+                f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
+                f"⏳ Waiting 10 min…"
+            )
+        else:
+            _ext_wait_msg = (
+                f"👆 <b>Action needed</b> — complete the application in the "
+                f"<b>browser window on your screen</b>.\n\n"
+                f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
+                f"⏳ Waiting 10 min…"
+            )
+        _ext_result = _wait_for_resolution(ext_page, task_input, _ext_wait_msg,
+                                           wait_minutes=10, check_url_exit=False)
+        if _ext_result == "stop":
+            task_input["_stop_requested"] = True
+        elif _ext_result == "resolved":
+            # User completed the form manually
+            _log(task_input, "✅ External apply completed manually by user", "success", "external")
+            _stats2 = task_input.setdefault("_session_stats", {})
+            _stats2["external_applied"] = _stats2.get("external_applied", 0) + 1
+            # Remove from manual_jobs list since it was actually completed
+            _manual_list = _stats2.get("manual_jobs", [])
+            if _manual_list:
+                _stats2["manual_jobs"] = _manual_list[:-1]
+                _stats2["manual_needed"] = max(0, _stats2.get("manual_needed", 1) - 1)
+            ext_page.close()
+            return True
         ext_page.close()
         return False
 
@@ -4461,6 +5020,37 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
                 "url":     apply_href,
             })
             task_input.pop("_ext_stuck_reason", None)
+            # Wait for user to complete manually or skip (same as the main stuck path)
+            _exc_is_rail = os.environ.get("TASK_RUNNER_ENV") == "railway"
+            _exc_app_url = (os.environ.get("RAILWAY_STATIC_URL", "") or
+                            os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
+            if _exc_is_rail and _exc_app_url:
+                _exc_vnc = f"{_exc_app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+                _exc_wait_msg = (
+                    f"👆 <b>Action needed</b> — open the live browser:\n{_exc_vnc}\n\n"
+                    f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
+                    f"⏳ Waiting 10 min…"
+                )
+            else:
+                _exc_wait_msg = (
+                    f"👆 <b>Action needed</b> — complete the application in the "
+                    f"<b>browser window on your screen</b>.\n\n"
+                    f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
+                    f"⏳ Waiting 10 min…"
+                )
+            try:
+                _exc_result = _wait_for_resolution(ext_page, task_input, _exc_wait_msg,
+                                                   wait_minutes=10, check_url_exit=False)
+                if _exc_result == "stop":
+                    task_input["_stop_requested"] = True
+                elif _exc_result == "resolved":
+                    _log(task_input, "✅ External apply completed manually by user", "success", "external")
+                    _stats3 = task_input.setdefault("_session_stats", {})
+                    _stats3["external_applied"] = _stats3.get("external_applied", 0) + 1
+                    ext_page.close()
+                    return True
+            except Exception:
+                pass
         except Exception:
             pass
         try:
@@ -5057,9 +5647,55 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
                 timeout=3000):
                 continue  # go to next step
 
-            # No button found — stuck
-            print(f"  [LINKEDIN] No actionable button on step {step + 1} — aborting")
-            break
+            # No button found — notify user and wait for them to fix it or skip
+            print(f"  [LINKEDIN] No actionable button on step {step + 1} — notifying user")
+            _ea_job_title = task_input.get("_page_job_title") or "Unknown Position"
+            _ea_company   = task_input.get("_page_company")   or "Unknown Company"
+            _ea_is_rail   = os.environ.get("TASK_RUNNER_ENV") == "railway"
+            _ea_app_url   = (os.environ.get("RAILWAY_STATIC_URL", "") or
+                             os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
+            if _ea_is_rail and _ea_app_url:
+                _ea_vnc = f"{_ea_app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+                _ea_msg = (
+                    f"⚠️ <b>Easy Apply Stuck — Step {step + 1}</b>\n\n"
+                    f"<b>{_ea_company}</b> — {_ea_job_title}\n\n"
+                    f"Bot couldn't find the Next / Submit button.\n"
+                    f"👉 <b>Open the live browser to fix it:</b>\n{_ea_vnc}\n\n"
+                    f"Reply <b>done</b> when you've submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
+                    f"⏳ Waiting 10 min…"
+                )
+            else:
+                _ea_msg = (
+                    f"⚠️ <b>Easy Apply Stuck — Step {step + 1}</b>\n\n"
+                    f"<b>{_ea_company}</b> — {_ea_job_title}\n\n"
+                    f"Bot couldn't find the Next / Submit button.\n"
+                    f"👉 Complete the application in the <b>browser window on your screen</b>.\n\n"
+                    f"Reply <b>done</b> when you've submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
+                    f"⏳ Waiting 10 min…"
+                )
+            _log(task_input,
+                 f"⚠️ Easy Apply stuck on step {step + 1} for {_ea_company} — {_ea_job_title}",
+                 "warning", "stuck")
+            _ea_result = _wait_for_resolution(page, task_input, _ea_msg,
+                                              wait_minutes=10, check_url_exit=False)
+            if _ea_result == "stop":
+                task_input["_stop_requested"] = True
+                break
+            if _ea_result == "resolved":
+                # User manually submitted — check if we're off the form modal
+                try:
+                    _ea_url = page.url or ""
+                    _still_modal = page.locator(
+                        "div.jobs-easy-apply-modal, div[data-test-modal]"
+                    ).first.is_visible(timeout=2000)
+                    if not _still_modal:
+                        task_input["_last_apply_type"] = "easy_apply"
+                        _close_modal(page)
+                        return True
+                except Exception:
+                    pass
+                continue  # User may have clicked Next — re-run the button check loop
+            break  # skip / timeout — give up on this job
 
     except Exception as e:
         print(f"  [LINKEDIN] Apply error on {job_url}: {e}")

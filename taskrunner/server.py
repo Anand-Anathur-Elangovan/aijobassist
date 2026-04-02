@@ -8,17 +8,74 @@ Starts the Supabase polling loop in a background thread on first /trigger call.
 
 import os
 import sys
+import select as _select
+import socket as _socket
+import subprocess
 import threading
 import time as _time
 import requests as _req
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
+from flask_sock import Sock
 
 # ── Path setup ──────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))          # taskrunner/
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # project root
 
 from api_client import SUPABASE_URL, HEADERS
+
+# ── Display services (Xvfb + x11vnc for headed browser on Railway) ───────────
+_IS_RAILWAY  = os.environ.get("TASK_RUNNER_ENV") == "railway"
+_DISPLAY     = os.environ.get("DISPLAY", ":99")
+_VNC_PORT    = 5900   # x11vnc listens here (localhost only)
+_NOVNC_PATHS = ["/usr/share/novnc", "/usr/share/noVNC"]
+
+
+def _find_novnc_dir() -> str | None:
+    for p in _NOVNC_PATHS:
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def start_display_services():
+    """
+    Start Xvfb (virtual framebuffer) + x11vnc (VNC server) on Railway.
+    Skipped silently on local dev where a real display already exists.
+    Must be called once at server boot before any browser is launched.
+    """
+    if not _IS_RAILWAY:
+        print("[server] Local env detected — skipping Xvfb/x11vnc startup")
+        return
+    try:
+        subprocess.Popen(
+            ["Xvfb", _DISPLAY, "-screen", "0", "1280x900x24", "-ac"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _time.sleep(1.2)  # give Xvfb time to bind to the display socket
+
+        subprocess.Popen(
+            [
+                "x11vnc",
+                "-display", _DISPLAY,
+                "-forever",
+                "-nopw",        # no VNC password (protected by Railway's HTTPS + token)
+                "-listen", "127.0.0.1",
+                "-rfbport", str(_VNC_PORT),
+                "-quiet",
+                "-noncache",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _time.sleep(0.8)
+        print(f"[server] Display services started (Xvfb {_DISPLAY}, x11vnc :{_VNC_PORT})")
+    except FileNotFoundError as e:
+        print(f"[server] Display service binary not found: {e} — VNC unavailable")
+    except Exception as e:
+        print(f"[server] Display services startup error: {e}")
+
 
 # ── Auth ─────────────────────────────────────────────────────
 RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "")
@@ -91,6 +148,72 @@ def _ensure_polling_thread():
 
 # ── Flask app ─────────────────────────────────────────────────
 app = Flask(__name__)
+sock = Sock(app)
+
+
+# ── noVNC static files ────────────────────────────────────────
+@app.route("/vnc/", defaults={"path": "vnc_lite.html"})
+@app.route("/vnc/<path:path>")
+def vnc_static(path):
+    """Serve the noVNC web client from the system package path."""
+    novnc_dir = _find_novnc_dir()
+    if not novnc_dir:
+        return "noVNC not installed on this server", 404
+    return send_from_directory(novnc_dir, path)
+
+
+@sock.route("/vnc-ws")
+def vnc_ws_proxy(ws):
+    """
+    WebSocket → raw-TCP proxy to x11vnc on localhost:5900.
+    noVNC speaks RFB (VNC) protocol over WebSocket binary frames.
+    This function bridges those frames to the VNC TCP socket.
+    """
+    try:
+        vnc = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        vnc.connect(("127.0.0.1", _VNC_PORT))
+    except Exception as e:
+        print(f"[vnc-ws] Cannot connect to VNC ({_VNC_PORT}): {e}")
+        return
+
+    stop = threading.Event()
+
+    def _vnc_to_ws():
+        """Background thread: forward VNC → WebSocket."""
+        while not stop.is_set():
+            try:
+                readable, _, _ = _select.select([vnc], [], [], 0.5)
+                if readable:
+                    data = vnc.recv(65536)
+                    if not data:
+                        break
+                    ws.send(data)       # binary frame → noVNC client
+            except Exception:
+                break
+        stop.set()
+
+    reader = threading.Thread(target=_vnc_to_ws, daemon=True)
+    reader.start()
+
+    try:
+        while not stop.is_set():
+            msg = ws.receive()          # blocks until frame arrives or close
+            if msg is None:
+                break
+            if isinstance(msg, str):
+                msg = msg.encode("latin-1")
+            vnc.sendall(msg)            # forward to x11vnc
+    except Exception:
+        pass
+    finally:
+        stop.set()
+        try:
+            vnc.close()
+        except Exception:
+            pass
+
+
+# ── Health / control routes ───────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -136,6 +259,9 @@ def stop():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     print(f"[server] VantaHire Railway service starting on port {port}")
+
+    # Start Xvfb + x11vnc so the browser can run headed (Railway only)
+    start_display_services()
 
     # Start polling loop immediately on boot (picks up any PENDING tasks)
     _ensure_polling_thread()

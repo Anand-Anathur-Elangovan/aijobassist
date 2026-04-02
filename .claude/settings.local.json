@@ -25,7 +25,9 @@
       "Bash(cat:*)",
       "Bash(wc:*)",
       "Bash(find '/c/Users/Anand/Desktop/project Idea/aijobassist' -type f \\\\\\(-name *schema* -o -name *migration* -o -name *database* \\\\\\))",
-      "Bash(python -m py_compile automation/naukri.py)"
+      "Bash(python -m py_compile automation/naukri.py)",
+      "Bash(pip install:*)",
+      "Bash(playwright install:*)"
     ]
   }
 }

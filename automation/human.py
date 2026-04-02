@@ -471,11 +471,12 @@ def natural_wait_for_selector(
 # ──────────────────────────────────────────────────────────────
 
 # Rotate through common real-world Chrome user agents
+# Use Chrome 125 to match the Playwright 1.44 bundled Chromium version
 _USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.112 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
 ]
 
 # Realistic viewport sizes (not the telltale 1280×720 automation default)
@@ -489,45 +490,119 @@ _VIEWPORTS = [
 
 # JS injected into every new page to hide automation signals
 _STEALTH_SCRIPT = """
-// Remove webdriver property (biggest bot signal)
-Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined,
-    configurable: true,
-});
+(() => {
+// ── 1. webdriver flag (biggest bot signal) ────────────────────────────────
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
 
-// Fake a realistic plugins list (real Chrome has many)
+// ── 2. Plugins — real Chrome has 4 built-in plugins ──────────────────────
+const _pluginData = [
+    {name:'Chrome PDF Plugin',         filename:'internal-pdf-viewer',             description:'Portable Document Format'},
+    {name:'Chrome PDF Viewer',         filename:'mhjfbmdgcfjbbpaeojofohoefgiehjai', description:''},
+    {name:'Native Client',             filename:'internal-nacl-plugin',             description:''},
+    {name:'Widevine Content Decryption Module', filename:'widevinecdmadapter.dll',  description:'Enables Widevine licenses for encrypted media playback'},
+];
 Object.defineProperty(navigator, 'plugins', {
-    get: () => {
-        const arr = [
-            {name: 'Chrome PDF Plugin',         filename: 'internal-pdf-viewer',  description: 'Portable Document Format'},
-            {name: 'Chrome PDF Viewer',          filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
-            {name: 'Native Client',              filename: 'internal-nacl-plugin', description: ''},
-            {name: 'Widevine Content Decryption Module', filename: 'widevinecdmadapter.dll', description: 'Enables Widevine licenses'},
-        ];
-        arr[Symbol.iterator] = Array.prototype[Symbol.iterator];
-        return arr;
-    },
+    get: () => { const a = [..._pluginData]; a[Symbol.iterator] = Array.prototype[Symbol.iterator]; return a; },
+    configurable: true,
+});
+Object.defineProperty(navigator, 'mimeTypes', {
+    get: () => { const a = []; a[Symbol.iterator] = Array.prototype[Symbol.iterator]; return a; },
     configurable: true,
 });
 
-// Realistic languages
-Object.defineProperty(navigator, 'languages', {
-    get: () => ['en-IN', 'en-US', 'en', 'hi'],
-    configurable: true,
-});
+// ── 3. Languages ──────────────────────────────────────────────────────────
+Object.defineProperty(navigator, 'languages', { get: () => ['en-IN','en-US','en','hi'], configurable: true });
 
-// Hide chrome automation extension
-if (window.chrome) {
-    window.chrome.runtime = window.chrome.runtime || {};
+// ── 4. Hardware — realistic mid-range laptop ──────────────────────────────
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8, configurable: true });
+
+// ── 5. Platform ───────────────────────────────────────────────────────────
+Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+
+// ── 6. window.chrome — missing in Playwright headless by default ──────────
+if (!window.chrome || !window.chrome.runtime) {
+    const _chrome = {
+        app:     { isInstalled: false, InstallState: { DISABLED:'disabled', INSTALLED:'installed', NOT_INSTALLED:'not_installed' }, RunningState: { CANNOT_RUN:'cannot_run', READY_TO_RUN:'ready_to_run', RUNNING:'running' } },
+        runtime: {
+            PlatformOs:   { MAC:'mac', WIN:'win', ANDROID:'android', CROS:'cros', LINUX:'linux', OPENBSD:'openbsd' },
+            PlatformArch: { ARM:'arm', X86_32:'x86-32', X86_64:'x86-64' },
+            RequestUpdateCheckStatus: { THROTTLED:'throttled', NO_UPDATE:'no_update', UPDATE_AVAILABLE:'update_available' },
+            OnInstalledReason: { INSTALL:'install', UPDATE:'update', CHROME_UPDATE:'chrome_update', SHARED_MODULE_UPDATE:'shared_module_update' },
+            OnRestartRequiredReason: { APP_UPDATE:'app_update', OS_UPDATE:'os_update', PERIODIC:'periodic' },
+        },
+        loadTimes: function() {
+            return { requestTime: performance.timing.navigationStart/1000, startLoadTime: performance.timing.navigationStart/1000, commitLoadTime: performance.timing.responseStart/1000, finishDocumentLoadTime: performance.timing.domContentLoadedEventEnd/1000, finishLoadTime: performance.timing.loadEventEnd/1000, firstPaintTime: 0, firstPaintAfterLoadTime: 0, navigationType: 'Other', wasFetchedViaSpdy: false, wasNpnNegotiated: false, npnNegotiatedProtocol: '', wasAlternateProtocolAvailable: false, connectionInfo: 'http/1.1' };
+        },
+        csi: function() {
+            return { startE: performance.timing.navigationStart, onloadT: performance.timing.loadEventEnd, pageT: performance.now(), tran: 15 };
+        },
+    };
+    try { Object.defineProperty(window, 'chrome', { value: _chrome, writable: true, enumerable: true, configurable: true }); } catch(e) {}
 }
 
-// Prevent iframe detection
-const originalQuery = window.navigator.permissions.query;
-window.navigator.permissions.query = (parameters) => (
-    parameters.name === 'notifications'
-        ? Promise.resolve({ state: Notification.permission })
-        : originalQuery(parameters)
-);
+// ── 7. Canvas fingerprint — add imperceptible noise to defeat exact-match ──
+const _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+HTMLCanvasElement.prototype.toDataURL = function(type, ...args) {
+    const ctx = this.getContext('2d');
+    if (ctx) {
+        const img = ctx.getImageData(0, 0, this.width || 1, this.height || 1);
+        if (img.data.length > 0) {
+            img.data[0] ^= 1;  // flip one invisible bit
+            ctx.putImageData(img, 0, 0);
+        }
+    }
+    return _origToDataURL.call(this, type, ...args);
+};
+const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+    const d = _origGetImageData.apply(this, args);
+    if (d.data.length > 3) d.data[3] ^= 1;
+    return d;
+};
+
+// ── 8. WebGL — spoof renderer/vendor to look like real GPU ───────────────
+const _getParam = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Intel Inc.';            // UNMASKED_VENDOR_WEBGL
+    if (param === 37446) return 'Intel Iris OpenGL Engine';  // UNMASKED_RENDERER_WEBGL
+    return _getParam.call(this, param);
+};
+try {
+    const _getParam2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function(param) {
+        if (param === 37445) return 'Intel Inc.';
+        if (param === 37446) return 'Intel Iris OpenGL Engine';
+        return _getParam2.call(this, param);
+    };
+} catch(e) {}
+
+// ── 9. Permissions — prevent notification-permission detection ────────────
+const _origQuery = window.navigator.permissions.query.bind(navigator.permissions);
+window.navigator.permissions.query = (p) =>
+    p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission, onchange: null })
+        : _origQuery(p);
+
+// ── 10. User-Agent data (Client Hints API) ────────────────────────────────
+if (navigator.userAgentData) {
+    try {
+        Object.defineProperty(navigator, 'userAgentData', {
+            get: () => ({
+                brands: [
+                    { brand: 'Google Chrome',  version: '125' },
+                    { brand: 'Chromium',        version: '125' },
+                    { brand: 'Not/A)Brand',     version: '99'  },
+                ],
+                mobile:    false,
+                platform:  'Windows',
+                getHighEntropyValues: () => Promise.resolve({}),
+            }),
+            configurable: true,
+        });
+    } catch(e) {}
+}
+})();
 """
 
 
@@ -557,25 +632,33 @@ def stealth_launch_args() -> list:
     ]
 
 
-def stealth_context_options() -> dict:
+def stealth_context_options(user_id: str = None) -> dict:
     """
-    Returns kwargs for `browser.new_context(...)` with randomised realistic
-    viewport, user-agent, locale, and timezone so every session looks different.
+    Returns kwargs for browser context creation with realistic viewport,
+    user-agent, locale, and timezone.
+
+    When user_id is provided the values are DETERMINISTIC (derived from the
+    user_id hash) so the same user always gets the same fingerprint across
+    runs — critical for persistent browser profiles so LinkedIn never sees
+    a fingerprint change between sessions.
     """
-    ua  = random.choice(_USER_AGENTS)
-    vp  = random.choice(_VIEWPORTS)
-    # Slightly jitter the viewport ±10 px so successive runs never match exactly
-    vp = {
-        "width":  vp["width"]  + random.randint(-10, 10),
-        "height": vp["height"] + random.randint(-10, 10),
-    }
+    if user_id:
+        import hashlib as _hl
+        _idx = int(_hl.md5(user_id.encode()).hexdigest()[:4], 16)
+        ua  = _USER_AGENTS[_idx % len(_USER_AGENTS)]
+        vp  = _VIEWPORTS [_idx % len(_VIEWPORTS)]
+    else:
+        ua  = random.choice(_USER_AGENTS)
+        vp  = random.choice(_VIEWPORTS)
+        # Slightly jitter viewport for non-persistent sessions
+        vp = {"width": vp["width"] + random.randint(-10, 10), "height": vp["height"] + random.randint(-10, 10)}
     return {
         "user_agent":    ua,
         "viewport":      vp,
         "locale":        "en-IN",
         "timezone_id":   "Asia/Kolkata",
         "color_scheme":  "light",
-        "device_scale_factor": random.choice([1.0, 1.25, 1.5]),
+        "device_scale_factor": 1.0 if user_id else random.choice([1.0, 1.25, 1.5]),
         "has_touch":     False,
         "is_mobile":     False,
         "java_script_enabled": True,

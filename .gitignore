@@ -37,3 +37,6 @@ playwright-*.whl
 
 # Editor
 .vscode/settings.json
+
+# Persistent browser profiles (contain session cookies)
+sessions/

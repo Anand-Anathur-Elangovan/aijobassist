@@ -310,6 +310,8 @@ export default function AgentPage() {
       ["nationality", "nationality"], ["gender", "gender"], ["disability_status", "disability_status"],
       ["veteran_status", "veteran_status"], ["ethnicity", "ethnicity"],
       ["linkedin_email", "linkedin_email"], ["linkedin_password", "linkedin_password"],
+      ["linkedin_cookie", "linkedin_cookie"], ["linkedin_cookies", "linkedin_cookies"],
+      ["linkedin_storage_state", "linkedin_storage_state"],
     ];
     for (const [src, dst] of strFields) {
       const v = pStr(src);
@@ -359,8 +361,8 @@ export default function AgentPage() {
       alert("No keywords saved. Please go to Dashboard and fill in your job search keywords before using Cloud Quick Launch.");
       return;
     }
-    if (!taskInput.linkedin_email) {
-      alert("No platform credentials saved. Please go to Dashboard, enter your LinkedIn/Naukri email and password, then click Save Profile before using Cloud Quick Launch.");
+    if (!taskInput.linkedin_cookie && !taskInput.linkedin_email) {
+      alert("No credentials saved. Please go to Dashboard, add your LinkedIn session cookie (li_at) for cloud runs, then click Save Profile before using Cloud Quick Launch.");
       return;
     }
 
@@ -907,11 +909,11 @@ export default function AgentPage() {
                   and save before launching.
                 </p>
               )}
-              {userProfilePrefs?.keywords && !userProfilePrefs?.linkedin_email && (
+              {userProfilePrefs?.keywords && !userProfilePrefs?.linkedin_cookie && !userProfilePrefs?.linkedin_email && (
                 <p className="text-xs text-amber-400 mt-2 text-center">
                   ⚠️ No credentials saved.{" "}
                   <Link href="/dashboard" className="underline hover:text-amber-300">
-                    Enter your LinkedIn/Naukri email &amp; password on Dashboard
+                    Add your li_at cookie (or email/password) on Dashboard
                   </Link>{" "}
                   and save.
                 </p>

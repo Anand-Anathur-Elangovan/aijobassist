@@ -167,7 +167,9 @@ export default function DashboardPage() {
   // Platform login credentials (optional — stored client-side only, passed to bot)
   const [linkedinEmail, setLinkedinEmail] = useState("");
   const [linkedinPassword, setLinkedinPassword] = useState("");
+  const [linkedinCookie, setLinkedinCookie] = useState("");
   const [showLinkedinPwd, setShowLinkedinPwd] = useState(false);
+  const [showLinkedinCookie, setShowLinkedinCookie] = useState(false);
   // Gmail follow-up settings
   const [gmailAddress, setGmailAddress] = useState("");
   const [gmailAppPassword, setGmailAppPassword] = useState("");
@@ -320,6 +322,7 @@ export default function DashboardPage() {
         // Credentials
         if (p.linkedin_email) setLinkedinEmail(p.linkedin_email as string);
         if (p.linkedin_password) setLinkedinPassword(p.linkedin_password as string);
+        if (p.linkedin_cookie) setLinkedinCookie(p.linkedin_cookie as string);
       }
       setProfileLoaded(true);
     });
@@ -483,6 +486,7 @@ export default function DashboardPage() {
       // Credentials — persisted so Railway cloud launch can use them
       ...(linkedinEmail.trim() && { linkedin_email: linkedinEmail.trim() }),
       ...(linkedinPassword.trim() && { linkedin_password: linkedinPassword.trim() }),
+      ...(linkedinCookie.trim() && { linkedin_cookie: linkedinCookie.trim() }),
     };
     const { error } = await supabase.from("user_profiles").upsert(
       { user_id: u.id, job_preferences: prefs, updated_at: new Date().toISOString() },
@@ -502,8 +506,9 @@ export default function DashboardPage() {
 
     // ── Credential validation for auto/tailor modes ──────────
     if (applyMode !== "url" && !semiAuto) {
-      if (!linkedinEmail.trim() || !linkedinPassword.trim()) {
-        alert(`Please enter your ${platform === "linkedin" ? "LinkedIn" : "Naukri"} email and password before starting Auto Apply.\n\nYour credentials are only used to log in during the automation run.`);
+      const hasCreds = linkedinCookie.trim() || (linkedinEmail.trim() && linkedinPassword.trim());
+      if (!hasCreds) {
+        alert(`Please enter your ${platform === "linkedin" ? "LinkedIn" : "Naukri"} credentials before starting Auto Apply.\n\nFor cloud runs, use the li_at cookie (recommended). Otherwise enter your email and password.\n\nYour credentials are only used to log in during the automation run.`);
         return;
       }
     }
@@ -563,6 +568,7 @@ export default function DashboardPage() {
           email: u.email || "",
           ...(linkedinEmail && { linkedin_email: linkedinEmail }),
           ...(linkedinPassword && { linkedin_password: linkedinPassword }),
+          ...(linkedinCookie && { linkedin_cookie: linkedinCookie }),
           linkedin_apply_types: linkedinApplyTypes,
           semi_auto: semiAuto,
           auto_cover_letter: autoCoverLetter,
@@ -627,6 +633,7 @@ export default function DashboardPage() {
         email: u.email || "",
         ...(linkedinEmail && { linkedin_email: linkedinEmail }),
         ...(linkedinPassword && { linkedin_password: linkedinPassword }),
+        ...(linkedinCookie && { linkedin_cookie: linkedinCookie }),
         ...(gmailAddress && { gmail_address: gmailAddress }),
         ...(gmailAppPassword && { gmail_app_password: gmailAppPassword }),
         ...(applyMode === "tailor" && {
@@ -1378,6 +1385,27 @@ export default function DashboardPage() {
                     className="px-2 text-slate-500 hover:text-white text-sm">{showLinkedinPwd ? "🙈" : "👁"}</button>
                 </div>
               </div>
+            </div>
+            {/* li_at cookie — required for cloud (Railway) runs */}
+            <div className="mt-2">
+              <label className="block font-mono text-xs text-slate-500 mb-1">
+                Session Cookie (li_at)
+                <span className="ml-1 text-blue-400 font-semibold">recommended for Cloud runs</span>
+              </label>
+              <div className="flex gap-1">
+                <input
+                  type={showLinkedinCookie ? "text" : "password"}
+                  placeholder="AQE..."
+                  value={linkedinCookie}
+                  onChange={(e) => setLinkedinCookie(e.target.value)}
+                  className="flex-1 bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500 font-mono"
+                />
+                <button type="button" onClick={() => setShowLinkedinCookie(!showLinkedinCookie)}
+                  className="px-2 text-slate-500 hover:text-white text-sm">{showLinkedinCookie ? "🙈" : "👁"}</button>
+              </div>
+              <p className="font-mono text-xs text-slate-600 mt-1">
+                Get it from browser DevTools → Application → Cookies → linkedin.com → <span className="text-slate-400">li_at</span>. Bypasses bot-detection on cloud IPs.
+              </p>
             </div>
           </div>
 

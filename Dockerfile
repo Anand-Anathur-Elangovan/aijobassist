@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 \
     fonts-liberation libappindicator3-1 libx11-xcb1 libxcb-dri3-0 \
-    xdg-utils --no-install-recommends \
+    xdg-utils \
+    xvfb x11vnc novnc websockify \
+    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -32,6 +34,15 @@ ENV PYTHONPATH=/app:/app/taskrunner
 
 # Railway injects all env vars — no .env file needed at runtime
 ENV PYTHONUNBUFFERED=1
+
+# Virtual display for headed Chromium on Railway (Xvfb started by server.py on boot)
+ENV DISPLAY=:99
+
+# Persistent browser profiles.
+# Default: /tmp/sessions (works without a volume — ephemeral per container).
+# With Railway volume: set SESSION_DIR=/sessions in Railway Variables and mount at /sessions.
+ENV SESSION_DIR=/tmp/sessions
+RUN mkdir -p /tmp/sessions
 
 # Start the HTTP server (also boots the polling loop in a background thread)
 CMD ["python", "taskrunner/server.py"]

@@ -619,6 +619,107 @@ def _resume_task(task_id: str) -> None:
 
 
 
+def save_linkedin_session(user_id: str, state: dict) -> bool:
+    """
+    Upload the full Playwright storage_state (cookies + localStorage) for a user
+    to Supabase Storage bucket 'sessions'. Called after every successful login so
+    the session survives Railway container restarts and redeploys.
+    Returns True on success.
+    """
+    if not user_id or not state:
+        return False
+    try:
+        import json as _json
+        data = _json.dumps(state).encode()
+        resp = requests.put(
+            f"{SUPABASE_URL}/storage/v1/object/sessions/{user_id}/linkedin.json",
+            headers={
+                "apikey":        SUPABASE_API_KEY,
+                "Authorization": f"Bearer {SUPABASE_API_KEY}",
+                "Content-Type":  "application/json",
+                "x-upsert":      "true",
+            },
+            data=data,
+        )
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        print(f"[WARN] save_linkedin_session: {e}")
+        return False
+
+
+def load_linkedin_session(user_id: str) -> dict | None:
+    """
+    Download the stored Playwright storage_state for a user from Supabase Storage.
+    Returns the state dict on success, or None if not found.
+    """
+    if not user_id:
+        return None
+    try:
+        import json as _json
+        resp = requests.get(
+            f"{SUPABASE_URL}/storage/v1/object/sessions/{user_id}/linkedin.json",
+            headers={
+                "apikey":        SUPABASE_API_KEY,
+                "Authorization": f"Bearer {SUPABASE_API_KEY}",
+            },
+        )
+        if resp.status_code == 200:
+            return _json.loads(resp.content)
+    except Exception as e:
+        print(f"[WARN] load_linkedin_session: {e}")
+    return None
+
+
+def save_linkedin_credentials(user_id: str,
+                               linkedin_cookie: str = None,
+                               linkedin_email: str = None,
+                               linkedin_password: str = None,
+                               linkedin_cookies: list = None,
+                               linkedin_storage_state: dict = None) -> bool:
+    """
+    Merge LinkedIn credentials into user_profiles.job_preferences.
+    Called automatically after a successful local-agent login so cloud runs
+    can reuse the live session without any manual copy-paste.
+    linkedin_cookies: full list of browser cookie dicts for the linkedin.com domain.
+    Best-effort: never raises, returns True on success.
+    """
+    if not user_id:
+        return False
+    updates = {}
+    if linkedin_cookie:
+        updates["linkedin_cookie"] = linkedin_cookie
+    if linkedin_email:
+        updates["linkedin_email"] = linkedin_email
+    if linkedin_password:
+        updates["linkedin_password"] = linkedin_password
+    if linkedin_cookies:
+        updates["linkedin_cookies"] = linkedin_cookies
+    if linkedin_storage_state:
+        updates["linkedin_storage_state"] = linkedin_storage_state
+    if not updates:
+        return False
+    try:
+        # Read current preferences so we don't clobber other fields
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/user_profiles"
+            f"?user_id=eq.{user_id}&select=job_preferences&limit=1",
+            headers=HEADERS,
+        )
+        current_prefs = {}
+        if resp.ok and resp.json():
+            current_prefs = resp.json()[0].get("job_preferences") or {}
+        merged = {**current_prefs, **updates}
+        patch = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/user_profiles?user_id=eq.{user_id}",
+            headers=HEADERS,
+            json={"job_preferences": merged},
+        )
+        return patch.ok
+    except Exception as e:
+        print(f"[WARN] save_linkedin_credentials: {e}")
+        return False
+
+
 def save_cover_letter(user_id: str, job_id: str | None,
                        cover_letter: str,
                        cover_type: str = "cover_letter",
