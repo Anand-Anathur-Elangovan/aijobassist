@@ -1279,7 +1279,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
                 email_el.click()
                 human_sleep(0.3, 0.6)
                 # Clear any pre-filled value first
-                email_el.triple_click()
+                email_el.click(click_count=3)
                 human_sleep(0.1, 0.2)
                 human_type(page, email, locator=email_el)
                 print(f"  [LINKEDIN] Email filled ✓")
@@ -1338,7 +1338,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
                 pwd_el.click()
                 human_sleep(0.2, 0.5)
                 # Clear any auto-filled value
-                pwd_el.triple_click()
+                pwd_el.click(click_count=3)
                 human_sleep(0.1, 0.2)
                 human_type(page, password, locator=pwd_el, typo_rate=0.0)
                 print("  [LINKEDIN] Password filled ✓")

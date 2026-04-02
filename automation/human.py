@@ -238,7 +238,7 @@ def human_type(
 
         if clear_first:
             try:
-                el.triple_click()
+                el.click(click_count=3)
                 time.sleep(random.uniform(0.1, 0.2))
                 page.keyboard.press("Delete")
                 time.sleep(random.uniform(0.05, 0.15))
