@@ -152,7 +152,7 @@ sock = Sock(app)
 
 
 # ── noVNC static files ────────────────────────────────────────
-@app.route("/vnc/", defaults={"path": "vnc_lite.html"})
+@app.route("/vnc/", defaults={"path": "vnc.html"})
 @app.route("/vnc/<path:path>")
 def vnc_static(path):
     """Serve the noVNC web client from the system package path."""

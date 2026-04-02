@@ -741,7 +741,14 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
 
                 # ── Feature: Browser crash guard ──────────────────
                 if _crashed[0]:
-                    raise RuntimeError("Chromium crashed mid-run — aborting task")
+                    print("  [LINKEDIN] ⚠️  Crash detected — attempting page recovery…")
+                    try:
+                        page = context.new_page()
+                        inject_stealth(page)
+                        _crashed = _attach_crash_handler(page)
+                        print("  [LINKEDIN] ✅ New page created — resuming from next job")
+                    except Exception as _ce:
+                        raise RuntimeError(f"Chromium crashed and page recovery failed: {_ce}")
 
                 # ── Feature: Session expiry detection + re-auth ───
                 if _is_session_expired(page):

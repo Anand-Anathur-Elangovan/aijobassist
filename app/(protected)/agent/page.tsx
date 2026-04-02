@@ -178,49 +178,13 @@ export default function AgentPage() {
 
   async function fetchRailwayInfo() {
     if (!user) return;
-    const session = await supabase.auth.getSession();
-    const token   = session.data.session?.access_token;
-    if (!token) return;
 
-    // Fetch user profile for railway_configured + preferred_execution_mode + job_preferences
-    const { data: profile } = await supabase
-      .from("user_profiles")
-      .select("railway_configured, preferred_execution_mode, job_preferences")
-      .eq("user_id", user.id)
-      .single();
-
-    if (profile) {
-      if (profile.job_preferences) {
-        setUserProfilePrefs(profile.job_preferences as Record<string, unknown>);
-      }
-      setPreferredMode((profile.preferred_execution_mode as ExecutionMode) ?? "own_machine");
-      if (profile.railway_configured) {
-        setRailwayConfigured(true);
-      } else {
-        // Auto-detect: ping Railway — if it responds, treat it as configured
-        try {
-          const ping = await fetch("/api/railway/status?ping=true", {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (ping.ok) {
-            const pj = await ping.json();
-            if (pj.reachable) {
-              setRailwayConfigured(true);
-              // Persist so next load is instant
-              await supabase
-                .from("user_profiles")
-                .update({ railway_configured: true })
-                .eq("user_id", user!.id);
-            }
-          }
-        } catch { /* Railway unreachable — stay false */ }
-      }
-    }
-
-    // Fetch today's Railway quota
+    // ── 1. Quota ─────────────────────────────────────────────────
+    // Use getUser() (authoritative) — session user may have null email in some flows
     const SUPER_ADMINS = ["kaviyasaravanan01@gmail.com", "anandanathurelangovan94@gmail.com"];
-    const isAdmin = !!(user.email && SUPER_ADMINS.includes(user.email));
-    const adminLimit = 120;
+    const { data: { user: fullUser } } = await supabase.auth.getUser();
+    const userEmail = fullUser?.email ?? user.email ?? "";
+    const isAdmin = SUPER_ADMINS.includes(userEmail);
 
     const today = new Date().toISOString().split("T")[0];
     const { data: usageRow } = await supabase
@@ -232,7 +196,7 @@ export default function AgentPage() {
     const used = Number(usageRow?.minutes_used ?? 0);
 
     if (isAdmin) {
-      setRailwayQuota({ used, limit: adminLimit, remaining: Math.max(0, adminLimit - used) });
+      setRailwayQuota({ used, limit: 120, remaining: Math.max(0, 120 - used) });
     } else {
       const { data: sub } = await supabase
         .from("subscriptions")
@@ -251,6 +215,43 @@ export default function AgentPage() {
         if (pl) limit = pl.daily_limit;
       }
       setRailwayQuota({ used, limit, remaining: Math.max(0, limit - used) });
+    }
+
+    // ── 2. Profile + Railway ping (needs token) ──────────────────
+    const session = await supabase.auth.getSession();
+    const token   = session.data.session?.access_token;
+
+    const { data: profile } = await supabase
+      .from("user_profiles")
+      .select("railway_configured, preferred_execution_mode, job_preferences")
+      .eq("user_id", user.id)
+      .single();
+
+    if (profile) {
+      if (profile.job_preferences) {
+        setUserProfilePrefs(profile.job_preferences as Record<string, unknown>);
+      }
+      setPreferredMode((profile.preferred_execution_mode as ExecutionMode) ?? "own_machine");
+      if (profile.railway_configured) {
+        setRailwayConfigured(true);
+      } else if (token) {
+        // Auto-detect: ping Railway — if it responds, treat it as configured
+        try {
+          const ping = await fetch("/api/railway/status?ping=true", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (ping.ok) {
+            const pj = await ping.json();
+            if (pj.reachable) {
+              setRailwayConfigured(true);
+              await supabase
+                .from("user_profiles")
+                .update({ railway_configured: true })
+                .eq("user_id", user!.id);
+            }
+          }
+        } catch { /* Railway unreachable — stay false */ }
+      }
     }
   }
 
