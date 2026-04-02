@@ -152,8 +152,8 @@ sock = Sock(app)
 
 
 # ── noVNC static files ────────────────────────────────────────
-@app.route("/vnc/", defaults={"path": "vnc.html"})
-@app.route("/vnc/<path:path>")
+@app.route("/novnc/", defaults={"path": "vnc.html"})
+@app.route("/novnc/<path:path>")
 def vnc_static(path):
     """Serve the noVNC web client from the system package path."""
     novnc_dir = _find_novnc_dir()
@@ -162,13 +162,17 @@ def vnc_static(path):
     return send_from_directory(novnc_dir, path)
 
 
-@sock.route("/vnc/vnc-ws")  # noVNC resolves path relative to /vnc/ → /vnc/vnc-ws
-@sock.route("/vnc-ws")
-def vnc_ws_proxy(ws):
+# Legacy /vnc/ redirect for old bookmarks
+@app.route("/vnc/", defaults={"path": ""})
+@app.route("/vnc/<path:path>")
+def vnc_legacy_redirect(path):
+    return app.redirect(f"/novnc/{path}" if path else "/novnc/")
+
+
+def _run_vnc_proxy(ws):
     """
     WebSocket → raw-TCP proxy to x11vnc on localhost:5900.
     noVNC speaks RFB (VNC) protocol over WebSocket binary frames.
-    This function bridges those frames to the VNC TCP socket.
     """
     try:
         vnc = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -180,7 +184,6 @@ def vnc_ws_proxy(ws):
     stop = threading.Event()
 
     def _vnc_to_ws():
-        """Background thread: forward VNC → WebSocket."""
         while not stop.is_set():
             try:
                 readable, _, _ = _select.select([vnc], [], [], 0.5)
@@ -188,7 +191,7 @@ def vnc_ws_proxy(ws):
                     data = vnc.recv(65536)
                     if not data:
                         break
-                    ws.send(data)       # binary frame → noVNC client
+                    ws.send(data)
             except Exception:
                 break
         stop.set()
@@ -198,12 +201,12 @@ def vnc_ws_proxy(ws):
 
     try:
         while not stop.is_set():
-            msg = ws.receive()          # blocks until frame arrives or close
+            msg = ws.receive()
             if msg is None:
                 break
             if isinstance(msg, str):
                 msg = msg.encode("latin-1")
-            vnc.sendall(msg)            # forward to x11vnc
+            vnc.sendall(msg)
     except Exception:
         pass
     finally:
@@ -212,6 +215,11 @@ def vnc_ws_proxy(ws):
             vnc.close()
         except Exception:
             pass
+
+
+@sock.route("/vnc-ws")
+def vnc_ws_proxy(ws):
+    _run_vnc_proxy(ws)
 
 
 # ── Health / control routes ───────────────────────────────────

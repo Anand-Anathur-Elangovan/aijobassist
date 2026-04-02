@@ -810,6 +810,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 success = _apply_to_job(page, job_url, task_input)
                 # Push screenshot after each application attempt (cloud mode)
                 _push_screenshot(task_input, page)
+                # Navigate to blank page to free renderer memory (prevents OOM crashes on Railway)
+                try:
+                    page.goto("about:blank", timeout=5000)
+                except Exception:
+                    pass
                 # Record to job history DB (won't revisit for 30 days)
                 if _li_user_id:
                     try:
@@ -1304,36 +1309,51 @@ def _login(page: Page, task_input: dict = None) -> bool:
             pwd_visible = False
 
         if not pwd_visible:
-            print("  [LINKEDIN] Password field not visible — looking for Continue/Next button…")
-            # Try clicking a Continue/Next button that appears after email entry
+            print("  [LINKEDIN] Password field not visible — submitting email step…")
             _continued = False
-            for _sel in [
-                "button:text-is('Continue')", "button:text-is('Next')",
-                "button[type='submit']", "input[type='submit']",
-            ]:
-                try:
-                    _btn = page.locator(_sel).first
-                    if _btn.is_visible(timeout=1500):
-                        human_click(page, locator=_btn)
-                        print(f"  [LINKEDIN] Clicked '{_sel}' to proceed to password step")
-                        _continued = True
-                        break
-                except Exception:
-                    pass
+            # 1. Try JS click on the submit button (most reliable across LinkedIn A/B variants)
+            try:
+                clicked = page.evaluate("""() => {
+                    const btn = document.querySelector(
+                        'button[type="submit"], input[type="submit"], button.sign-in-form__submit-button'
+                    );
+                    if (btn) { btn.click(); return true; }
+                    const form = document.querySelector('form');
+                    if (form) { form.submit(); return true; }
+                    return false;
+                }""")
+                if clicked:
+                    print("  [LINKEDIN] Submitted email form via JS ✓")
+                    _continued = True
+            except Exception:
+                pass
+            # 2. Playwright locator click fallback
             if not _continued:
-                # Press Enter on the email field as fallback
+                for _sel in ["button[type='submit']", "input[type='submit']",
+                             "button:text('Continue')", "button:text('Sign in')"]:
+                    try:
+                        _btn = page.locator(_sel).first
+                        if _btn.is_visible(timeout=2000):
+                            human_click(page, locator=_btn)
+                            print(f"  [LINKEDIN] Clicked '{_sel}' ✓")
+                            _continued = True
+                            break
+                    except Exception:
+                        pass
+            # 3. Enter key last resort
+            if not _continued:
                 try:
                     if email_el:
                         email_el.press("Enter")
-                        print("  [LINKEDIN] Pressed Enter on email field to advance")
+                        print("  [LINKEDIN] Pressed Enter on email field")
                 except Exception:
                     pass
-            # Wait for page navigation / DOM settle after step transition
+            # Wait for page to navigate to password step
             try:
                 page.wait_for_load_state("domcontentloaded", timeout=8000)
             except Exception:
                 pass
-            human_sleep(2.5, 4.0)
+            human_sleep(3.0, 5.0)
 
     # ── Fill password + submit ──
     if email and password:
@@ -1397,6 +1417,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
     )
     _deadline = time.time() + 180
     _verif_triggered = False
+    _vnc_hint_logged = False
     while time.time() < _deadline:
         try:
             _url = page.url or ""
@@ -1409,6 +1430,12 @@ def _login(page: Page, task_input: dict = None) -> bool:
             "linkedin.com/checkpoint" in _url or
             "/uas/login" in _url
         )
+        if _still_on_login and not _verif_triggered and not _vnc_hint_logged:
+            _vnc_hint_logged = True
+            _log(task_input,
+                 "⏳ Waiting for LinkedIn login… If a CAPTCHA or verification appears, "
+                 "open the VNC screen to complete it manually.",
+                 "warning", "system")
         if not _still_on_login:
             print(f"  [LINKEDIN] Login confirmed ✅  URL: {_url}")
             _save_session()
