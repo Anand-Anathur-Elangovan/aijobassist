@@ -23,12 +23,13 @@ sys.path.insert(0, os.path.dirname(__file__))          # taskrunner/
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # project root
 
 from api_client import SUPABASE_URL, HEADERS
+import display_pool as _dpool
 
 # ── Display services (Xvfb + x11vnc for headed browser on Railway) ───────────
 _IS_RAILWAY  = os.environ.get("TASK_RUNNER_ENV") == "railway"
-_DISPLAY     = os.environ.get("DISPLAY", ":99")
-_VNC_PORT    = 5900   # x11vnc listens here (localhost only)
 _NOVNC_PATHS = ["/usr/share/novnc", "/usr/share/noVNC"]
+# Fallback shared display used only when pool is exhausted
+_FALLBACK_VNC_PORT = 5900
 
 
 def _find_novnc_dir() -> str | None:
@@ -36,45 +37,6 @@ def _find_novnc_dir() -> str | None:
         if os.path.isdir(p):
             return p
     return None
-
-
-def start_display_services():
-    """
-    Start Xvfb (virtual framebuffer) + x11vnc (VNC server) on Railway.
-    Skipped silently on local dev where a real display already exists.
-    Must be called once at server boot before any browser is launched.
-    """
-    if not _IS_RAILWAY:
-        print("[server] Local env detected — skipping Xvfb/x11vnc startup")
-        return
-    try:
-        subprocess.Popen(
-            ["Xvfb", _DISPLAY, "-screen", "0", "1920x1080x24", "-ac"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _time.sleep(1.2)  # give Xvfb time to bind to the display socket
-
-        subprocess.Popen(
-            [
-                "x11vnc",
-                "-display", _DISPLAY,
-                "-forever",
-                "-nopw",        # no VNC password (protected by Railway's HTTPS + token)
-                "-listen", "127.0.0.1",
-                "-rfbport", str(_VNC_PORT),
-                "-quiet",
-                "-noncache",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _time.sleep(0.8)
-        print(f"[server] Display services started (Xvfb {_DISPLAY}, x11vnc :{_VNC_PORT})")
-    except FileNotFoundError as e:
-        print(f"[server] Display service binary not found: {e} — VNC unavailable")
-    except Exception as e:
-        print(f"[server] Display services startup error: {e}")
 
 
 # ── Auth ─────────────────────────────────────────────────────
@@ -129,6 +91,8 @@ def _session_watchdog():
                               "error": "Session watchdog: pod became unresponsive",
                               "completed_at": now_iso},
                     )
+                # Release allocated display back to pool
+                _dpool.release(sid)
         except Exception as _we:
             print(f"[watchdog] Error: {_we}")
 
@@ -169,14 +133,14 @@ def vnc_legacy_redirect(path):
     return app.redirect(f"/novnc/{path}" if path else "/novnc/")
 
 
-def _run_vnc_proxy(ws):
+def _run_vnc_proxy(ws, port: int):
     """
-    WebSocket → raw-TCP proxy to x11vnc on localhost:5900.
+    WebSocket → raw-TCP proxy to x11vnc on localhost:<port>.
     noVNC speaks RFB (VNC) protocol over WebSocket binary frames.
     """
     try:
         vnc = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        vnc.connect(("127.0.0.1", _VNC_PORT))
+        vnc.connect(("127.0.0.1", port))
     except Exception as e:
         print(f"[vnc-ws] Cannot connect to VNC ({_VNC_PORT}): {e}")
         return
@@ -219,7 +183,15 @@ def _run_vnc_proxy(ws):
 
 @sock.route("/vnc-ws")
 def vnc_ws_proxy(ws):
-    _run_vnc_proxy(ws)
+    """Route this WebSocket to the correct per-session VNC port.
+    noVNC connects as: /vnc-ws?session=SESSION_ID
+    Falls back to the shared :99 display (port 5900) if no session param.
+    """
+    session_id = request.args.get("session", "")
+    port = _dpool.get_vnc_port(session_id) if session_id else None
+    if port is None:
+        port = _FALLBACK_VNC_PORT
+    _run_vnc_proxy(ws, port)
 
 
 # ── Health / control routes ───────────────────────────────────
@@ -238,10 +210,37 @@ def trigger():
     task_id    = data.get("task_id", "")
     session_id = data.get("session_id", task_id)
 
+    # Allocate a dedicated Xvfb + x11vnc display for this session (Railway only).
+    # The allocated display/port are injected into the task's input row so the
+    # automation script can launch Chromium on the right display.
+    alloc = _dpool.allocate(session_id)
+    if alloc:
+        display_num, vnc_port = alloc
+        display_str = f":{display_num}"
+        # Inject display info into the task's input so automation can use it
+        _req.patch(
+            f"{SUPABASE_URL}/rest/v1/tasks?id=eq.{task_id}",
+            headers={**HEADERS, "Prefer": "return=minimal"},
+            json={"input": {
+                **data,
+                "session_id":      session_id,
+                "session_display": display_str,
+                "vnc_port":        vnc_port,
+            }},
+        )
+        # Store vnc_port in railway_sessions so the frontend can build the right URL
+        _req.patch(
+            f"{SUPABASE_URL}/rest/v1/railway_sessions?id=eq.{session_id}",
+            headers={**HEADERS, "Prefer": "return=minimal"},
+            json={"vnc_port": vnc_port},
+        )
+        print(f"[server] /trigger  task_id={task_id}  session_id={session_id}  display={display_str}  vnc_port={vnc_port}")
+    else:
+        print(f"[server] /trigger  task_id={task_id}  session_id={session_id}  (shared display fallback)")
+
     # Task is already PENDING in Supabase; ensure the polling loop is running
     _ensure_polling_thread()
 
-    print(f"[server] /trigger  task_id={task_id}  session_id={session_id}")
     return jsonify({"run_id": session_id, "status": "queued"})
 
 
@@ -268,9 +267,6 @@ def stop():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     print(f"[server] VantaHire Railway service starting on port {port}")
-
-    # Start Xvfb + x11vnc so the browser can run headed (Railway only)
-    start_display_services()
 
     # Start polling loop immediately on boot (picks up any PENDING tasks)
     _ensure_polling_thread()

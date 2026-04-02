@@ -15,6 +15,7 @@ except ImportError:
 
 from api_client import fetch_pending_tasks, update_task, SUPABASE_URL, HEADERS, increment_usage, record_railway_usage
 from task_runner import run_task
+import display_pool as _dpool
 
 POLL_INTERVAL  = 10   # seconds between task polls
 GMAIL_INTERVAL = 86400  # 24 hours in seconds
@@ -157,6 +158,7 @@ def main():
                     duration = int((datetime.now(timezone.utc) - task_start_time).total_seconds())
                     session_id = (task.get("input") or {}).get("session_id", "")
                     record_railway_usage(uid, session_id, duration, status="completed")
+                    _dpool.release(session_id)
 
             except Exception as e:
                 error_msg = str(e)
@@ -181,10 +183,11 @@ def main():
                 # Record Railway minutes even on failure (user still consumed time)
                 if is_railway:
                     uid = task.get("user_id", "")
+                    _fail_sid = (task.get("input") or {}).get("session_id", "")
                     if uid:
                         duration = int((datetime.now(timezone.utc) - task_start_time).total_seconds())
-                        session_id = (task.get("input") or {}).get("session_id", "")
-                        record_railway_usage(uid, session_id, duration, status="failed")
+                        record_railway_usage(uid, _fail_sid, duration, status="failed")
+                    _dpool.release(_fail_sid)
 
         else:
             # No pending tasks

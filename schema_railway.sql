@@ -86,6 +86,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- ── 8. Add vnc_port to railway_sessions (per-user display isolation) ─────────
+-- Each session now gets its own Xvfb display + x11vnc port (5901–5910).
+-- The frontend uses this to build the correct /novnc/?session= URL.
+ALTER TABLE railway_sessions ADD COLUMN IF NOT EXISTS vnc_port INT;
+
 -- ── Done ──────────────────────────────────────────────────────
 -- After running this, update your .env.local with real Railway values.
 -- See CODEBASE_CONTEXT.md Section 3 for required env vars.

@@ -614,10 +614,15 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
         # across every run so the session survives restarts and redeploys.
         # Fingerprint is deterministic per user_id so LinkedIn always sees
         # the same browser.
+        # Use the per-session virtual display allocated by display_pool (Railway only).
+        # Falls back to the env DISPLAY (or :99 default) on local / if pool was exhausted.
+        _session_display = task_input.get("session_display") or os.environ.get("DISPLAY", ":99")
+        _launch_env = {**os.environ, "DISPLAY": _session_display}
         context = p.chromium.launch_persistent_context(
             _user_data_dir,
             headless=_headless,
             args=stealth_launch_args(),
+            env=_launch_env,
             **stealth_context_options(_user_id),
         )
         page    = context.new_page()
@@ -644,7 +649,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 _app_url  = (task_input.get("app_url") or
                              os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
                 if _tg_token and _tg_chat:
-                    _vnc_start = f"{_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale" if _app_url else ""
+                    _sid_param = task_input.get("session_id", "")
+                    _vnc_qs = f"path=../vnc-ws&autoconnect=1&resize=scale"
+                    if _sid_param:
+                        _vnc_qs += f"&session={_sid_param}"
+                    _vnc_start = f"{_app_url}/novnc/?{_vnc_qs}" if _app_url else ""
                     _start_msg = (
                         f"🚀 <b>Cloud run started on Railway</b>\n\n"
                         f"Logged in to LinkedIn ✅\n"

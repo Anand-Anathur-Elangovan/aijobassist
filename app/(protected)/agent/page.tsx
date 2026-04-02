@@ -1005,7 +1005,7 @@ export default function AgentPage() {
               {/* Live VNC screen button — only while running */}
               {railwayStatus === "running" && (
                 <a
-                  href={`${process.env.NEXT_PUBLIC_RAILWAY_SERVICE_URL || "https://aijobassist-production.up.railway.app"}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale`}
+                  href={`${process.env.NEXT_PUBLIC_RAILWAY_SERVICE_URL || "https://aijobassist-production.up.railway.app"}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale${railwaySessionId ? `&session=${railwaySessionId}` : ""}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="px-3 py-1.5 text-xs font-medium border border-violet-500/40 text-violet-300 hover:bg-violet-500/10 rounded-lg transition-colors"
