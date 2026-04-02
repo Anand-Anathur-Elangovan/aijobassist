@@ -295,7 +295,7 @@ def _handle_verification(page: Page, task_input: dict) -> bool:
         _hint = "CAPTCHA / image puzzle"
 
     if _is_railway and app_url:
-        _vnc = f"{app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+        _vnc = f"{app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
         tg_msg = (
             f"🔐 <b>LinkedIn Verification Required</b>\n\n"
             f"<b>Type:</b> {_hint}\n\n"
@@ -636,6 +636,26 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             # Screenshot after login so user sees the starting state
             _push_screenshot(task_input, page)
 
+            # ── Notify user that cloud run has started (with VNC link) ──
+            try:
+                from automation.notifier import _tg_send, _cfg
+                _tg_token = _cfg(task_input, "telegram_bot_token", "TELEGRAM_BOT_TOKEN")
+                _tg_chat  = _cfg(task_input, "telegram_chat_id",   "TELEGRAM_CHAT_ID")
+                _app_url  = (task_input.get("app_url") or
+                             os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
+                if _tg_token and _tg_chat:
+                    _vnc_start = f"{_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale" if _app_url else ""
+                    _start_msg = (
+                        f"🚀 <b>Cloud run started on Railway</b>\n\n"
+                        f"Logged in to LinkedIn ✅\n"
+                        f"Searching for: <b>{task_input.get('keywords', 'Software Engineer')}</b>\n"
+                    )
+                    if _vnc_start:
+                        _start_msg += f"\n👁 <b>Watch live:</b>\n{_vnc_start}\n"
+                    _tg_send(_tg_token, _tg_chat, _start_msg)
+            except Exception as _sne:
+                print(f"  [LINKEDIN] Start notification error (non-fatal): {_sne}")
+
             # ── STEP 2: Search jobs ────────────────────────────
             # Build keyword list (up to 3 sequential keywords)
             _li_kw_list = [
@@ -844,13 +864,16 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     else:
                         _sstats["easy_applied"] = _sstats.get("easy_applied", 0) + 1
                     _report.append({
-                        "company":     _r_company,
-                        "job_title":   _r_job_title,
-                        "url":         job_url,
-                        "score":       task_input.get("_last_match_score"),
-                        "status":      "applied",
-                        "apply_type":  _r_apply_type,
-                        "skip_reason": "",
+                        "company":          _r_company,
+                        "job_title":        _r_job_title,
+                        "url":              job_url,
+                        "score":            task_input.get("_last_match_score"),
+                        "status":           "applied",
+                        "apply_type":       _r_apply_type,
+                        "skip_reason":      "",
+                        "tailored_resume_url": task_input.get("_tailored_resume_url", ""),
+                        "resume_url":       task_input.get("resume_url", ""),
+                        "resume_filename":  task_input.get("resume_filename", "resume.pdf"),
                     })
                 else:
                     skipped += 1
@@ -973,6 +996,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     "duration_minutes":   _duration,
                     "manual_jobs":        _sstats.get("manual_jobs", []),
                     "jobs":               _report,
+                    "resume_url":         task_input.get("resume_url", ""),
+                    "resume_filename":    task_input.get("resume_filename", "resume.pdf"),
                 })
             except Exception as _sne:
                 print(f"  [NOTIFY] Summary notification failed: {_sne}")
@@ -5001,7 +5026,7 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
         _ext_app_url = (os.environ.get("RAILWAY_STATIC_URL", "") or
                         os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
         if _ext_is_rail and _ext_app_url:
-            _ext_vnc = f"{_ext_app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+            _ext_vnc = f"{_ext_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
             _ext_wait_msg = (
                 f"👆 <b>Action needed</b> — open the live browser to complete it:\n{_ext_vnc}\n\n"
                 f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
@@ -5067,7 +5092,7 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             _exc_app_url = (os.environ.get("RAILWAY_STATIC_URL", "") or
                             os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
             if _exc_is_rail and _exc_app_url:
-                _exc_vnc = f"{_exc_app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+                _exc_vnc = f"{_exc_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
                 _exc_wait_msg = (
                     f"👆 <b>Action needed</b> — open the live browser:\n{_exc_vnc}\n\n"
                     f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
@@ -5697,7 +5722,7 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             _ea_app_url   = (os.environ.get("RAILWAY_STATIC_URL", "") or
                              os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
             if _ea_is_rail and _ea_app_url:
-                _ea_vnc = f"{_ea_app_url}/vnc/?path=vnc-ws&autoconnect=1&resize=scale"
+                _ea_vnc = f"{_ea_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
                 _ea_msg = (
                     f"⚠️ <b>Easy Apply Stuck — Step {step + 1}</b>\n\n"
                     f"<b>{_ea_company}</b> — {_ea_job_title}\n\n"

@@ -304,6 +304,8 @@ def _build_summary_tg(stats: dict) -> str:
     duration      = stats.get("duration_minutes", 0)
     manual_jobs   = stats.get("manual_jobs", [])     # list of {company, title, url}
     jobs          = stats.get("jobs", [])             # per-job report list
+    resume_url    = stats.get("resume_url", "")
+    resume_name   = stats.get("resume_filename", "resume.pdf")
 
     parts = [
         "📊 <b>AI Job Bot — Session Complete</b>",
@@ -348,6 +350,12 @@ def _build_summary_tg(stats: dict) -> str:
                     parts.append(f'{icon} <a href="{url}">{co} — {jt}</a>{score_str}')
                 else:
                     parts.append(f'{icon} {co} — {jt}{score_str}')
+                # Per-job resume link: tailored takes priority over original
+                _job_resume = j.get("tailored_resume_url") or j.get("resume_url") or ""
+                _job_fname  = j.get("resume_filename", "resume.pdf")
+                _label      = "Tailored resume" if j.get("tailored_resume_url") else "Resume used"
+                if _job_resume:
+                    parts.append(f'   📄 <a href="{_job_resume}">{_label}: {_esc_tg(_job_fname)}</a>')
             if len(applied_jobs) > 12:
                 parts.append(f"   … and {len(applied_jobs) - 12} more (see email)")
 

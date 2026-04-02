@@ -49,7 +49,7 @@ def start_display_services():
         return
     try:
         subprocess.Popen(
-            ["Xvfb", _DISPLAY, "-screen", "0", "1280x900x24", "-ac"],
+            ["Xvfb", _DISPLAY, "-screen", "0", "1920x1080x24", "-ac"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

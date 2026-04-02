@@ -617,6 +617,8 @@ def stealth_launch_args() -> list:
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--window-size=1920,1080",
+        "--start-maximized",
         "--disable-extensions",
         "--disable-background-networking",
         "--disable-background-timer-throttling",
