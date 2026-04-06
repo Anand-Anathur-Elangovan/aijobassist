@@ -13,7 +13,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed — rely on shell environment
 
-from api_client import fetch_pending_tasks, update_task, SUPABASE_URL, HEADERS, increment_usage, record_railway_usage
+from api_client import fetch_pending_tasks, fetch_task, update_task, SUPABASE_URL, HEADERS, increment_usage, record_railway_usage
 from task_runner import run_task
 import display_pool as _dpool
 
@@ -109,6 +109,23 @@ def main():
             update_task(task_id, "RUNNING")
             print(f"[STATUS] {task_id} → RUNNING")
             task_start_time = datetime.now(timezone.utc)
+
+            # ── Railway: wait for /trigger to patch session_display into task input ──
+            # The frontend calls /trigger after creating the task. There's a small race
+            # window where the polling loop grabs the task before /trigger has patched
+            # session_display. Re-fetch for up to 5s until it appears.
+            if is_railway and task.get("execution_mode") == "railway":
+                _waited = 0
+                while _waited < 5:
+                    _fresh = fetch_task(task_id)
+                    if (_fresh.get("input") or {}).get("session_display"):
+                        task = _fresh   # use the up-to-date task with session_display
+                        print(f"[STATUS] {task_id} session_display={task['input']['session_display']} ready")
+                        break
+                    time.sleep(0.5)
+                    _waited += 0.5
+                else:
+                    print(f"[STATUS] {task_id} session_display not set after 5s — proceeding with fallback")
 
             # Mark session as running with started_at (authoritative start time for billing)
             if is_railway:

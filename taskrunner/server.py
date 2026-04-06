@@ -268,6 +268,25 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     print(f"[server] VantaHire Railway service starting on port {port}")
 
+    # ── Start fallback Xvfb on :99 (used when display pool is exhausted or race condition) ──
+    if _IS_RAILWAY:
+        try:
+            subprocess.Popen(
+                ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            _time.sleep(1.0)
+            # Start x11vnc on the fallback display so it's also watchable
+            subprocess.Popen(
+                ["x11vnc", "-display", ":99",
+                 "-forever", "-nopw", "-listen", "127.0.0.1",
+                 "-rfbport", str(_FALLBACK_VNC_PORT), "-quiet", "-noncache"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            print("[server] Fallback Xvfb :99 + x11vnc started")
+        except Exception as _e:
+            print(f"[server] Warning: could not start fallback Xvfb: {_e}")
+
     # Start polling loop immediately on boot (picks up any PENDING tasks)
     _ensure_polling_thread()
 

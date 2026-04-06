@@ -39,6 +39,16 @@ def fetch_pending_tasks():
         return []
 
 
+def fetch_task(task_id: str) -> dict:
+    """Fetch a single task row by ID (to get the latest input after /trigger patches it)."""
+    url = f"{SUPABASE_URL}/rest/v1/tasks?id=eq.{task_id}&limit=1"
+    response = requests.get(url, headers=HEADERS)
+    if response.status_code == 200:
+        rows = response.json()
+        return rows[0] if rows else {}
+    return {}
+
+
 def fetch_latest_resume(user_id: str):
     """Fetch the most recent resume row for a user (includes content.file_url)."""
     url = f"{SUPABASE_URL}/rest/v1/resumes?user_id=eq.{user_id}&order=created_at.desc&limit=1"
