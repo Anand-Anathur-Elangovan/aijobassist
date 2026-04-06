@@ -142,7 +142,7 @@ def _run_vnc_proxy(ws, port: int):
         vnc = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         vnc.connect(("127.0.0.1", port))
     except Exception as e:
-        print(f"[vnc-ws] Cannot connect to VNC ({_VNC_PORT}): {e}")
+        print(f"[vnc-ws] Cannot connect to VNC ({port}): {e}")
         return
 
     stop = threading.Event()
