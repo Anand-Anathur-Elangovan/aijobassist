@@ -1473,6 +1473,28 @@ def _login(page: Page, task_input: dict = None) -> bool:
                  "⏳ Waiting for LinkedIn login… If a CAPTCHA or verification appears, "
                  "open the VNC screen to complete it manually.",
                  "warning", "system")
+            # ── Telegram alert: notify user to complete login in VNC ──────────
+            try:
+                from automation.notifier import _tg_send, _cfg
+                _tg_token = _cfg(task_input, "telegram_bot_token", "TELEGRAM_BOT_TOKEN")
+                _tg_chat  = _cfg(task_input, "telegram_chat_id",   "TELEGRAM_CHAT_ID")
+                if _tg_token and _tg_chat:
+                    _app_url = (task_input.get("app_url") or
+                                os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
+                    _sid = task_input.get("session_id", "")
+                    _vnc_qs = "path=../vnc-ws&autoconnect=1&resize=scale"
+                    if _sid:
+                        _vnc_qs += f"&session={_sid}"
+                    _login_msg = (
+                        "🔐 <b>LinkedIn login required</b>\n\n"
+                        "The cloud agent is waiting for you to log in to LinkedIn.\n"
+                        "You have <b>3 minutes</b> to complete the login.\n"
+                    )
+                    if _app_url:
+                        _login_msg += f"\n👁 <b>Open VNC to log in:</b>\n{_app_url}/novnc/?{_vnc_qs}\n"
+                    _tg_send(_tg_token, _tg_chat, _login_msg)
+            except Exception as _tge:
+                print(f"  [LINKEDIN] Login Telegram alert failed (non-fatal): {_tge}")
         if not _still_on_login:
             print(f"  [LINKEDIN] Login confirmed ✅  URL: {_url}")
             _save_session()
