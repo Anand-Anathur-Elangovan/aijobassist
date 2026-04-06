@@ -44,7 +44,7 @@ export default function AgentPage() {
   const [railwayStopping,    setRailwayStopping]     = useState(false);
   const [stoppingTask,       setStoppingTask]        = useState(false);
   const [showScreenshot,     setShowScreenshot]      = useState(true);
-  const [cloudAutoScroll, setCloudAutoScroll] = useState(true);
+  const [cloudAutoScroll,    setCloudAutoScroll]    = useState(true);
   const [userProfilePrefs, setUserProfilePrefs] = useState<Record<string, unknown> | null>(null);
   const [taskOutput, setTaskOutput] = useState<Record<string, unknown> | null>(null);
   const logsEndRef        = useRef<HTMLDivElement>(null);
@@ -338,6 +338,11 @@ export default function AgentPage() {
       taskInput.smart_match     = true;
       taskInput.match_threshold = p.match_threshold ?? 70;
     }
+    // Pool cap: always scan 50 for regular users, 150 for admins
+    taskInput.smart_filter = true;
+    // Fully Automated: if false, pass the user's saved additional_keywords through
+    const _fullyAutomated = p.fully_automated !== false;
+    taskInput.additional_keywords = _fullyAutomated ? "" : (pStr("additional_keywords") ?? "");
     if (pVal("schedule_enabled")) {
       taskInput.schedule_start_hour = p.schedule_start_hour;
       taskInput.schedule_end_hour   = p.schedule_end_hour;

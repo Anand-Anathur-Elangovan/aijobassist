@@ -29,7 +29,6 @@ NAUKRI_LOGIN_URL = "https://www.naukri.com"   # login is a drawer on homepage no
 NAV_WAIT         = 3
 MAX_APPLY        = 5
 
-
 # ──────────────────────────────────────────────────────────────
 # Live-logging helper — no-ops gracefully if task_id absent
 # ──────────────────────────────────────────────────────────────
@@ -156,6 +155,8 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
             from automation.ai_client import analyze_resume
             resume_info = analyze_resume(resume_text_raw)
             top_skills  = resume_info.get("skills", [])[:3]
+            # Store skills so title filter can use them later
+            task_input["_resume_skills"] = top_skills
             kw_lower    = keywords.lower()
             additions   = [s for s in top_skills if s.lower() not in kw_lower]
             if additions:
@@ -225,21 +226,22 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
             ] or [""]
 
             # ── Search each keyword × location, collect fresh (unseen) URLs ─
-            _all_jobs: list = []
+            _all_jobs: list[str] = []
             _naukri_specific_urls = task_input.get("specific_urls", [])
             if _naukri_specific_urls:
                 # ── Direct URL mode: skip keyword search ─────────────────
                 _log(task_input, f"Manual URL mode — {len(_naukri_specific_urls)} URL(s) provided", "info", "system", {"count": len(_naukri_specific_urls)})
                 _all_jobs = [u.strip() for u in _naukri_specific_urls if u.strip()]
             else:
-                _dedup: set = set(_seen_urls)      # dedup across keywords + locations
+                _dedup: set = set(_seen_urls)
                 for _kw in _kw_list:
                     for _loc in _loc_list:
                         _loc_tag = f" | 📍{_loc}" if _loc else ""
                         print(f"  [NAUKRI] 🔑 Keyword: '{_kw}'{_loc_tag}")
                         _kw_jobs = _search_jobs(page, _kw, _loc, task_input)
-                        _fresh   = [u for u in _kw_jobs if u not in _dedup]
-                        _dedup.update(_fresh)
+                        _fresh = [u for u in _kw_jobs if u not in _dedup]
+                        for u in _fresh:
+                            _dedup.add(u)
                         _all_jobs.extend(_fresh)
                         print(f"  [NAUKRI]   → {len(_fresh)} fresh job(s) found")
 
@@ -648,34 +650,41 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
     human_sleep(1.5, 2.5)
 
     # ── Collect job links across multiple pages ──────────────
-    max_apply   = int((task_input or {}).get("max_apply", MAX_APPLY))
-    # When smart_match is on, most jobs get skipped — fetch a much larger pool
-    smart_match = (task_input or {}).get("smart_match", False)
-    pool_mult   = 3 if smart_match else 2
-    # Hard cap: 50 job URLs per keyword search (consistent with LinkedIn)
-    SEARCH_POOL_CAP = 50
+    _ti          = task_input or {}
+    max_apply    = int(_ti.get("max_apply", MAX_APPLY))
+    smart_match  = _ti.get("smart_match", False)
+    smart_filter = _ti.get("smart_filter", True)
+    is_admin     = _ti.get("_is_super_admin", False)
+    pool_mult    = 3 if smart_match else 2
+    # Pool cap: admin → 150; filter ON → 50; filter OFF → 25
+    if is_admin:
+        SEARCH_POOL_CAP = 150
+    elif smart_filter:
+        SEARCH_POOL_CAP = 50
+    else:
+        SEARCH_POOL_CAP = 25
     target_pool = min(SEARCH_POOL_CAP, max(max_apply * pool_mult, 20))
-    max_pages   = 4                        # 4 pages × ~20 jobs = ~80 slots; capped at 50 anyway
+    max_pages   = 4
     seen: set   = set()
     job_links: list[str] = []
 
     def _collect_links_from_page() -> list[str]:
-        """Extract deduplicated job listing links from the current page DOM."""
-        found = []
+        """Extract deduplicated job URLs from the current page DOM."""
+        found: list[str] = []
 
-        # Strategy 1: JS evaluate — match /job-listings (covers both /job-listings- and /job-listings/)
+        # Strategy 1: JS — extract job listing URLs
         try:
             raw = page.evaluate(
                 """() => Array.from(document.querySelectorAll('a[href]'))
+                            .filter(a => a.href.includes('naukri.com') && a.href.includes('/job-listings'))
                             .map(a => a.href.split('?')[0].split('#')[0])
-                            .filter(h => h.includes('naukri.com') && h.includes('/job-listings'))
                             .filter((v, i, s) => s.indexOf(v) === i)"""
             )
-            found = [l for l in raw if l]
+            found = [u for u in raw if u]
         except Exception:
             pass
 
-        # Strategy 2: broader JS — any naukri.com link with a numeric ID (job links always have IDs)
+        # Strategy 2: broader JS fallback
         if not found:
             try:
                 raw = page.evaluate(
@@ -1206,7 +1215,7 @@ def _fill_naukri_fields(page: Page, task_input: dict):
                 from automation.ai_client import generate_cover_letter
                 company  = task_input.get("company", "")
                 role     = task_input.get("keywords", "")
-                cl_result = generate_cover_letter(resume_text_for_cl, jd_text_for_cl, company, role)
+                cl_result = generate_cover_letter(resume_text_for_cl, jd_text_for_cl, company, role, quick=True)
                 ai_note   = cl_result.get("intro_message") or cl_result.get("cover_letter", "")
                 if ai_note:
                     cover_note = ai_note

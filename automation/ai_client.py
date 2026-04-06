@@ -686,15 +686,38 @@ def generate_cover_letter(
     jd_text:     str,
     company:     str = "",
     role:        str = "",
+    quick:       bool = False,
 ) -> dict:
     """
     Returns: { cover_letter, intro_message, linkedin_intro, email_subject }
-    Auto-uses Claude Sonnet when ANTHROPIC_API_KEY is set.
+    quick=True  → Haiku, generates only intro_message (2-3 sentences). Used by
+                  automation loops where a short portal note is all that's needed.
+    quick=False → Sonnet, generates full cover letter + all fields. Used by
+                  Resume Studio and Tailoring Apply where quality matters.
     """
     if _has_api_key():
         comp     = company.strip() or "the company"
         role_str = role.strip()    or "this position"
-        prompt = f"""Write professional job application documents for {role_str} at {comp}.
+
+        if quick:
+            # Haiku: short intro note only — fast and cheap for automation loops
+            prompt = f"""Write a 2-3 sentence friendly intro message for a job portal application.
+Role: {role_str} at {comp}.
+Tone: confident, genuine. No filler like "I am writing to express".
+Return ONLY valid JSON: {{"intro_message": "<2-3 sentence intro>"}}
+
+Resume summary (first 800 chars):
+{resume_text[:800]}
+
+Job Description (first 600 chars):
+{jd_text[:600]}"""
+            try:
+                return _call_claude(prompt, max_tokens=256, model=HAIKU_MODEL)
+            except Exception:
+                pass  # fall through to mock
+
+        else:
+            prompt = f"""Write professional job application documents for {role_str} at {comp}.
 Tone: confident, genuine, concise. Do NOT use filler phrases like "I am writing to express".
 
 Return ONLY valid JSON, no prose:
@@ -710,10 +733,10 @@ Resume:
 
 Job Description:
 {jd_text}"""
-        try:
-            return _call_claude(prompt, model=SONNET_MODEL)
-        except Exception:
-            pass  # fall through to mock
+            try:
+                return _call_claude(prompt, model=SONNET_MODEL)
+            except Exception:
+                pass  # fall through to mock
 
     ms       = match_score(resume_text, jd_text)
     skills   = ", ".join(ms["matching_skills"][:3]) or "software engineering"

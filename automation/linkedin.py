@@ -33,7 +33,6 @@ NAV_WAIT           = 3
 # Max jobs to attempt applying to per run (Easy Apply only)
 MAX_APPLY          = 5
 
-
 # ──────────────────────────────────────────────────────────────
 # Retry helpers
 # ──────────────────────────────────────────────────────────────
@@ -545,6 +544,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             from automation.ai_client import analyze_resume
             resume_info = analyze_resume(resume_text_raw)
             top_skills  = resume_info.get("skills", [])[:3]
+            # Store skills so title filter can use them later
+            task_input["_resume_skills"] = top_skills
             # Append skills only if not already present in keywords
             kw_lower = keywords.lower()
             additions = [s for s in top_skills if s.lower() not in kw_lower]
@@ -718,7 +719,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         _log(task_input, f"Searching for '{_kw}'{_loc_tag}…", "info", "search", {"job_title": _kw})
                         general_jobs = _search_jobs(page, _kw, _li_loc, task_input)
                         _log(task_input, f"Found {len(general_jobs)} Easy Apply jobs for '{_kw}'{_loc_tag}", "success", "search", {"job_title": _kw, "count": len(general_jobs)})
-                        all_jobs.extend([(url, "") for url in general_jobs])
+                        for url in general_jobs:
+                            all_jobs.append((url, ""))
 
             # Deduplicate URLs while preserving company order
             seen_urls: set[str] = set()
@@ -913,7 +915,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         _loc_tag = f" in '{_li_loc}'" if _li_loc else " (anywhere)"
                         _log(task_input, f"Extended search '{_kw}'{_loc_tag}…", "info", "search", {"job_title": _kw})
                         extra_links = _search_jobs(page, _kw, _li_loc, task_input)
-                        extra_jobs.extend([(url, "") for url in extra_links])
+                        for url in extra_links:
+                            extra_jobs.append((url, ""))
                 # Deduplicate and remove already-seen
                 for url, hint in extra_jobs:
                     if url not in seen_urls and url not in _li_seen_urls:
@@ -1989,7 +1992,7 @@ def _fill_additional_questions(page: Page, task_input: dict):
         if resume_text_for_cover and jd_text_for_cover:
             try:
                 from automation.ai_client import generate_cover_letter
-                cl_result  = generate_cover_letter(resume_text_for_cover, jd_text_for_cover, company, role)
+                cl_result  = generate_cover_letter(resume_text_for_cover, jd_text_for_cover, company, role, quick=True)
                 cover_note = cl_result.get("intro_message") or cl_result.get("cover_letter", "")
                 if cover_note:
                     print("  [LINKEDIN] ✍️  AI cover letter generated")
@@ -3254,14 +3257,20 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
     base_url = "https://www.linkedin.com/jobs/search/?" + urllib.parse.urlencode(params)
 
     # ── Pagination ─────────────────────────────────────────────────────
-    max_apply   = int(task_input.get("max_apply", MAX_APPLY))
-    # When smart_match is on, most jobs get skipped — fetch a slightly larger pool
-    smart_match = task_input.get("smart_match", False)
-    pool_mult   = 3 if smart_match else 2
-    # Hard cap: 50 job URLs per keyword search (as configured by admin)
-    SEARCH_POOL_CAP = 50
+    max_apply    = int(task_input.get("max_apply", MAX_APPLY))
+    smart_match  = task_input.get("smart_match", False)
+    smart_filter = task_input.get("smart_filter", True)   # title pre-filter toggle
+    is_admin     = task_input.get("_is_super_admin", False)
+    pool_mult    = 3 if smart_match else 2
+    # Pool cap: admin → 150 (testing); filter ON → 50; filter OFF → 25
+    if is_admin:
+        SEARCH_POOL_CAP = 150
+    elif smart_filter:
+        SEARCH_POOL_CAP = 50
+    else:
+        SEARCH_POOL_CAP = 25
     target_pool = min(SEARCH_POOL_CAP, max(max_apply * pool_mult, 20))
-    max_pages   = 4   # 4 pages × 25 jobs = 100 slots max; capped at 50 anyway
+    max_pages   = 4   # 4 pages × 25 jobs = 100 slots max; capped by SEARCH_POOL_CAP
     seen: set   = set()
     job_links: list[str] = []
 

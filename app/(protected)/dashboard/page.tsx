@@ -104,6 +104,8 @@ export default function DashboardPage() {
   const [keywords, setKeywords] = useState("Software Engineer");
   const [keywords2, setKeywords2] = useState("");
   const [keywords3, setKeywords3] = useState("");
+  const [additionalKeywords, setAdditionalKeywords] = useState("");
+  const [fullyAutomated, setFullyAutomated] = useState(true);
   const [locationList, setLocationList] = useState<string[]>([]);
   const [locationInput, setLocationInput] = useState("");
   const [remoteEnabled, setRemoteEnabled] = useState(false);
@@ -294,6 +296,8 @@ export default function DashboardPage() {
         if (p.keywords) setKeywords(p.keywords as string);
         if (p.keywords2 !== undefined) setKeywords2(p.keywords2 as string);
         if (p.keywords3 !== undefined) setKeywords3(p.keywords3 as string);
+        if (p.additional_keywords !== undefined) setAdditionalKeywords(p.additional_keywords as string);
+        if (p.fully_automated !== undefined) setFullyAutomated(p.fully_automated as boolean);
         if (Array.isArray(p.location_list)) setLocationList(p.location_list as string[]);
         if (p.remote_enabled !== undefined) setRemoteEnabled(p.remote_enabled as boolean);
         if (p.max_apply) setMaxApply(String(p.max_apply));
@@ -458,6 +462,8 @@ export default function DashboardPage() {
       keywords: keywords.trim(),
       keywords2: keywords2.trim(),
       keywords3: keywords3.trim(),
+      additional_keywords: additionalKeywords.trim(),
+      fully_automated: fullyAutomated,
       location_list: locationList,
       remote_enabled: remoteEnabled,
       max_apply: Number(maxApply) || 5,
@@ -1913,6 +1919,41 @@ export default function DashboardPage() {
                 onChange={(e) => setKeywords3(e.target.value)}
                 className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
               />
+            </div>
+            <div className="sm:col-span-2 border border-slate-700/60 rounded-lg px-3 py-2.5 bg-slate-800/40 space-y-2.5">
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={fullyAutomated}
+                  onChange={(e) => setFullyAutomated(e.target.checked)}
+                  className="mt-0.5 rounded accent-violet-500"
+                />
+                <div>
+                  <span className="font-mono text-xs text-slate-200 font-medium">Fully Automated</span>
+                  <p className="font-mono text-xs text-slate-500 mt-0.5">
+                    {fullyAutomated
+                      ? "Uses keywords extracted from your resume to find relevant jobs. Best for most users."
+                      : "Adds your custom keywords on top of resume keywords for more targeted results."}
+                  </p>
+                </div>
+              </label>
+              {!fullyAutomated && (
+                <div className="pl-6 border-l border-slate-700">
+                  <label className="block font-mono text-xs text-slate-400 mb-1">
+                    Additional filter keywords <span className="text-slate-500 font-normal">(resume keywords always included)</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. React, TypeScript, AWS, Node.js"
+                    value={additionalKeywords}
+                    onChange={(e) => setAdditionalKeywords(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                  />
+                  <p className="font-mono text-xs text-slate-600 mt-1">
+                    Comma or space separated.
+                  </p>
+                </div>
+              )}
             </div>
             {/* Location widget — full width ─────────────────── */}
             <div className="sm:col-span-2 space-y-2">
