@@ -294,7 +294,9 @@ def _handle_verification(page: Page, task_input: dict) -> bool:
         _hint = "CAPTCHA / image puzzle"
 
     if _is_railway and app_url:
-        _vnc = f"{app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
+        _sid = (task_input or {}).get("session_id", "")
+        _vnc_path = f"../vnc-ws%3Fsession%3D{_sid}" if _sid else "../vnc-ws"
+        _vnc = f"{app_url}/novnc/?path={_vnc_path}&autoconnect=1&resize=scale"
         tg_msg = (
             f"🔐 <b>LinkedIn Verification Required</b>\n\n"
             f"<b>Type:</b> {_hint}\n\n"
@@ -653,10 +655,8 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 ).rstrip("/")
                 if _tg_token and _tg_chat:
                     _sid_param = task_input.get("session_id", "")
-                    _vnc_qs = "path=../vnc-ws&autoconnect=1&resize=scale"
-                    if _sid_param:
-                        _vnc_qs += f"&session={_sid_param}"
-                    _vnc_start = f"{_app_url}/novnc/?{_vnc_qs}" if _app_url else ""
+                    _vnc_path = f"../vnc-ws%3Fsession%3D{_sid_param}" if _sid_param else "../vnc-ws"
+                    _vnc_start = f"{_app_url}/novnc/?path={_vnc_path}&autoconnect=1&resize=scale" if _app_url else ""
                     _start_msg = (
                         f"🚀 <b>Cloud run started on Railway</b>\n\n"
                         f"Logged in to LinkedIn ✅\n"
@@ -1454,7 +1454,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
         "/checkpoint/wam",
         "/challenge/",
     )
-    _deadline = time.time() + 180
+    _deadline = time.time() + 600
     _verif_triggered = False
     _vnc_hint_logged = False
     while time.time() < _deadline:
@@ -1486,14 +1486,17 @@ def _login(page: Page, task_input: dict = None) -> bool:
                         or os.environ.get("NEXT_PUBLIC_APP_URL", "")
                     ).rstrip("/")
                     _sid = task_input.get("session_id", "")
-                    _vnc_qs = "path=../vnc-ws&autoconnect=1&resize=scale"
+                    # Session ID must be inside the path param so noVNC passes it
+                    # to the WebSocket: /vnc-ws?session=ID → routes to correct x11vnc port
                     if _sid:
-                        _vnc_qs += f"&session={_sid}"
-                    _vnc_url = f"{_app_url}/novnc/?{_vnc_qs}" if _app_url else ""
+                        _vnc_path = f"../vnc-ws%3Fsession%3D{_sid}"
+                    else:
+                        _vnc_path = "../vnc-ws"
+                    _vnc_url = f"{_app_url}/novnc/?path={_vnc_path}&autoconnect=1&resize=scale" if _app_url else ""
                     _login_msg = (
                         "🔐 <b>LinkedIn login required</b>\n\n"
                         "The cloud agent is waiting for you to log in to LinkedIn.\n"
-                        "You have <b>3 minutes</b> to complete the login.\n"
+                        "You have <b>10 minutes</b> to complete the login.\n"
                     )
                     if _vnc_url:
                         _login_msg += f"\n👁 <b>Open VNC to log in:</b>\n<a href=\"{_vnc_url}\">{_vnc_url}</a>\n"
@@ -5071,9 +5074,11 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
         _ext_app_url = (os.environ.get("RAILWAY_STATIC_URL", "") or
                         os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
         if _ext_is_rail and _ext_app_url:
-            _ext_vnc = f"{_ext_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
+            _ext_sid = task_input.get("session_id", "")
+            _ext_vnc_path = f"../vnc-ws%3Fsession%3D{_ext_sid}" if _ext_sid else "../vnc-ws"
+            _ext_vnc = f"{_ext_app_url}/novnc/?path={_ext_vnc_path}&autoconnect=1&resize=scale"
             _ext_wait_msg = (
-                f"👆 <b>Action needed</b> — open the live browser to complete it:\n{_ext_vnc}\n\n"
+                f"👆 <b>Action needed</b> — open the live browser to complete it:\n<a href=\"{_ext_vnc}\">{_ext_vnc}</a>\n\n"
                 f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
                 f"⏳ Waiting 10 min…"
             )
@@ -5137,9 +5142,11 @@ def _apply_external_job(page, apply_href: str, task_input: dict) -> bool:
             _exc_app_url = (os.environ.get("RAILWAY_STATIC_URL", "") or
                             os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
             if _exc_is_rail and _exc_app_url:
-                _exc_vnc = f"{_exc_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
+                _exc_sid = task_input.get("session_id", "")
+                _exc_vnc_path = f"../vnc-ws%3Fsession%3D{_exc_sid}" if _exc_sid else "../vnc-ws"
+                _exc_vnc = f"{_exc_app_url}/novnc/?path={_exc_vnc_path}&autoconnect=1&resize=scale"
                 _exc_wait_msg = (
-                    f"👆 <b>Action needed</b> — open the live browser:\n{_exc_vnc}\n\n"
+                    f"👆 <b>Action needed</b> — open the live browser:\n<a href=\"{_exc_vnc}\">{_exc_vnc}</a>\n\n"
                     f"Reply <b>done</b> when submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
                     f"⏳ Waiting 10 min…"
                 )
@@ -5767,12 +5774,14 @@ def _apply_to_job(page: Page, job_url: str, task_input: dict = None) -> bool:
             _ea_app_url   = (os.environ.get("RAILWAY_STATIC_URL", "") or
                              os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
             if _ea_is_rail and _ea_app_url:
-                _ea_vnc = f"{_ea_app_url}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale"
+                _ea_sid = task_input.get("session_id", "")
+                _ea_vnc_path = f"../vnc-ws%3Fsession%3D{_ea_sid}" if _ea_sid else "../vnc-ws"
+                _ea_vnc = f"{_ea_app_url}/novnc/?path={_ea_vnc_path}&autoconnect=1&resize=scale"
                 _ea_msg = (
                     f"⚠️ <b>Easy Apply Stuck — Step {step + 1}</b>\n\n"
                     f"<b>{_ea_company}</b> — {_ea_job_title}\n\n"
                     f"Bot couldn't find the Next / Submit button.\n"
-                    f"👉 <b>Open the live browser to fix it:</b>\n{_ea_vnc}\n\n"
+                    f"👉 <b>Open the live browser to fix it:</b>\n<a href=\"{_ea_vnc}\">{_ea_vnc}</a>\n\n"
                     f"Reply <b>done</b> when you've submitted · <b>skip</b> to skip · <b>stop</b> to stop all\n"
                     f"⏳ Waiting 10 min…"
                 )

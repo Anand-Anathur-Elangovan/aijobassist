@@ -217,12 +217,15 @@ def trigger():
     if alloc:
         display_num, vnc_port = alloc
         display_str = f":{display_num}"
-        # Inject display info into the task's input so automation can use it
+        # Inject display info into the task's input so automation can use it.
+        # Spread data["task_input"] (flat user prefs) — NOT raw data (which would
+        # nest all prefs under a "task_input" key and break the bot).
+        _task_prefs = data.get("task_input") or {}
         _req.patch(
             f"{SUPABASE_URL}/rest/v1/tasks?id=eq.{task_id}",
             headers={**HEADERS, "Prefer": "return=minimal"},
             json={"input": {
-                **data,
+                **_task_prefs,
                 "session_id":      session_id,
                 "session_display": display_str,
                 "vnc_port":        vnc_port,

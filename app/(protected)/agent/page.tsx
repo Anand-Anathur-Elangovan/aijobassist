@@ -1010,7 +1010,7 @@ export default function AgentPage() {
               {/* Live VNC screen button — only while running */}
               {railwayStatus === "running" && (
                 <a
-                  href={`${process.env.NEXT_PUBLIC_RAILWAY_SERVICE_URL || "https://aijobassist-production.up.railway.app"}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale${railwaySessionId ? `&session=${railwaySessionId}` : ""}`}
+                  href={`${process.env.NEXT_PUBLIC_RAILWAY_SERVICE_URL || "https://aijobassist-production.up.railway.app"}/novnc/?path=${railwaySessionId ? `..%2Fvnc-ws%3Fsession%3D${railwaySessionId}` : "../vnc-ws"}&autoconnect=1&resize=scale`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="px-3 py-1.5 text-xs font-medium border border-violet-500/40 text-violet-300 hover:bg-violet-500/10 rounded-lg transition-colors"
@@ -1056,7 +1056,7 @@ export default function AgentPage() {
                 </span>
               </div>
               <a
-                href={`${process.env.NEXT_PUBLIC_RAILWAY_SERVICE_URL || "https://aijobassist-production.up.railway.app"}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale${railwaySessionId ? `&session=${railwaySessionId}` : ""}`}
+                href={`${process.env.NEXT_PUBLIC_RAILWAY_SERVICE_URL || "https://aijobassist-production.up.railway.app"}/novnc/?path=${railwaySessionId ? `..%2Fvnc-ws%3Fsession%3D${railwaySessionId}` : "../vnc-ws"}&autoconnect=1&resize=scale`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="shrink-0 px-3 py-1.5 text-xs font-semibold bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition-colors"
