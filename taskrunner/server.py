@@ -15,7 +15,7 @@ import threading
 import time as _time
 import requests as _req
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, redirect
 from flask_sock import Sock
 
 # ── Path setup ──────────────────────────────────────────────
@@ -130,7 +130,7 @@ def vnc_static(path):
 @app.route("/vnc/", defaults={"path": ""})
 @app.route("/vnc/<path:path>")
 def vnc_legacy_redirect(path):
-    return app.redirect(f"/novnc/{path}" if path else "/novnc/")
+    return redirect(f"/novnc/{path}" if path else "/novnc/")
 
 
 def _run_vnc_proxy(ws, port: int):
