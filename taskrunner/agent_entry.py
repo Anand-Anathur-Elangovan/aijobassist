@@ -152,14 +152,76 @@ def main():
     os.environ["SUPABASE_URL"] = config.get("supabase_url", SUPABASE_URL)
     os.environ["AGENT_USER_ID"] = user_id
 
-    # Point Playwright to system-installed browsers (not the .exe temp dir)
+    # ── Fix 1: Persist sessions in a stable directory (not the PyInstaller temp dir) ──
+    if not os.environ.get("SESSION_DIR"):
+        stable_sessions = os.path.join(CONFIG_DIR, "sessions")
+        os.makedirs(stable_sessions, exist_ok=True)
+        os.environ["SESSION_DIR"] = stable_sessions
+
+    # ── Fix 2: Point Playwright to system browsers (not the exe temp dir) ──────────
+    import subprocess
+
+    def _chromium_installed(pw_path: str) -> bool:
+        """Return True if any chromium-* build has chrome.exe inside pw_path."""
+        if not os.path.isdir(pw_path):
+            return False
+        for entry in os.scandir(pw_path):
+            if entry.is_dir() and entry.name.startswith("chromium-"):
+                exe = os.path.join(entry.path, "chrome-win", "chrome.exe")
+                if os.path.isfile(exe):
+                    return True
+        return False
+
+    def _install_chromium(pw_path: str) -> bool:
+        """Try to install Playwright Chromium. Returns True on success."""
+        # When frozen by PyInstaller sys.executable is the .exe — find real Python instead.
+        candidates = []
+        if not getattr(sys, "frozen", False):
+            candidates.append(sys.executable)        # normal Python run
+        # Common system Python locations on Windows
+        for base in [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Python"),
+            "C:\\Python312", "C:\\Python311", "C:\\Python310",
+        ]:
+            if os.path.isdir(base):
+                for sub in sorted(os.listdir(base), reverse=True):
+                    py = os.path.join(base, sub, "python.exe")
+                    if os.path.isfile(py):
+                        candidates.append(py)
+        # Also try `playwright` directly from PATH (works when pip-installed globally)
+        for cmd in [["playwright", "install", "chromium"],
+                    *[[py, "-m", "playwright", "install", "chromium"] for py in candidates]]:
+            try:
+                env = os.environ.copy()
+                env["PLAYWRIGHT_BROWSERS_PATH"] = pw_path
+                r = subprocess.run(cmd, env=env)
+                if r.returncode == 0 and _chromium_installed(pw_path):
+                    return True
+            except FileNotFoundError:
+                continue
+        return False
+
     if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
         default_pw = os.path.join(os.path.expanduser("~"), "AppData", "Local", "ms-playwright")
-        if os.path.isdir(default_pw):
+        if _chromium_installed(default_pw):
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_pw
         else:
-            print("  ⚠ Playwright browsers not found. Run: playwright install")
-            print(f"    Expected at: {default_pw}")
+            print()
+            print("  ⚠ Chromium not found — installing now (one-time, ~1 min)...")
+            print()
+            if _install_chromium(default_pw):
+                print("  ✓ Chromium installed successfully.")
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_pw
+            else:
+                print()
+                print("  ✗ Auto-install failed. Please open a terminal and run:")
+                print()
+                print("      pip install playwright")
+                print("      playwright install chromium")
+                print()
+                print("  Then restart the agent.")
+                input("  Press Enter to exit...")
+                sys.exit(1)
 
     # Now start the actual task runner
     print()

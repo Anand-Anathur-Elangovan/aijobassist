@@ -298,7 +298,7 @@ def _handle_verification(page: Page, task_input: dict) -> bool:
         tg_msg = (
             f"🔐 <b>LinkedIn Verification Required</b>\n\n"
             f"<b>Type:</b> {_hint}\n\n"
-            f"👉 <b>Open the live browser:</b>\n{_vnc}\n\n"
+            f"👉 <b>Open the live browser:</b>\n<a href=\"{_vnc}\">{_vnc}</a>\n\n"
             f"Complete the check — I'll detect it and resume automatically.\n"
             f"Or reply <b>skip</b> to skip · <b>stop</b> to stop all.\n"
             f"⏳ Waiting up to <b>10 minutes</b>."
@@ -647,11 +647,13 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 from automation.notifier import _tg_send, _cfg
                 _tg_token = _cfg(task_input, "telegram_bot_token", "TELEGRAM_BOT_TOKEN")
                 _tg_chat  = _cfg(task_input, "telegram_chat_id",   "TELEGRAM_CHAT_ID")
-                _app_url  = (task_input.get("app_url") or
-                             os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
+                _app_url  = (
+                    os.environ.get("RAILWAY_STATIC_URL", "")
+                    or os.environ.get("NEXT_PUBLIC_APP_URL", "")
+                ).rstrip("/")
                 if _tg_token and _tg_chat:
                     _sid_param = task_input.get("session_id", "")
-                    _vnc_qs = f"path=../vnc-ws&autoconnect=1&resize=scale"
+                    _vnc_qs = "path=../vnc-ws&autoconnect=1&resize=scale"
                     if _sid_param:
                         _vnc_qs += f"&session={_sid_param}"
                     _vnc_start = f"{_app_url}/novnc/?{_vnc_qs}" if _app_url else ""
@@ -661,7 +663,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         f"Searching for: <b>{task_input.get('keywords', 'Software Engineer')}</b>\n"
                     )
                     if _vnc_start:
-                        _start_msg += f"\n👁 <b>Watch live:</b>\n{_vnc_start}\n"
+                        _start_msg += f"\n👁 <b>Watch live:</b>\n<a href=\"{_vnc_start}\">{_vnc_start}</a>\n"
                     _tg_send(_tg_token, _tg_chat, _start_msg)
             except Exception as _sne:
                 print(f"  [LINKEDIN] Start notification error (non-fatal): {_sne}")
@@ -1479,19 +1481,22 @@ def _login(page: Page, task_input: dict = None) -> bool:
                 _tg_token = _cfg(task_input, "telegram_bot_token", "TELEGRAM_BOT_TOKEN")
                 _tg_chat  = _cfg(task_input, "telegram_chat_id",   "TELEGRAM_CHAT_ID")
                 if _tg_token and _tg_chat:
-                    _app_url = (task_input.get("app_url") or
-                                os.environ.get("NEXT_PUBLIC_APP_URL", "")).rstrip("/")
+                    _app_url = (
+                        os.environ.get("RAILWAY_STATIC_URL", "")
+                        or os.environ.get("NEXT_PUBLIC_APP_URL", "")
+                    ).rstrip("/")
                     _sid = task_input.get("session_id", "")
                     _vnc_qs = "path=../vnc-ws&autoconnect=1&resize=scale"
                     if _sid:
                         _vnc_qs += f"&session={_sid}"
+                    _vnc_url = f"{_app_url}/novnc/?{_vnc_qs}" if _app_url else ""
                     _login_msg = (
                         "🔐 <b>LinkedIn login required</b>\n\n"
                         "The cloud agent is waiting for you to log in to LinkedIn.\n"
                         "You have <b>3 minutes</b> to complete the login.\n"
                     )
-                    if _app_url:
-                        _login_msg += f"\n👁 <b>Open VNC to log in:</b>\n{_app_url}/novnc/?{_vnc_qs}\n"
+                    if _vnc_url:
+                        _login_msg += f"\n👁 <b>Open VNC to log in:</b>\n<a href=\"{_vnc_url}\">{_vnc_url}</a>\n"
                     _tg_send(_tg_token, _tg_chat, _login_msg)
             except Exception as _tge:
                 print(f"  [LINKEDIN] Login Telegram alert failed (non-fatal): {_tge}")

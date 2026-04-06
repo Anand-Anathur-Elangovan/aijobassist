@@ -195,7 +195,7 @@ export default function AgentPage() {
     const used = Number(usageRow?.minutes_used ?? 0);
 
     if (isAdmin) {
-      setRailwayQuota({ used, limit: 120, remaining: Math.max(0, 120 - used) });
+      setRailwayQuota({ used, limit: 9999, remaining: 9999 });
     } else {
       const { data: sub } = await supabase
         .from("subscriptions")
@@ -1045,6 +1045,26 @@ export default function AgentPage() {
               )}
             </div>
           </div>
+
+          {/* VNC link banner — prominent, always visible while running */}
+          {railwayStatus === "running" && (
+            <div className="mx-4 mt-3 mb-1 flex items-center justify-between gap-3 bg-violet-500/10 border border-violet-500/30 rounded-lg px-4 py-2.5">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-violet-400 text-base shrink-0">👁</span>
+                <span className="text-xs text-slate-300 truncate">
+                  <span className="font-semibold text-violet-300">Live browser</span> — open VNC to interact (login, CAPTCHA, verification)
+                </span>
+              </div>
+              <a
+                href={`${process.env.NEXT_PUBLIC_RAILWAY_SERVICE_URL || "https://aijobassist-production.up.railway.app"}/novnc/?path=../vnc-ws&autoconnect=1&resize=scale${railwaySessionId ? `&session=${railwaySessionId}` : ""}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="shrink-0 px-3 py-1.5 text-xs font-semibold bg-violet-600 hover:bg-violet-500 text-white rounded-lg transition-colors"
+              >
+                Open VNC →
+              </a>
+            </div>
+          )}
 
           {/* Screenshot + logs side-by-side */}
           <div className={`grid gap-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-800 ${showScreenshot ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>

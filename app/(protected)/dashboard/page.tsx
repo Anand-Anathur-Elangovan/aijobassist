@@ -822,6 +822,14 @@ export default function DashboardPage() {
       .eq("usage_date", today)
       .maybeSingle();
     const used = Number(usageRow?.minutes_used ?? 0);
+
+    const SUPER_ADMIN_EMAILS = ["kaviyasaravanan01@gmail.com", "anandanathurelangovan94@gmail.com"];
+    const isAdmin = SUPER_ADMIN_EMAILS.includes((user.email ?? "").toLowerCase());
+    if (isAdmin) {
+      setRailwayQuota({ used, limit: 9999, remaining: 9999 });
+      return;
+    }
+
     const { data: sub } = await supabase
       .from("subscriptions")
       .select("plan_id")
