@@ -336,12 +336,14 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                     _jt = task_input.get("_page_job_title", "")
                     _log(task_input, f"⏭ Skipped — {_company_from_url(job_url)} [{_skip_reason}] ({skipped} total)", "skip", "skip", {"url": job_url, "skip_reason": _skip_reason, "company": _company_from_url(job_url), "job_title": _jt})
                     _report.append({
-                        "company":     task_input.get("_page_company") or _company_from_url(job_url) or "—",
-                        "job_title":   _jt or "—",
-                        "url":         job_url,
-                        "score":       task_input.get("_last_match_score"),
-                        "status":      "skipped",
-                        "skip_reason": _skip_reason,
+                        "company":         task_input.get("_page_company") or _company_from_url(job_url) or "—",
+                        "job_title":       _jt or "—",
+                        "url":             job_url,
+                        "score":           task_input.get("_last_match_score"),
+                        "status":          "skipped",
+                        "skip_reason":     _skip_reason,
+                        "resume_url":      task_input.get("resume_url", ""),
+                        "resume_filename": task_input.get("resume_filename", "resume.pdf"),
                     })
 
             if applied < max_apply and skipped > 0:
@@ -365,6 +367,9 @@ def apply_naukri_jobs(task_input: dict = None) -> dict:
                     "duration_minutes": _nk_duration,
                     "manual_jobs":      _nk_sstats.get("manual_jobs", []),
                     "jobs":             _report,
+                    "resume_url":       task_input.get("resume_url", ""),
+                    "resume_filename":  task_input.get("resume_filename", "resume.pdf"),
+                    "redirect_blocked": False,
                 })
             except Exception as _sne:
                 print(f"  [NOTIFY] Summary notification failed: {_sne}")

@@ -331,14 +331,14 @@ def _build_summary_tg(stats: dict) -> str:
         parts.append(f"⏱  Duration              : <b>{duration} min</b>")
     parts.append(f"🕐 Completed             : {_now_str()}")
 
-    # Per-job details (score + link + status)
+    # Per-job details (score + link + status) — full list, no cap
     if jobs:
         applied_jobs = [j for j in jobs if j.get("status") == "applied"]
         skipped_jobs = [j for j in jobs if j.get("status") == "skipped"]
 
         if applied_jobs:
-            parts += ["", "✅ <b>Applied Jobs:</b>"]
-            for j in applied_jobs[:12]:
+            parts += ["", f"✅ <b>Applied Jobs ({len(applied_jobs)}):</b>"]
+            for j in applied_jobs:
                 co    = _esc_tg(j.get("company",   "?") or "?")
                 jt    = _esc_tg(j.get("job_title", "?") or "?")
                 url   = j.get("url", "")
@@ -350,25 +350,32 @@ def _build_summary_tg(stats: dict) -> str:
                     parts.append(f'{icon} <a href="{url}">{co} — {jt}</a>{score_str}')
                 else:
                     parts.append(f'{icon} {co} — {jt}{score_str}')
-                # Per-job resume link: tailored takes priority over original
-                _job_resume = j.get("tailored_resume_url") or j.get("resume_url") or ""
-                _job_fname  = j.get("resume_filename", "resume.pdf")
+                # Resume: tailored takes priority over original
+                _job_resume = j.get("tailored_resume_url") or j.get("resume_url") or resume_url
+                _job_fname  = j.get("resume_filename") or resume_name
                 _label      = "Tailored resume" if j.get("tailored_resume_url") else "Resume used"
                 if _job_resume:
                     parts.append(f'   📄 <a href="{_job_resume}">{_label}: {_esc_tg(_job_fname)}</a>')
-            if len(applied_jobs) > 12:
-                parts.append(f"   … and {len(applied_jobs) - 12} more (see email)")
 
         if skipped_jobs:
-            parts += ["", "⏭️ <b>Skipped Jobs:</b>"]
-            for j in skipped_jobs[:8]:
+            parts += ["", f"⏭️ <b>Skipped Jobs ({len(skipped_jobs)}):</b>"]
+            for j in skipped_jobs:
                 co     = _esc_tg(j.get("company",   "?") or "?")
                 jt     = _esc_tg(j.get("job_title", "?") or "?")
+                url    = j.get("url", "")
                 score  = j.get("score")
                 reason = _esc_tg(j.get("skip_reason", "") or "")
-                score_str  = f" | {score}%" if score is not None else ""
+                score_str  = f" | <b>{score}%</b>" if score is not None else ""
                 reason_str = f" ({reason})" if reason else ""
-                parts.append(f"⏭ {co} — {jt}{score_str}{reason_str}")
+                if url:
+                    parts.append(f'⏭ <a href="{url}">{co} — {jt}</a>{score_str}{reason_str}')
+                else:
+                    parts.append(f'⏭ {co} — {jt}{score_str}{reason_str}')
+                # Resume used for scoring
+                _job_resume = j.get("resume_url") or resume_url
+                _job_fname  = j.get("resume_filename") or resume_name
+                if _job_resume:
+                    parts.append(f'   📄 <a href="{_job_resume}">Resume scored: {_esc_tg(_job_fname)}</a>')
 
     if manual_jobs:
         parts += ["", "📌 <b>Tap a link to open &amp; complete:</b>"]
@@ -380,8 +387,21 @@ def _build_summary_tg(stats: dict) -> str:
         if len(manual_jobs) > 15:
             parts.append(f"   … and {len(manual_jobs) - 15} more (see email)")
 
+    # Session-level resume footer (shown when no per-job resume links were rendered)
+    if resume_url and not jobs:
+        parts += ["", f'📄 <b>Resume used:</b> <a href="{resume_url}">{_esc_tg(resume_name)}</a>']
+
     if applied == 0 and manual == 0:
-        parts += ["", "ℹ️ <i>No jobs processed this session.</i>"]
+        if stats.get("redirect_blocked"):
+            parts += [
+                "",
+                "⚠️ <b>LinkedIn blocked automated search (bot detection).</b>",
+                "ℹ️ <i>Every job search was redirected back to the feed before any jobs could be collected. "
+                "This usually happens after a browser crash or rapid repeated searches. "
+                "Wait a few hours and retry, or check if your LinkedIn session is still active.</i>",
+            ]
+        else:
+            parts += ["", "ℹ️ <i>No jobs processed this session.</i>"]
     elif manual > 0:
         parts += ["", "⚠️ <i>Tap each link above, paste the answers from earlier alerts, and submit!</i>"]
 

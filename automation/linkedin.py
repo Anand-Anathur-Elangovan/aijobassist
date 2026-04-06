@@ -779,7 +779,17 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         page = context.new_page()
                         inject_stealth(page)
                         _crashed = _attach_crash_handler(page)
-                        print("  [LINKEDIN] ✅ New page created — resuming from next job")
+                        # Re-seed session on new page — without this, LinkedIn redirects
+                        # every subsequent /jobs/search/ back to /feed/ (bot detection)
+                        try:
+                            page.goto("https://www.linkedin.com/feed/",
+                                      wait_until="domcontentloaded", timeout=30_000)
+                            human_sleep(3, 5)
+                        except Exception:
+                            pass
+                        if _is_session_expired(page):
+                            raise RuntimeError("Session expired after crash recovery")
+                        print("  [LINKEDIN] ✅ New page created and session re-verified — resuming from next job")
                     except Exception as _ce:
                         raise RuntimeError(f"Chromium crashed and page recovery failed: {_ce}")
 
@@ -894,13 +904,15 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     _r_job_title = task_input.get("_page_job_title") or "—"
                     _log(task_input, f"⏭ Skipped — {_r_company} ({skipped} total)", "skip", "skip", {"company": _r_company, "url": job_url, "job_title": _r_job_title})
                     _report.append({
-                        "company":     _r_company,
-                        "job_title":   _r_job_title,
-                        "url":         job_url,
-                        "score":       task_input.get("_last_match_score"),
-                        "status":      "skipped",
-                        "apply_type":  task_input.get("_last_apply_type", ""),
-                        "skip_reason": task_input.get("_last_skip_reason", ""),
+                        "company":          _r_company,
+                        "job_title":        _r_job_title,
+                        "url":              job_url,
+                        "score":            task_input.get("_last_match_score"),
+                        "status":           "skipped",
+                        "apply_type":       task_input.get("_last_apply_type", ""),
+                        "skip_reason":      task_input.get("_last_skip_reason", ""),
+                        "resume_url":       task_input.get("resume_url", ""),
+                        "resume_filename":  task_input.get("resume_filename", "resume.pdf"),
                     })
             else:
                 # The for loop finished without break → pool exhausted
@@ -969,13 +981,16 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                 else:
                                     _sstats2["easy_applied"] = _sstats2.get("easy_applied", 0) + 1
                                 _report.append({
-                                    "company":     _er_company,
-                                    "job_title":   _er_job_title,
-                                    "url":         ej_url,
-                                    "score":       task_input.get("_last_match_score"),
-                                    "status":      "applied",
-                                    "apply_type":  _er_apply_type,
-                                    "skip_reason": "",
+                                    "company":             _er_company,
+                                    "job_title":           _er_job_title,
+                                    "url":                 ej_url,
+                                    "score":               task_input.get("_last_match_score"),
+                                    "status":              "applied",
+                                    "apply_type":          _er_apply_type,
+                                    "skip_reason":         "",
+                                    "tailored_resume_url": task_input.get("_tailored_resume_url", ""),
+                                    "resume_url":          task_input.get("resume_url", ""),
+                                    "resume_filename":     task_input.get("resume_filename", "resume.pdf"),
                                 })
                             else:
                                 skipped += 1
@@ -983,13 +998,15 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                 _er_job_title = task_input.get("_page_job_title") or "—"
                                 _log(task_input, f"⏭ Skipped — {_er_company} ({skipped} total)", "skip", "skip", {"url": ej_url, "job_title": _er_job_title})
                                 _report.append({
-                                    "company":     _er_company,
-                                    "job_title":   _er_job_title,
-                                    "url":         ej_url,
-                                    "score":       task_input.get("_last_match_score"),
-                                    "status":      "skipped",
-                                    "apply_type":  task_input.get("_last_apply_type", ""),
-                                    "skip_reason": task_input.get("_last_skip_reason", ""),
+                                    "company":         _er_company,
+                                    "job_title":       _er_job_title,
+                                    "url":             ej_url,
+                                    "score":           task_input.get("_last_match_score"),
+                                    "status":          "skipped",
+                                    "apply_type":      task_input.get("_last_apply_type", ""),
+                                    "skip_reason":     task_input.get("_last_skip_reason", ""),
+                                    "resume_url":      task_input.get("resume_url", ""),
+                                    "resume_filename": task_input.get("resume_filename", "resume.pdf"),
                                 })
 
             _set_progress(task_input, 100)
@@ -1012,6 +1029,7 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     "jobs":               _report,
                     "resume_url":         task_input.get("resume_url", ""),
                     "resume_filename":    task_input.get("resume_filename", "resume.pdf"),
+                    "redirect_blocked":   task_input.get("_redirect_blocked", False),
                 })
             except Exception as _sne:
                 print(f"  [NOTIFY] Summary notification failed: {_sne}")
@@ -3315,9 +3333,24 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
         # Verify we actually landed on a jobs page, not the homepage/feed
         _landed = page.url or ""
         if "/jobs/" not in _landed:
-            print(f"  [LINKEDIN] ⚠️ Redirected away from jobs search (landed: {_landed[:80]}). "
-                  f"Session may have expired — stopping search.")
-            break
+            print(f"  [LINKEDIN] ⚠️ Redirected to {_landed[:60]} — cooling down and retrying once…")
+            try:
+                page.goto("https://www.linkedin.com/feed/",
+                          wait_until="domcontentloaded", timeout=30_000)
+            except Exception:
+                pass
+            human_sleep(6, 12)
+            if not _safe_goto(page, search_url):
+                print("  [LINKEDIN] ⚠️ Retry navigation failed — stopping search (bot detection likely)")
+                task_input["_redirect_blocked"] = True
+                break
+            human_sleep(NAV_WAIT + 1, NAV_WAIT + 3)
+            _landed = page.url or ""
+            if "/jobs/" not in _landed:
+                print(f"  [LINKEDIN] ⚠️ Still redirected after retry (landed: {_landed[:80]}). "
+                      f"Stopping search — LinkedIn is blocking automated search.")
+                task_input["_redirect_blocked"] = True
+                break
         human_scroll_down(page, steps=random.randint(2, 4))   # browse-style scroll
 
         before = len(job_links)
