@@ -781,6 +781,30 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
 
             _set_progress(task_input, 5)
 
+            # ── Recycle page before apply loop ────────────────────────────────
+            # The search phase builds up a large JS heap (job cards, React SPA
+            # state, event listeners). If we reuse that page for the apply loop
+            # the renderer is already near the OOM limit before we open the first
+            # job page — causing the Easy Apply modal crash (Error code 9).
+            # Fix: close the search page, open a fresh renderer, navigate to
+            # about:blank to confirm the new page works, then proceed.
+            # context.route(_abort_images) already covers the new page — no need
+            # to re-register it.
+            if not _li_specific_urls_mode:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                page = context.new_page()
+                inject_stealth(page)
+                _crashed = _attach_crash_handler(page)
+                try:
+                    page.goto("about:blank", wait_until="commit", timeout=10_000)
+                except Exception:
+                    pass
+                print("  [LINKEDIN] 🔄 Search page recycled — fresh renderer ready for apply loop")
+                _log(task_input, "🔄 Search page recycled — fresh renderer ready for apply loop", "info", "system")
+
             # ── STEP 3: Apply ──────────────────────────────────
             applied  = 0
             skipped  = 0
