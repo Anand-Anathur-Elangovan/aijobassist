@@ -215,8 +215,12 @@ def _wait_for_resolution(page: Page, task_input: dict, tg_message: str,
     last_upd = _get_telegram_update_offset(bot_token, chat_id)
 
     deadline = time.time() + wait_minutes * 60
+    _iter = 0
     while time.time() < deadline:
-        time.sleep(5)
+        # First 3 iterations: poll every 2 s (fast initial detection)
+        # Subsequent iterations: poll every 5 s (normal cadence)
+        time.sleep(2 if _iter < 3 else 5)
+        _iter += 1
 
         # ── Telegram reply check ─────────────────────────────────
         if bot_token and chat_id:
@@ -701,6 +705,33 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             # ── Direct URL mode: skip keyword search if specific_urls provided ──
             _li_specific_urls_mode = bool(task_input.get("specific_urls", []))
 
+            # ── Block images / media / fonts during SEARCH to save memory ────
+            # LinkedIn job search pages are image-heavy. Blocking these resource
+            # types during the collection phase prevents the renderer from OOM-crashing
+            # before we even start applying. We unblock after search is done.
+            def _abort_media(route):
+                try:
+                    route.abort()
+                except Exception:
+                    pass
+
+            _SEARCH_BLOCK_TYPES = {"image", "media", "font"}
+
+            def _block_heavy_resources(rt):
+                if rt.request.resource_type in _SEARCH_BLOCK_TYPES:
+                    _abort_media(rt)
+                else:
+                    try:
+                        rt.continue_()
+                    except Exception:
+                        pass
+
+            try:
+                page.route("**/*", _block_heavy_resources)
+                print("  [LINKEDIN] 🔇 Resource blocking active (images/media/fonts) during search")
+            except Exception as _rte:
+                print(f"  [LINKEDIN] Route block setup failed (non-fatal): {_rte}")
+
             if favorite_companies and not _li_specific_urls_mode:
                 _log(task_input, f"🏢 Targeting {len(favorite_companies)} favourite companies: {', '.join(favorite_companies)}", "info", "search", {"count": len(favorite_companies)})
                 for company in favorite_companies:
@@ -723,6 +754,26 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         _log(task_input, f"Found {len(general_jobs)} Easy Apply jobs for '{_kw}'{_loc_tag}", "success", "search", {"job_title": _kw, "count": len(general_jobs)})
                         for url in general_jobs:
                             all_jobs.append((url, ""))
+
+            # ── Unblock resources and recycle page before apply phase ──────────
+            # Remove the route interception so apply pages load fully (images matter
+            # for form-fill UX), then recycle the page to flush search memory.
+            try:
+                page.unroute_all()
+                print("  [LINKEDIN] ✅ Resource blocking removed for apply phase")
+            except Exception:
+                pass
+            try:
+                page.close()
+                page = context.new_page()
+                inject_stealth(page)
+                _crashed = _attach_crash_handler(page)
+                page.goto("https://www.linkedin.com/feed/",
+                          wait_until="domcontentloaded", timeout=30_000)
+                human_sleep(2, 3)
+                print("  [LINKEDIN] ♻️  Page recycled after search — memory flushed before apply loop")
+            except Exception as _pre:
+                print(f"  [LINKEDIN] Pre-apply page recycle failed (non-fatal): {_pre}")
 
             # Deduplicate URLs while preserving company order
             seen_urls: set[str] = set()
@@ -776,6 +827,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 if _crashed[0]:
                     print("  [LINKEDIN] ⚠️  Crash detected — attempting page recovery…")
                     try:
+                        # Close the crashed page FIRST to release renderer memory
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
                         page = context.new_page()
                         inject_stealth(page)
                         _crashed = _attach_crash_handler(page)
@@ -858,6 +914,26 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     page.goto("about:blank", timeout=5000)
                 except Exception:
                     pass
+                # ── Recycle the page every 3 jobs to flush renderer memory ──
+                # Chrome's renderer accumulates JS heap / DOM nodes across navigations
+                # even after going to about:blank.  Closing and reopening the page
+                # fully resets the renderer process and prevents OOM on Railway.
+                if (idx + 1) % 3 == 0:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                    try:
+                        page = context.new_page()
+                        inject_stealth(page)
+                        _crashed = _attach_crash_handler(page)
+                        # Warm up session context so LinkedIn doesn't flag the new renderer
+                        page.goto("https://www.linkedin.com/feed/",
+                                  wait_until="domcontentloaded", timeout=30_000)
+                        human_sleep(2, 3)
+                        print(f"  [LINKEDIN] ♻️  Page recycled after {idx + 1} jobs (memory cleanup)")
+                    except Exception as _rec_err:
+                        print(f"  [LINKEDIN] Page recycle failed (non-fatal): {_rec_err}")
                 # Record to job history DB (won't revisit for 30 days)
                 if _li_user_id:
                     try:
@@ -1532,12 +1608,34 @@ def _login(page: Page, task_input: dict = None) -> bool:
         print(f"  [LINKEDIN] Login timed out. Final URL: {page.url}")
         return False
 
-    # _login_result == "resolved" (URL changed) or "skip" treated as best-effort continue
-    # Check whether a verification challenge is now showing
-    try:
-        _url_after_login = page.url or ""
-    except Exception:
-        _url_after_login = ""
+    # _login_result == "resolved" (URL changed or user replied "done") or "skip"
+    # ── Wait for the URL to fully leave the login/checkpoint pages (up to 20 s) ──
+    # This handles the race where the user replied "done" a moment before the
+    # browser finished its redirect, or the URL auto-detection fired slightly
+    # before the final URL settled.
+    _BLOCKED_MARKERS = (
+        "linkedin.com/login",
+        "linkedin.com/checkpoint",
+        "/uas/login",
+    )
+    _url_after_login = ""
+    _settle_deadline = time.time() + 20
+    while time.time() < _settle_deadline:
+        try:
+            _url_after_login = page.url or ""
+        except Exception:
+            time.sleep(1)
+            continue
+        _is_login_url = any(m in _url_after_login for m in _BLOCKED_MARKERS)
+        if not _is_login_url and _url_after_login and "about:blank" not in _url_after_login:
+            break  # URL has left all login/checkpoint pages
+        time.sleep(1)
+    else:
+        # Still on login page after 20 s — check one last time
+        try:
+            _url_after_login = page.url or ""
+        except Exception:
+            _url_after_login = ""
 
     if any(m in _url_after_login for m in _REAL_CHALLENGE_MARKERS):
         # LinkedIn popped up a 2FA / CAPTCHA / push-notification challenge
@@ -1552,11 +1650,7 @@ def _login(page: Page, task_input: dict = None) -> bool:
                  "error", "system")
             return False
 
-    _still_on_login_final = (
-        "linkedin.com/login" in _url_after_login or
-        "linkedin.com/checkpoint" in _url_after_login or
-        "/uas/login" in _url_after_login
-    )
+    _still_on_login_final = any(m in _url_after_login for m in _BLOCKED_MARKERS)
     if _still_on_login_final:
         _log(task_input,
              "⚠️ Still on LinkedIn login page after wait — login may have failed. "

@@ -631,6 +631,16 @@ def stealth_launch_args() -> list:
         "--metrics-recording-only",
         "--mute-audio",
         "--safebrowsing-disable-auto-update",
+        # ── Memory / OOM prevention (critical on Railway containers) ──
+        "--disable-cache",
+        "--disk-cache-size=1",
+        "--media-cache-size=1",
+        "--aggressive-cache-discard",
+        "--disable-application-cache",
+        "--renderer-process-limit=1",
+        "--disable-logging",
+        "--disable-hang-monitor",
+        "--js-flags=--max-old-space-size=768",
     ]
 
 
