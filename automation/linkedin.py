@@ -645,42 +645,26 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 _log(task_input, "Login failed or cancelled", "error")
                 return {"applied_count": 0, "skipped_count": 0, "message": "Login failed or cancelled"}
 
-            # ── Immediately halt /feed/ background loading to prevent OOM crash ──
-            # _login() uses wait_until="domcontentloaded" which returns as soon as
-            # the HTML is parsed — but the browser KEEPS loading images, videos and
-            # ads in the background.  window.stop() cancels all pending resource
-            # fetches instantly, cutting memory pressure before it builds up.
+            # ── Halt /feed/ background loading to prevent OOM crash ─────────────
             try:
                 page.evaluate("window.stop()")
             except Exception:
                 pass
 
-            # Dismiss the "LinkedIn respects your privacy" cookie consent banner
-            # immediately — it appears on /feed/ and adds extra memory pressure.
-            _dismiss_cookie_banner(page, task_input)
-
-            # Give the async crash event up to 2 s to propagate if the feed page
-            # was already dying from the resource load before window.stop() fired.
-            page.wait_for_timeout(2000)
-
-            # If the page already crashed during the login/feed load, recover now
-            # with a fresh lightweight page rather than trying to use the dead page.
-            if _crashed[0]:
-                _log(task_input,
-                     "Page crashed during login flow — recovering with fresh page before search",
-                     "warning", "system")
-                try:
-                    page.close()
-                except Exception:
-                    pass
-                page = context.new_page()
-                inject_stealth(page)
-                _crashed = _attach_crash_handler(page)
-                try:
-                    page.goto("https://www.linkedin.com/jobs/",
-                              wait_until="domcontentloaded", timeout=30_000)
-                except Exception:
-                    pass
+            # Dismiss cookie consent banner with a simple direct selector click.
+            # Do NOT use page.evaluate(innerText) here — it forces browser layout
+            # which deadlocks after window.stop() and hangs the bot indefinitely.
+            try:
+                btn = page.locator(
+                    ".artdeco-modal button:has-text('Accept'), "
+                    "[data-test-modal] button:has-text('Accept'), "
+                    "button[action-type='ACCEPT']"
+                ).first
+                if btn.is_visible(timeout=1500):
+                    btn.click(timeout=1500)
+                    print("  [LINKEDIN] ✅ LinkedIn privacy consent banner dismissed")
+            except Exception:
+                pass  # banner not present or already dismissed — that's fine
 
             # Screenshot after login so user sees the starting state
             _push_screenshot(task_input, page)
@@ -811,7 +795,16 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     page.evaluate("window.stop()")
                 except Exception:
                     pass
-                _dismiss_cookie_banner(page, task_input)
+                try:
+                    btn = page.locator(
+                        ".artdeco-modal button:has-text('Accept'), "
+                        "[data-test-modal] button:has-text('Accept'), "
+                        "button[action-type='ACCEPT']"
+                    ).first
+                    if btn.is_visible(timeout=1500):
+                        btn.click(timeout=1500)
+                except Exception:
+                    pass
                 human_sleep(2, 3)
                 print("  [LINKEDIN] ♻️  Page recycled after search — memory flushed before apply loop")
             except Exception as _pre:
@@ -886,7 +879,16 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                                 page.evaluate("window.stop()")
                             except Exception:
                                 pass
-                            _dismiss_cookie_banner(page, task_input)
+                            try:
+                                btn = page.locator(
+                                    ".artdeco-modal button:has-text('Accept'), "
+                                    "[data-test-modal] button:has-text('Accept'), "
+                                    "button[action-type='ACCEPT']"
+                                ).first
+                                if btn.is_visible(timeout=1500):
+                                    btn.click(timeout=1500)
+                            except Exception:
+                                pass
                             human_sleep(3, 5)
                         except Exception:
                             pass
@@ -981,7 +983,16 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                             page.evaluate("window.stop()")
                         except Exception:
                             pass
-                        _dismiss_cookie_banner(page, task_input)
+                        try:
+                            btn = page.locator(
+                                ".artdeco-modal button:has-text('Accept'), "
+                                "[data-test-modal] button:has-text('Accept'), "
+                                "button[action-type='ACCEPT']"
+                            ).first
+                            if btn.is_visible(timeout=1500):
+                                btn.click(timeout=1500)
+                        except Exception:
+                            pass
                         human_sleep(2, 3)
                         print(f"  [LINKEDIN] ♻️  Page recycled after {idx + 1} jobs (memory cleanup)")
                     except Exception as _rec_err:
