@@ -632,10 +632,25 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             env=_launch_env,
             **stealth_context_options(_user_id),
         )
+        # ── Block image downloads at context level to prevent OOM (Error code 9) ──
+        # Aborts only resource_type=="image" requests (profile photos, company logos,
+        # banner images). All JS/CSS/XHR/fetch requests continue normally so
+        # LinkedIn's SPA renders job cards correctly. Applied to the context so it
+        # persists across every page recycle without needing to re-register.
+        def _abort_images(route):
+            try:
+                if route.request.resource_type == "image":
+                    route.abort()
+                else:
+                    route.continue_()
+            except Exception:
+                pass  # page may have been closed — ignore
+        context.route("**/*", _abort_images)
+
         page    = context.new_page()
         inject_stealth(page)
         _crashed = _attach_crash_handler(page)
-        print("  [LINKEDIN] Browser launched ✅")
+        print("  [LINKEDIN] Browser launched ✅ (images blocked to prevent OOM)")
 
         try:
             # ── STEP 1: Login ──────────────────────────────────
