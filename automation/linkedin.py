@@ -672,6 +672,25 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             # Screenshot after login so user sees the starting state
             _push_screenshot(task_input, page)
 
+            # ── Recycle page after login before search ─────────────────────────
+            # The login / session-check phase loads /feed/ which fills the renderer
+            # with LinkedIn's full SPA.  Navigating the same renderer to
+            # /jobs/search/ on top of that heap causes the page 1 OOM crash.
+            # Close the page now to flush all feed DOM; the new page starts fresh.
+            try:
+                page.close()
+            except Exception:
+                pass
+            page = context.new_page()
+            inject_stealth(page)
+            _crashed = _attach_crash_handler(page)
+            try:
+                page.goto("about:blank", wait_until="commit", timeout=10_000)
+            except Exception:
+                pass
+            print("  [LINKEDIN] 🔄 Feed page recycled — fresh renderer ready for job search")
+            _log(task_input, "🔄 Feed page recycled — fresh renderer ready for job search", "info", "system")
+
             # ── Notify user that cloud run has started (with VNC link) ──
             try:
                 from automation.notifier import _tg_send, _cfg

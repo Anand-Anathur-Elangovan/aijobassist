@@ -640,7 +640,7 @@ def stealth_launch_args() -> list:
         "--renderer-process-limit=1",
         "--disable-logging",
         "--disable-hang-monitor",
-        "--js-flags=--max-old-space-size=768",
+        "--js-flags=--max-old-space-size=384",  # keep V8 heap small; forces aggressive GC on Railway
     ]
 
 
