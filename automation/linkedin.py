@@ -933,11 +933,19 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 success = _apply_to_job(page, job_url, task_input)
                 # Push screenshot after each application attempt (cloud mode)
                 _push_screenshot(task_input, page)
-                # Navigate to blank page to free renderer memory (prevents OOM crashes on Railway)
+                # ── Recycle renderer after every job ──────────────────────────
+                # goto("about:blank") only clears the URL — the renderer process
+                # and its entire JS heap stay alive.  close() + new_page() fully
+                # destroys the renderer and spawns a fresh one, so each job
+                # starts with ~0 residual memory from the previous job/modal.
+                # context.route(_abort_heavy) automatically covers the new page.
                 try:
-                    page.goto("about:blank", timeout=5000)
+                    page.close()
                 except Exception:
                     pass
+                page = context.new_page()
+                inject_stealth(page)
+                _crashed = _attach_crash_handler(page)
                 # Record to job history DB (won't revisit for 30 days)
                 if _li_user_id:
                     try:
