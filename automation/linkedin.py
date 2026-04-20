@@ -882,6 +882,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         try:
                             page.goto("https://www.linkedin.com/feed/",
                                       wait_until="domcontentloaded", timeout=30_000)
+                            try:
+                                page.evaluate("window.stop()")
+                            except Exception:
+                                pass
+                            _dismiss_cookie_banner(page, task_input)
                             human_sleep(3, 5)
                         except Exception:
                             pass
@@ -972,6 +977,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         # Warm up session context so LinkedIn doesn't flag the new renderer
                         page.goto("https://www.linkedin.com/feed/",
                                   wait_until="domcontentloaded", timeout=30_000)
+                        try:
+                            page.evaluate("window.stop()")
+                        except Exception:
+                            pass
+                        _dismiss_cookie_banner(page, task_input)
                         human_sleep(2, 3)
                         print(f"  [LINKEDIN] ♻️  Page recycled after {idx + 1} jobs (memory cleanup)")
                     except Exception as _rec_err:
@@ -1237,6 +1247,12 @@ def _login(page: Page, task_input: dict = None) -> bool:
     try:
         try:
             page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60_000)
+        except Exception:
+            pass
+        # Stop background resource loading immediately to prevent OOM before
+        # the caller (apply_linkedin_jobs) gets a chance to call window.stop().
+        try:
+            page.evaluate("window.stop()")
         except Exception:
             pass
         human_sleep(2, 3)
@@ -3496,6 +3512,10 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
             try:
                 page.goto("https://www.linkedin.com/feed/",
                           wait_until="domcontentloaded", timeout=30_000)
+                try:
+                    page.evaluate("window.stop()")
+                except Exception:
+                    pass
             except Exception:
                 pass
             human_sleep(6, 12)
@@ -3552,13 +3572,42 @@ def _dismiss_cookie_banner(pg, task_input: dict) -> None:
     """
     try:
         accepted = pg.evaluate("""() => {
+            // ── Pass 1: LinkedIn-specific consent modal ─────────────────────
+            // Scopes the search to a dialog/modal that contains privacy/cookie text.
+            // This avoids accidentally clicking connection-request 'Accept' buttons
+            // or other 'Accept' buttons that appear on /feed/.
+            const modalCandidates = Array.from(document.querySelectorAll(
+                '[data-test-modal],[role="dialog"],.artdeco-modal,.contextual-sign-in-modal,'
+                + '[class*="modal"],[class*="overlay"],[class*="cookie"],[class*="consent"],'
+                + '[id*="cookie"],[id*="consent"]'
+            ));
+            for (const container of modalCandidates) {
+                const ctxt = (container.innerText || '').toLowerCase();
+                if (!(ctxt.includes('privacy') || ctxt.includes('cookie') ||
+                      ctxt.includes('consent') || ctxt.includes('gdpr'))) continue;
+                const acceptKws = ['accept all','accept cookies','allow all','agree',
+                                   'i agree','accept','allow cookies','got it'];
+                const rejectKws = ['reject','decline','deny','no thanks','refuse',
+                                   'necessary only','essential only'];
+                for (const btn of container.querySelectorAll('button,[role="button"]')) {
+                    const txt = (btn.innerText||btn.textContent||btn.getAttribute('aria-label')||'')
+                                 .trim().toLowerCase();
+                    if (!txt) continue;
+                    if (rejectKws.some(r => txt.includes(r))) continue;
+                    if (acceptKws.some(k => txt.includes(k))) {
+                        btn.click();
+                        return true;
+                    }
+                }
+            }
+            // ── Pass 2: Broad sweep for non-LinkedIn ATS cookie banners ─────
+            // Only runs if no modal dialog found above.
             const keywords = ['accept all','accept cookies','allow all','agree','i agree',
-                              'accept','allow cookies','got it','ok','okay','continue',
-                              'akzeptieren','accepter','aceptar','accetta'];
+                              'allow cookies','got it','okay'];
             const reject   = ['reject','decline','deny','no thanks','refuse','necessary only',
                                'essential only','manage','settings','preferences'];
             for (const el of document.querySelectorAll(
-                'button,[role="button"],a[href="#"],[class*="cookie"],[class*="consent"],[id*="cookie"],[id*="consent"]'
+                '[class*="cookie"],[class*="consent"],[id*="cookie"],[id*="consent"]'
             )) {
                 const txt = (el.innerText||el.textContent||el.getAttribute('aria-label')||'').trim().toLowerCase();
                 if (!txt) continue;
