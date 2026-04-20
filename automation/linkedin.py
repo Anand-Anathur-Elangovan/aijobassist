@@ -632,25 +632,27 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             env=_launch_env,
             **stealth_context_options(_user_id),
         )
-        # ── Block image downloads at context level to prevent OOM (Error code 9) ──
-        # Aborts only resource_type=="image" requests (profile photos, company logos,
-        # banner images). All JS/CSS/XHR/fetch requests continue normally so
-        # LinkedIn's SPA renders job cards correctly. Applied to the context so it
-        # persists across every page recycle without needing to re-register.
-        def _abort_images(route):
+        # ── Block heavy non-essential resources to prevent OOM (Error code 9) ──
+        # Aborts image / font / media requests. These are decorative and not
+        # needed for form-filling. JS, CSS, XHR, fetch continue normally so
+        # LinkedIn's SPA and Easy Apply modal render correctly.
+        # Applied to the context so it covers all pages (search + apply + recycled).
+        _OOM_BLOCK_TYPES = {"image", "font", "media"}
+
+        def _abort_heavy(route):
             try:
-                if route.request.resource_type == "image":
+                if route.request.resource_type in _OOM_BLOCK_TYPES:
                     route.abort()
                 else:
                     route.continue_()
             except Exception:
                 pass  # page may have been closed — ignore
-        context.route("**/*", _abort_images)
+        context.route("**/*", _abort_heavy)
 
         page    = context.new_page()
         inject_stealth(page)
         _crashed = _attach_crash_handler(page)
-        print("  [LINKEDIN] Browser launched ✅ (images blocked to prevent OOM)")
+        print("  [LINKEDIN] Browser launched ✅ (images/fonts/media blocked to prevent OOM)")
 
         try:
             # ── STEP 1: Login ──────────────────────────────────
