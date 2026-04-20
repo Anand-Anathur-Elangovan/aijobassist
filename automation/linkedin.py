@@ -645,27 +645,6 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 _log(task_input, "Login failed or cancelled", "error")
                 return {"applied_count": 0, "skipped_count": 0, "message": "Login failed or cancelled"}
 
-            # ── Halt /feed/ background loading to prevent OOM crash ─────────────
-            try:
-                page.evaluate("window.stop()")
-            except Exception:
-                pass
-
-            # Dismiss cookie consent banner with a simple direct selector click.
-            # Do NOT use page.evaluate(innerText) here — it forces browser layout
-            # which deadlocks after window.stop() and hangs the bot indefinitely.
-            try:
-                btn = page.locator(
-                    ".artdeco-modal button:has-text('Accept'), "
-                    "[data-test-modal] button:has-text('Accept'), "
-                    "button[action-type='ACCEPT']"
-                ).first
-                if btn.is_visible(timeout=1500):
-                    btn.click(timeout=1500)
-                    print("  [LINKEDIN] ✅ LinkedIn privacy consent banner dismissed")
-            except Exception:
-                pass  # banner not present or already dismissed — that's fine
-
             # Screenshot after login so user sees the starting state
             _push_screenshot(task_input, page)
 
@@ -726,32 +705,6 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             # ── Direct URL mode: skip keyword search if specific_urls provided ──
             _li_specific_urls_mode = bool(task_input.get("specific_urls", []))
 
-            # ── Block LinkedIn media CDN during SEARCH to save memory ────────
-            # We use URL-pattern routes rather than "**/*" + resource_type check.
-            # With "**/*" every request triggers a Python callback → IPC roundtrip
-            # for each of LinkedIn's 100+ resources per page, overwhelming the
-            # sync Playwright bridge and causing the renderer to crash/stall.
-            # URL-pattern routes are matched inside the Playwright process: only
-            # requests whose URL matches come to Python; all others pass through
-            # with zero Python overhead.
-            _SEARCH_BLOCK_PATTERNS = [
-                "**://media.licdn.com/**",           # profile pics, logos, images
-                "**://static.licdn.com/aero-v1/sc/h/**",  # sprites/icons
-            ]
-
-            def _abort_route(rt):
-                try:
-                    rt.abort()
-                except Exception:
-                    pass
-
-            try:
-                for _bp in _SEARCH_BLOCK_PATTERNS:
-                    page.route(_bp, _abort_route)
-                print("  [LINKEDIN] 🔇 Resource blocking active (LinkedIn CDN patterns) during search")
-            except Exception as _rte:
-                print(f"  [LINKEDIN] Route block setup failed (non-fatal): {_rte}")
-
             if favorite_companies and not _li_specific_urls_mode:
                 _log(task_input, f"🏢 Targeting {len(favorite_companies)} favourite companies: {', '.join(favorite_companies)}", "info", "search", {"count": len(favorite_companies)})
                 for company in favorite_companies:
@@ -774,41 +727,6 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         _log(task_input, f"Found {len(general_jobs)} Easy Apply jobs for '{_kw}'{_loc_tag}", "success", "search", {"job_title": _kw, "count": len(general_jobs)})
                         for url in general_jobs:
                             all_jobs.append((url, ""))
-
-            # ── Unblock resources and recycle page before apply phase ──────────
-            # Remove the route interception so apply pages load fully (images matter
-            # for form-fill UX), then recycle the page to flush search memory.
-            try:
-                page.unroute_all()
-                print("  [LINKEDIN] ✅ Resource blocking removed for apply phase")
-            except Exception:
-                pass
-            try:
-                page.close()
-                page = context.new_page()
-                inject_stealth(page)
-                _crashed = _attach_crash_handler(page)
-                page.goto("https://www.linkedin.com/feed/",
-                          wait_until="domcontentloaded", timeout=30_000)
-                # Stop /feed/ from loading heavy content on the fresh page
-                try:
-                    page.evaluate("window.stop()")
-                except Exception:
-                    pass
-                try:
-                    btn = page.locator(
-                        ".artdeco-modal button:has-text('Accept'), "
-                        "[data-test-modal] button:has-text('Accept'), "
-                        "button[action-type='ACCEPT']"
-                    ).first
-                    if btn.is_visible(timeout=1500):
-                        btn.click(timeout=1500)
-                except Exception:
-                    pass
-                human_sleep(2, 3)
-                print("  [LINKEDIN] ♻️  Page recycled after search — memory flushed before apply loop")
-            except Exception as _pre:
-                print(f"  [LINKEDIN] Pre-apply page recycle failed (non-fatal): {_pre}")
 
             # Deduplicate URLs while preserving company order
             seen_urls: set[str] = set()
@@ -875,20 +793,6 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                         try:
                             page.goto("https://www.linkedin.com/feed/",
                                       wait_until="domcontentloaded", timeout=30_000)
-                            try:
-                                page.evaluate("window.stop()")
-                            except Exception:
-                                pass
-                            try:
-                                btn = page.locator(
-                                    ".artdeco-modal button:has-text('Accept'), "
-                                    "[data-test-modal] button:has-text('Accept'), "
-                                    "button[action-type='ACCEPT']"
-                                ).first
-                                if btn.is_visible(timeout=1500):
-                                    btn.click(timeout=1500)
-                            except Exception:
-                                pass
                             human_sleep(3, 5)
                         except Exception:
                             pass
@@ -963,40 +867,6 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                     page.goto("about:blank", timeout=5000)
                 except Exception:
                     pass
-                # ── Recycle the page every 3 jobs to flush renderer memory ──
-                # Chrome's renderer accumulates JS heap / DOM nodes across navigations
-                # even after going to about:blank.  Closing and reopening the page
-                # fully resets the renderer process and prevents OOM on Railway.
-                if (idx + 1) % 3 == 0:
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                    try:
-                        page = context.new_page()
-                        inject_stealth(page)
-                        _crashed = _attach_crash_handler(page)
-                        # Warm up session context so LinkedIn doesn't flag the new renderer
-                        page.goto("https://www.linkedin.com/feed/",
-                                  wait_until="domcontentloaded", timeout=30_000)
-                        try:
-                            page.evaluate("window.stop()")
-                        except Exception:
-                            pass
-                        try:
-                            btn = page.locator(
-                                ".artdeco-modal button:has-text('Accept'), "
-                                "[data-test-modal] button:has-text('Accept'), "
-                                "button[action-type='ACCEPT']"
-                            ).first
-                            if btn.is_visible(timeout=1500):
-                                btn.click(timeout=1500)
-                        except Exception:
-                            pass
-                        human_sleep(2, 3)
-                        print(f"  [LINKEDIN] ♻️  Page recycled after {idx + 1} jobs (memory cleanup)")
-                    except Exception as _rec_err:
-                        print(f"  [LINKEDIN] Page recycle failed (non-fatal): {_rec_err}")
                 # Record to job history DB (won't revisit for 30 days)
                 if _li_user_id:
                     try:
@@ -1258,12 +1128,6 @@ def _login(page: Page, task_input: dict = None) -> bool:
     try:
         try:
             page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60_000)
-        except Exception:
-            pass
-        # Stop background resource loading immediately to prevent OOM before
-        # the caller (apply_linkedin_jobs) gets a chance to call window.stop().
-        try:
-            page.evaluate("window.stop()")
         except Exception:
             pass
         human_sleep(2, 3)
@@ -3523,10 +3387,6 @@ def _search_jobs(page: Page, keywords: str, location: str, task_input: dict = No
             try:
                 page.goto("https://www.linkedin.com/feed/",
                           wait_until="domcontentloaded", timeout=30_000)
-                try:
-                    page.evaluate("window.stop()")
-                except Exception:
-                    pass
             except Exception:
                 pass
             human_sleep(6, 12)
