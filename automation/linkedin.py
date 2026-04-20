@@ -645,6 +645,43 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 _log(task_input, "Login failed or cancelled", "error")
                 return {"applied_count": 0, "skipped_count": 0, "message": "Login failed or cancelled"}
 
+            # ── Immediately halt /feed/ background loading to prevent OOM crash ──
+            # _login() uses wait_until="domcontentloaded" which returns as soon as
+            # the HTML is parsed — but the browser KEEPS loading images, videos and
+            # ads in the background.  window.stop() cancels all pending resource
+            # fetches instantly, cutting memory pressure before it builds up.
+            try:
+                page.evaluate("window.stop()")
+            except Exception:
+                pass
+
+            # Dismiss the "LinkedIn respects your privacy" cookie consent banner
+            # immediately — it appears on /feed/ and adds extra memory pressure.
+            _dismiss_cookie_banner(page, task_input)
+
+            # Give the async crash event up to 2 s to propagate if the feed page
+            # was already dying from the resource load before window.stop() fired.
+            page.wait_for_timeout(2000)
+
+            # If the page already crashed during the login/feed load, recover now
+            # with a fresh lightweight page rather than trying to use the dead page.
+            if _crashed[0]:
+                _log(task_input,
+                     "Page crashed during login flow — recovering with fresh page before search",
+                     "warning", "system")
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                page = context.new_page()
+                inject_stealth(page)
+                _crashed = _attach_crash_handler(page)
+                try:
+                    page.goto("https://www.linkedin.com/jobs/",
+                              wait_until="domcontentloaded", timeout=30_000)
+                except Exception:
+                    pass
+
             # Screenshot after login so user sees the starting state
             _push_screenshot(task_input, page)
 
@@ -705,30 +742,29 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
             # ── Direct URL mode: skip keyword search if specific_urls provided ──
             _li_specific_urls_mode = bool(task_input.get("specific_urls", []))
 
-            # ── Block images / media / fonts during SEARCH to save memory ────
-            # LinkedIn job search pages are image-heavy. Blocking these resource
-            # types during the collection phase prevents the renderer from OOM-crashing
-            # before we even start applying. We unblock after search is done.
-            def _abort_media(route):
+            # ── Block LinkedIn media CDN during SEARCH to save memory ────────
+            # We use URL-pattern routes rather than "**/*" + resource_type check.
+            # With "**/*" every request triggers a Python callback → IPC roundtrip
+            # for each of LinkedIn's 100+ resources per page, overwhelming the
+            # sync Playwright bridge and causing the renderer to crash/stall.
+            # URL-pattern routes are matched inside the Playwright process: only
+            # requests whose URL matches come to Python; all others pass through
+            # with zero Python overhead.
+            _SEARCH_BLOCK_PATTERNS = [
+                "**://media.licdn.com/**",           # profile pics, logos, images
+                "**://static.licdn.com/aero-v1/sc/h/**",  # sprites/icons
+            ]
+
+            def _abort_route(rt):
                 try:
-                    route.abort()
+                    rt.abort()
                 except Exception:
                     pass
 
-            _SEARCH_BLOCK_TYPES = {"image", "media", "font"}
-
-            def _block_heavy_resources(rt):
-                if rt.request.resource_type in _SEARCH_BLOCK_TYPES:
-                    _abort_media(rt)
-                else:
-                    try:
-                        rt.continue_()
-                    except Exception:
-                        pass
-
             try:
-                page.route("**/*", _block_heavy_resources)
-                print("  [LINKEDIN] 🔇 Resource blocking active (images/media/fonts) during search")
+                for _bp in _SEARCH_BLOCK_PATTERNS:
+                    page.route(_bp, _abort_route)
+                print("  [LINKEDIN] 🔇 Resource blocking active (LinkedIn CDN patterns) during search")
             except Exception as _rte:
                 print(f"  [LINKEDIN] Route block setup failed (non-fatal): {_rte}")
 
@@ -770,6 +806,12 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 _crashed = _attach_crash_handler(page)
                 page.goto("https://www.linkedin.com/feed/",
                           wait_until="domcontentloaded", timeout=30_000)
+                # Stop /feed/ from loading heavy content on the fresh page
+                try:
+                    page.evaluate("window.stop()")
+                except Exception:
+                    pass
+                _dismiss_cookie_banner(page, task_input)
                 human_sleep(2, 3)
                 print("  [LINKEDIN] ♻️  Page recycled after search — memory flushed before apply loop")
             except Exception as _pre:
