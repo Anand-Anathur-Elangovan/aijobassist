@@ -641,6 +641,8 @@ def stealth_launch_args() -> list:
         "--disable-logging",
         "--disable-hang-monitor",
         "--js-flags=--max-old-space-size=768",
+        # ── Disable images to prevent OOM (Error code 9) on Railway containers ──
+        "--blink-settings=imagesEnabled=false",
     ]
 
 

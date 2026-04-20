@@ -778,7 +778,11 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
 
                 # ── Feature: Browser crash guard ──────────────────
                 if _crashed[0]:
-                    print("  [LINKEDIN] ⚠️  Crash detected — attempting page recovery…")
+                    _log(task_input,
+                         "⚠️ Chromium OOM crash (Error code 9) detected — renderer ran out of memory. "
+                         "Attempting page recovery and resuming from next job.",
+                         "warning", "system", {"url": job_url})
+                    print("  [LINKEDIN] ⚠️  Crash detected (OOM/Error code 9) — attempting page recovery…")
                     try:
                         # Close the crashed page FIRST to release renderer memory
                         try:
