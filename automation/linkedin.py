@@ -646,7 +646,14 @@ def apply_linkedin_jobs(task_input: dict = None) -> dict:
                 else:
                     route.continue_()
             except Exception:
-                pass  # page may have been closed — ignore
+                # CRITICAL: always resolve the route even on exception.
+                # An unhandled route leaves the browser request permanently
+                # pending — causing the page to spin forever (infinite load).
+                # Abort as fallback so the request resolves immediately.
+                try:
+                    route.abort()
+                except Exception:
+                    pass
         context.route("**/*", _abort_heavy)
 
         page    = context.new_page()
