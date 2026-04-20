@@ -1462,7 +1462,6 @@ def _login(page: Page, task_input: dict = None) -> bool:
         print("  [LINKEDIN] ============================================")
 
     # ── Wait for successful navigation away from login/checkpoint ────────────
-    # Poll every 2 s for up to 3 minutes.
     # Real verification challenges (OTP, CAPTCHA, push-notification) have URLs
     # like /checkpoint/challenge/, /checkpoint/verify/, /checkpoint/wam/.
     # "/checkpoint/lg/login" is just LinkedIn's login-error page — NOT a challenge.
@@ -1472,79 +1471,103 @@ def _login(page: Page, task_input: dict = None) -> bool:
         "/checkpoint/wam",
         "/challenge/",
     )
-    _deadline = time.time() + 600
-    _verif_triggered = False
-    _vnc_hint_logged = False
-    while time.time() < _deadline:
-        try:
-            _url = page.url or ""
-        except Exception:
-            time.sleep(2)
-            continue
-        # ── Success: URL left all login/checkpoint pages ─────────────────────
-        _still_on_login = (
-            "linkedin.com/login" in _url or
-            "linkedin.com/checkpoint" in _url or
-            "/uas/login" in _url
+
+    # Fast-path: already logged in (credentials were pre-filled and accepted)
+    try:
+        _quick_url = page.url or ""
+        _still_on_login_quick = (
+            "linkedin.com/login" in _quick_url or
+            "linkedin.com/checkpoint" in _quick_url or
+            "/uas/login" in _quick_url
         )
-        if _still_on_login and not _verif_triggered and not _vnc_hint_logged:
-            _vnc_hint_logged = True
-            _log(task_input,
-                 "⏳ Waiting for LinkedIn login… If a CAPTCHA or verification appears, "
-                 "open the VNC screen to complete it manually.",
-                 "warning", "system")
-            # ── Telegram alert: notify user to complete login in VNC ──────────
-            try:
-                from automation.notifier import _tg_send, _cfg
-                _tg_token = _cfg(task_input, "telegram_bot_token", "TELEGRAM_BOT_TOKEN")
-                _tg_chat  = _cfg(task_input, "telegram_chat_id",   "TELEGRAM_CHAT_ID")
-                if _tg_token and _tg_chat:
-                    _app_url = (
-                        os.environ.get("RAILWAY_STATIC_URL", "")
-                        or os.environ.get("NEXT_PUBLIC_APP_URL", "")
-                    ).rstrip("/")
-                    _sid = task_input.get("session_id", "")
-                    # Session ID must be inside the path param so noVNC passes it
-                    # to the WebSocket: /vnc-ws?session=ID → routes to correct x11vnc port
-                    if _sid:
-                        _vnc_path = f"../vnc-ws%3Fsession%3D{_sid}"
-                    else:
-                        _vnc_path = "../vnc-ws"
-                    _vnc_url = f"{_app_url}/novnc/?path={_vnc_path}&autoconnect=1&resize=scale" if _app_url else ""
-                    _login_msg = (
-                        "🔐 <b>LinkedIn login required</b>\n\n"
-                        "The cloud agent is waiting for you to log in to LinkedIn.\n"
-                        "You have <b>10 minutes</b> to complete the login.\n"
-                    )
-                    if _vnc_url:
-                        _login_msg += f"\n👁 <b>Open VNC to log in:</b>\n<a href=\"{_vnc_url}\">{_vnc_url}</a>\n"
-                    _tg_send(_tg_token, _tg_chat, _login_msg)
-            except Exception as _tge:
-                print(f"  [LINKEDIN] Login Telegram alert failed (non-fatal): {_tge}")
-        if not _still_on_login:
-            print(f"  [LINKEDIN] Login confirmed ✅  URL: {_url}")
+        if not _still_on_login_quick:
+            print(f"  [LINKEDIN] Login confirmed ✅  URL: {_quick_url}")
             _save_session()
             return True
-        # ── Real verification challenge (OTP / CAPTCHA / push notification) ──
-        # Only trigger once — don't re-enter _handle_verification every loop.
-        if not _verif_triggered and any(m in _url for m in _REAL_CHALLENGE_MARKERS):
-            _verif_triggered = True
-            if _handle_verification(page, task_input):
-                _save_session()
-                return True
-            else:
-                _log(task_input,
-                     "⚠️ Login failed — verification not completed within 10 minutes. "
-                     "Please restart the job agent and complete the LinkedIn security check promptly.",
-                     "error", "system")
-                return False
-        # ── Login error page (e.g. /checkpoint/lg/login?errorKey=...) ────────
-        # Just a LinkedIn error — keep waiting; the user can retry in the browser.
-        time.sleep(2)
-    # Timed out waiting for login
-    _push_screenshot(task_input, page)
-    print(f"  [LINKEDIN] Login timed out. Final URL: {page.url}")
-    return False
+    except Exception:
+        pass
+
+    # ── Build the VNC URL for the Telegram message ────────────────────────────
+    _app_url = (
+        os.environ.get("RAILWAY_STATIC_URL", "")
+        or os.environ.get("NEXT_PUBLIC_APP_URL", "")
+    ).rstrip("/")
+    _sid = task_input.get("session_id", "")
+    # Session ID must be inside the path param so noVNC passes it
+    # to the WebSocket: /vnc-ws?session=ID → routes to correct x11vnc port
+    _vnc_path = f"../vnc-ws%3Fsession%3D{_sid}" if _sid else "../vnc-ws"
+    _vnc_url  = f"{_app_url}/novnc/?path={_vnc_path}&autoconnect=1&resize=scale" if _app_url else ""
+
+    _log(task_input,
+         "⏳ Waiting for LinkedIn login… Open the VNC screen, log in, then reply done.",
+         "warning", "system")
+
+    _login_msg = (
+        "🔐 <b>LinkedIn login required</b>\n\n"
+        "The cloud agent is waiting for you to log in to LinkedIn.\n"
+        "You have <b>10 minutes</b> to complete the login.\n"
+    )
+    if _vnc_url:
+        _login_msg += f"\n👁 <b>Open VNC to log in:</b>\n<a href=\"{_vnc_url}\">{_vnc_url}</a>\n"
+    _login_msg += (
+        "\nOnce you have logged in, reply <b>done</b> to continue.\n"
+        "Or reply <b>stop</b> to stop all.\n"
+        "⏳ Waiting up to <b>10 minutes</b>."
+    )
+
+    # _wait_for_resolution polls both:
+    #   • URL-exit: auto-resolves as soon as the URL leaves the login/checkpoint pages
+    #   • Telegram: resolves when user replies "done" / "skip" / "stop"
+    # This ensures the "done" reply is always consumed here — not silently
+    # discarded and then missed by _handle_verification's fresh offset snapshot.
+    _login_result = _wait_for_resolution(
+        page, task_input, _login_msg, wait_minutes=10, check_url_exit=True
+    )
+
+    if _login_result == "stop":
+        return False
+
+    if _login_result == "timeout":
+        _push_screenshot(task_input, page)
+        print(f"  [LINKEDIN] Login timed out. Final URL: {page.url}")
+        return False
+
+    # _login_result == "resolved" (URL changed) or "skip" treated as best-effort continue
+    # Check whether a verification challenge is now showing
+    try:
+        _url_after_login = page.url or ""
+    except Exception:
+        _url_after_login = ""
+
+    if any(m in _url_after_login for m in _REAL_CHALLENGE_MARKERS):
+        # LinkedIn popped up a 2FA / CAPTCHA / push-notification challenge
+        # after the password was accepted.  Handle it now with a fresh wait.
+        if _handle_verification(page, task_input):
+            _save_session()
+            return True
+        else:
+            _log(task_input,
+                 "⚠️ Login failed — verification not completed within 10 minutes. "
+                 "Please restart the job agent and complete the LinkedIn security check promptly.",
+                 "error", "system")
+            return False
+
+    _still_on_login_final = (
+        "linkedin.com/login" in _url_after_login or
+        "linkedin.com/checkpoint" in _url_after_login or
+        "/uas/login" in _url_after_login
+    )
+    if _still_on_login_final:
+        _log(task_input,
+             "⚠️ Still on LinkedIn login page after wait — login may have failed. "
+             "Please restart and try again.",
+             "error", "system")
+        _push_screenshot(task_input, page)
+        return False
+
+    print(f"  [LINKEDIN] Login confirmed ✅  URL: {_url_after_login}")
+    _save_session()
+    return True
 
 
 
